@@ -8,8 +8,12 @@ consumers.
 
 ## Build
 
+The repository is two SwiftPM packages: the root package vends the embeddable
+logger libraries (`SimToolNetworkLogger`, `SimToolStateLogger`), and the `Tool/`
+package builds the `simtool` CLI. Build the CLI from `Tool/`:
+
 ```sh
-swift build
+swift build --package-path Tool
 ```
 
 ## Install
@@ -40,11 +44,15 @@ Runtime prerequisites:
 Source fallback for development:
 
 ```sh
-swift build
-swift run simtool doctor
+swift build --package-path Tool
+swift run --package-path Tool simtool doctor
 ```
 
 ## Basic Usage
+
+The `swift run simtool …` examples below run against the CLI package in `Tool/`.
+Either `cd Tool` first and use them verbatim, or keep them as `swift run
+--package-path Tool simtool …` from the repo root.
 
 ```sh
 swift run simtool devices --json

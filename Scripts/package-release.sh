@@ -37,9 +37,11 @@ NOTES_PATH="$(simtool_release_notes_path "$VERSION")"
 rm -rf "$RELEASE_DIR"
 mkdir -p "$STAGE_DIR/bin" "$UNPACK_DIR"
 
-swift build -c release --product simtool
+# The simtool CLI lives in the Tool/ subdirectory package (the repo root vends only
+# the embeddable logger libraries).
+swift build --package-path Tool -c release --product simtool
 
-cp ".build/release/simtool" "$STAGE_DIR/bin/simtool"
+cp "Tool/.build/release/simtool" "$STAGE_DIR/bin/simtool"
 chmod 755 "$STAGE_DIR/bin/simtool"
 if [[ -f README.md ]]; then
   cp README.md "$STAGE_DIR/README.md"

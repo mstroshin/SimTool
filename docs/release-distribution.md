@@ -115,8 +115,8 @@ brew uninstall simtool
 Source fallback:
 
 ```sh
-swift build
-swift run simtool doctor
+swift build --package-path Tool
+swift run --package-path Tool simtool doctor
 ```
 
 ## Validation
@@ -127,7 +127,8 @@ Before publishing a real release, run:
 openspec validate --changes --strict
 openspec validate --specs --strict
 swift test
-swift build -c release --product simtool
+swift test --package-path Tool
+swift build --package-path Tool -c release --product simtool
 Scripts/package-release.sh v0.0.0
 ```
 
