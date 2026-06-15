@@ -1,0 +1,39 @@
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# Xcode
+DerivedData/
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcuserstate
+
+# Tuist-generated artifacts (created when a host project resolves the local package)
+*.xcodeproj/
+Derived/
+
+# Claude Code local state
+.claude/scheduled_tasks.lock
+.superpowers/
+
+# macOS
+.DS_Store
+
+# Editor and local environment
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs and temporary outputs
+*.log
+tmp/
+temp/
+*.tmp
+
+# Local simulator capture artifacts
+simtool-screenshot-*.png
+
+# Local simtool project config
+.simtool.yml
