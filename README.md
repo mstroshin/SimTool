@@ -22,6 +22,7 @@ Recommended Homebrew install after the public tap is published:
 
 ```sh
 brew tap mstroshin/simtool
+brew trust mstroshin/simtool   # recent Homebrew requires trusting a third-party tap before install
 brew install simtool
 simtool doctor
 ```

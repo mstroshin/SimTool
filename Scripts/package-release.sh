@@ -66,6 +66,7 @@ Install with Homebrew after the tap formula is published:
 
 \`\`\`sh
 brew tap ${SIMTOOL_TAP_OWNER}/${SIMTOOL_TAP_REPO#homebrew-}
+brew trust ${SIMTOOL_TAP_OWNER}/${SIMTOOL_TAP_REPO#homebrew-}   # recent Homebrew requires trusting a third-party tap before install
 brew install ${SIMTOOL_FORMULA_NAME}
 simtool doctor
 \`\`\`

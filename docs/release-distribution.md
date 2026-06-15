@@ -95,6 +95,7 @@ The generated formula downloads the exact GitHub Release archive and verifies it
 
 ```sh
 brew tap mstroshin/simtool
+brew trust mstroshin/simtool   # recent Homebrew requires trusting a third-party tap before install
 brew install simtool
 simtool doctor
 ```
