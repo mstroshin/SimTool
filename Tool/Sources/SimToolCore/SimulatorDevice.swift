@@ -37,21 +37,30 @@ public enum SimulatorDeviceClient {
     }
 
     public static func resolve(_ value: String?) async throws -> SimulatorDevice {
-        let devices = try await listDevices()
+        try selectDevice(value, from: await listDevices())
+    }
+
+    /// Picks the device a `value` selects from `devices`. `value` is a UDID, a
+    /// (substring) name, the literal "booted", or nil/empty — the last two both
+    /// select the first booted+available device, so `simulator: booted` in the
+    /// config (and `--device booted`) targets whichever simulator is already
+    /// running. Pure and synchronous so it is unit-tested without simctl.
+    static func selectDevice(_ value: String?, from devices: [SimulatorDevice]) throws -> SimulatorDevice {
         let booted = devices.filter { $0.state == "Booted" && $0.isAvailable }
-        guard let value, !value.isEmpty else {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if trimmed.isEmpty || trimmed.caseInsensitiveCompare("booted") == .orderedSame {
             if let first = booted.first { return first }
-            throw SimToolError("No booted simulator found. Boot a simulator or pass --device <udid-or-name>.")
+            throw SimToolError("No booted simulator found. Boot a simulator, or set `simulator:` to a UDID or name (or pass --device <udid-or-name>).")
         }
 
-        if let byUDID = devices.first(where: { $0.udid.caseInsensitiveCompare(value) == .orderedSame }) {
+        if let byUDID = devices.first(where: { $0.udid.caseInsensitiveCompare(trimmed) == .orderedSame }) {
             return byUDID
         }
-        let matches = devices.filter { $0.name.localizedCaseInsensitiveContains(value) }
+        let matches = devices.filter { $0.name.localizedCaseInsensitiveContains(trimmed) }
         if matches.count == 1 { return matches[0] }
         if let bootedMatch = matches.first(where: { $0.state == "Booted" }) { return bootedMatch }
-        if matches.isEmpty { throw SimToolError("Unknown simulator: \(value)") }
-        throw SimToolError("Ambiguous simulator name '\(value)'. Use a UDID.")
+        if matches.isEmpty { throw SimToolError("Unknown simulator: \(trimmed)") }
+        throw SimToolError("Ambiguous simulator name '\(trimmed)'. Use a UDID.")
     }
 
     /// Ensures the given device is booted, booting it (and waiting for boot to

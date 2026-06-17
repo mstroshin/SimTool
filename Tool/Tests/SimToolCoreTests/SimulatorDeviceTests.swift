@@ -21,6 +21,37 @@ final class SimulatorDeviceTests: XCTestCase {
         XCTAssertEqual(devices[0].state, "Booted")
     }
 
+    func testSelectDeviceBootedKeywordPicksFirstBootedAvailable() throws {
+        let devices = [
+            SimulatorDevice(udid: "A", name: "iPhone 15", runtime: "iOS-18-0", state: "Shutdown", isAvailable: true),
+            SimulatorDevice(udid: "B", name: "iPhone 16", runtime: "iOS-18-0", state: "Booted", isAvailable: true),
+            SimulatorDevice(udid: "C", name: "iPhone 17", runtime: "iOS-18-0", state: "Booted", isAvailable: true),
+        ]
+        // The literal "booted" (any case) selects the first booted+available device.
+        XCTAssertEqual(try SimulatorDeviceClient.selectDevice("booted", from: devices).udid, "B")
+        XCTAssertEqual(try SimulatorDeviceClient.selectDevice("Booted", from: devices).udid, "B")
+        // nil and empty keep selecting the first booted (existing behavior).
+        XCTAssertEqual(try SimulatorDeviceClient.selectDevice(nil, from: devices).udid, "B")
+        XCTAssertEqual(try SimulatorDeviceClient.selectDevice("", from: devices).udid, "B")
+    }
+
+    func testSelectDeviceBootedKeywordThrowsWhenNoneBooted() {
+        let devices = [
+            SimulatorDevice(udid: "A", name: "iPhone 15", runtime: "iOS-18-0", state: "Shutdown", isAvailable: true),
+        ]
+        XCTAssertThrowsError(try SimulatorDeviceClient.selectDevice("booted", from: devices))
+    }
+
+    func testSelectDeviceMatchesByUDIDAndName() throws {
+        let devices = [
+            SimulatorDevice(udid: "AAA-111", name: "iPhone 15", runtime: "iOS-18-0", state: "Shutdown", isAvailable: true),
+            SimulatorDevice(udid: "BBB-222", name: "iPhone 16 Pro", runtime: "iOS-18-0", state: "Booted", isAvailable: true),
+        ]
+        XCTAssertEqual(try SimulatorDeviceClient.selectDevice("aaa-111", from: devices).udid, "AAA-111")
+        XCTAssertEqual(try SimulatorDeviceClient.selectDevice("16 Pro", from: devices).udid, "BBB-222")
+        XCTAssertThrowsError(try SimulatorDeviceClient.selectDevice("Pixel", from: devices))
+    }
+
     func testParseAccessibilityTreeNormalizesNodes() throws {
         let json = #"""
         [
