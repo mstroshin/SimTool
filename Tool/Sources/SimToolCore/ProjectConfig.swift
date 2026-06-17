@@ -146,6 +146,79 @@ public struct ProjectConfig: Codable, Equatable, Sendable {
     }
 }
 
+/// Scaffolds a starter `.simtool/config.yml`: detects the Xcode container and
+/// scheme where it can, and renders an annotated template the user finishes by
+/// filling in the `# TODO` fields.
+public enum ProjectConfigTemplate {
+    public struct Detected: Equatable, Sendable {
+        public var workspace: String?
+        public var project: String?
+        public var scheme: String?
+
+        public init(workspace: String? = nil, project: String? = nil, scheme: String? = nil) {
+            self.workspace = workspace
+            self.project = project
+            self.scheme = scheme
+        }
+    }
+
+    /// Detects a single top-level `.xcworkspace` (preferred) or `.xcodeproj` in
+    /// `directory`, plus a scheme from that container's shared schemes — the one
+    /// matching the container's name, or the only one present.
+    public static func detect(in directory: URL) -> Detected {
+        let entries = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+        let names = entries.map { $0.lastPathComponent }.sorted()
+        let workspace = names.first { $0.hasSuffix(".xcworkspace") }
+        let project = workspace == nil ? names.first { $0.hasSuffix(".xcodeproj") } : nil
+
+        var scheme: String?
+        if let container = workspace ?? project {
+            let containerBase = (container as NSString).deletingPathExtension
+            let schemesDir = directory
+                .appendingPathComponent(container, isDirectory: true)
+                .appendingPathComponent("xcshareddata/xcschemes", isDirectory: true)
+            let schemeNames = ((try? FileManager.default.contentsOfDirectory(atPath: schemesDir.path)) ?? [])
+                .filter { $0.hasSuffix(".xcscheme") }
+                .map { ($0 as NSString).deletingPathExtension }
+                .sorted()
+            scheme = schemeNames.first { $0 == containerBase } ?? (schemeNames.count == 1 ? schemeNames.first : nil)
+        }
+        return Detected(workspace: workspace, project: project, scheme: scheme)
+    }
+
+    public static func render(_ detected: Detected) -> String {
+        let sourceLine: String
+        if let workspace = detected.workspace {
+            sourceLine = "  workspace: \(workspace)"
+        } else if let project = detected.project {
+            sourceLine = "  project: \(project)"
+        } else {
+            sourceLine = "  workspace: MyApp.xcworkspace    # or `project: MyApp.xcodeproj` (exactly one)"
+        }
+        let scheme = detected.scheme ?? "MyApp"
+        let schemeComment = detected.scheme == nil ? "    # TODO: the app scheme to build" : ""
+
+        return """
+        # .simtool/config.yml — local, machine-specific SimTool config (this whole
+        # directory is gitignored). See https://github.com/mstroshin/SimTool#readme.
+
+        simulator: booted                 # UDID, name, or `booted` for the first booted simulator
+        bundleId: com.example.app         # TODO: the launched app's bundle identifier
+
+        build:
+        \(sourceLine)
+          scheme: \(scheme)\(schemeComment)
+          configuration: Debug            # Debug | Beta | Release
+          # derivedDataPath: ./DerivedData  # optional; unset → SimTool-managed build cache
+
+        # deeplinks:                      # optional; open by name with `simtool open <name>`
+        #   - name: Home
+        #     url: myapp://home
+
+        """
+    }
+}
+
 public enum ProjectConfigLoader {
     /// Project-relative location of the config file, for error messages.
     public static let displayPath = "\(SimToolDirectory.directoryName)/\(SimToolDirectory.configFileName)"

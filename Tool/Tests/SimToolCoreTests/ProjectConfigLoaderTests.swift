@@ -1,5 +1,6 @@
 import Foundation
 import XCTest
+import Yams
 @testable import SimToolCore
 
 final class ProjectConfigLoaderTests: XCTestCase {
@@ -262,6 +263,58 @@ final class ProjectConfigLoaderTests: XCTestCase {
                 withIntermediateDirectories: true
             )
         }
+    }
+
+    func testTemplateRenderFillsDetectedFieldsAndParsesBack() throws {
+        let detected = ProjectConfigTemplate.Detected(workspace: "MyApp.xcworkspace", project: nil, scheme: "MyApp")
+        let yaml = ProjectConfigTemplate.render(detected)
+
+        XCTAssertTrue(yaml.contains("simulator: booted"), yaml)
+        XCTAssertTrue(yaml.contains("workspace: MyApp.xcworkspace"), yaml)
+        XCTAssertTrue(yaml.contains("scheme: MyApp"), yaml)
+
+        // The rendered starter config is structurally valid: it decodes and
+        // passes loader validation (placeholders are non-empty).
+        let raw = try YAMLDecoder().decode(RawProjectConfig.self, from: yaml)
+        XCTAssertEqual(raw.simulator?.trimmingCharacters(in: .whitespaces), "booted")
+        XCTAssertEqual(raw.build?.scheme, "MyApp")
+        XCTAssertEqual(raw.build?.workspace, "MyApp.xcworkspace")
+        XCTAssertNil(raw.build?.project)
+    }
+
+    func testTemplateRenderUsesPlaceholdersWhenNothingDetected() throws {
+        let yaml = ProjectConfigTemplate.render(ProjectConfigTemplate.Detected())
+        // Still valid YAML that decodes with a scheme placeholder present.
+        let raw = try YAMLDecoder().decode(RawProjectConfig.self, from: yaml)
+        XCTAssertEqual(raw.simulator?.trimmingCharacters(in: .whitespaces), "booted")
+        XCTAssertNotNil(raw.build?.scheme)
+        XCTAssertFalse((raw.build?.scheme ?? "").isEmpty)
+    }
+
+    func testTemplateDetectPrefersWorkspaceOverProjectAndFindsSingleScheme() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        for fixture in ["MyApp.xcworkspace", "MyApp.xcodeproj"] {
+            try FileManager.default.createDirectory(at: root.appendingPathComponent(fixture, isDirectory: true), withIntermediateDirectories: true)
+        }
+        let schemes = root.appendingPathComponent("MyApp.xcworkspace/xcshareddata/xcschemes", isDirectory: true)
+        try FileManager.default.createDirectory(at: schemes, withIntermediateDirectories: true)
+        try Data("<Scheme/>".utf8).write(to: schemes.appendingPathComponent("MyApp.xcscheme"))
+
+        let detected = ProjectConfigTemplate.detect(in: root)
+        XCTAssertEqual(detected.workspace, "MyApp.xcworkspace")
+        XCTAssertNil(detected.project)
+        XCTAssertEqual(detected.scheme, "MyApp")
+    }
+
+    func testTemplateDetectFallsBackToProjectWhenNoWorkspace() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("MyApp.xcodeproj", isDirectory: true), withIntermediateDirectories: true)
+
+        let detected = ProjectConfigTemplate.detect(in: root)
+        XCTAssertNil(detected.workspace)
+        XCTAssertEqual(detected.project, "MyApp.xcodeproj")
     }
 
     private func makeTempDirectory() throws -> URL {
