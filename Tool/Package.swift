@@ -20,6 +20,17 @@ func selectedDeveloperDir() -> String {
 
 let developerDir = selectedDeveloperDir()
 let privateFrameworks = "\(developerDir)/Library/PrivateFrameworks"
+// Xcode 27 relocated SimulatorKit.framework here, outside the developer dir.
+let sharedFrameworks = "\(developerDir)/../SharedFrameworks"
+// Only feed search/rpath dirs that exist on this machine so `ld` does not warn
+// about the layout the active Xcode happens not to use.
+let frameworkSearchDirs = [
+    "/Library/Developer/PrivateFrameworks",
+    privateFrameworks,
+    sharedFrameworks,
+].filter { FileManager.default.fileExists(atPath: $0) }
+let frameworkSearchFlags = frameworkSearchDirs.map { "-F\($0)" }
+let frameworkRpathFlags = frameworkSearchDirs.flatMap { ["-Xlinker", "-rpath", "-Xlinker", $0] }
 
 // The simtool CLI/server/UI. Kept in a subdirectory package so the embeddable logger
 // products at the repo root stay dependency-light for host apps; this package pulls the
@@ -52,20 +63,17 @@ let package = Package(
             name: "SimToolStream",
             dependencies: ["SimToolCore"],
             swiftSettings: [
-                .unsafeFlags([
-                    "-F/Library/Developer/PrivateFrameworks",
-                    "-F\(privateFrameworks)",
-                ]),
+                .unsafeFlags(frameworkSearchFlags),
             ],
             linkerSettings: [
-                .unsafeFlags([
-                    "-F/Library/Developer/PrivateFrameworks",
-                    "-F\(privateFrameworks)",
-                    "-Xlinker", "-rpath", "-Xlinker", "/Library/Developer/PrivateFrameworks",
-                    "-Xlinker", "-rpath", "-Xlinker", privateFrameworks,
+                .unsafeFlags(frameworkSearchFlags + frameworkRpathFlags + [
+                    // SimulatorKit/CoreSimulator are located and dlopen'd at runtime
+                    // from the active Xcode (SimulatorKit's location moved in Xcode 27),
+                    // so link them weakly: a framework missing at the baked rpaths must
+                    // not crash the process at launch before the runtime resolver runs.
+                    "-Xlinker", "-weak_framework", "-Xlinker", "CoreSimulator",
+                    "-Xlinker", "-weak_framework", "-Xlinker", "SimulatorKit",
                 ]),
-                .linkedFramework("CoreSimulator"),
-                .linkedFramework("SimulatorKit"),
                 .linkedFramework("VideoToolbox"),
                 .linkedFramework("CoreMedia"),
                 .linkedFramework("CoreVideo"),

@@ -3,6 +3,7 @@ import CoreVideo
 import Foundation
 import IOSurface
 import ObjectiveC
+import SimToolCore
 
 public final class FrameCapture: @unchecked Sendable {
     private static let idleTimerIntervalMs: UInt64 = 200
@@ -30,8 +31,12 @@ public final class FrameCapture: @unchecked Sendable {
     public func start(deviceUDID: String, onFrame: @escaping (CVPixelBuffer, CMTime) -> Void) throws {
         self.onFrame = onFrame
         let developerDir = Self.getDeveloperDir()
-        _ = dlopen("/Library/Developer/PrivateFrameworks/CoreSimulator.framework/CoreSimulator", RTLD_NOW)
-        _ = dlopen("\(developerDir)/Library/PrivateFrameworks/SimulatorKit.framework/SimulatorKit", RTLD_NOW)
+        if let coreSim = DeveloperFrameworks.frameworkBundlePath("CoreSimulator", developerDir: developerDir) {
+            _ = dlopen("\(coreSim)/CoreSimulator", RTLD_NOW)
+        }
+        if let simKit = DeveloperFrameworks.frameworkBundlePath("SimulatorKit", developerDir: developerDir) {
+            _ = dlopen("\(simKit)/SimulatorKit", RTLD_NOW)
+        }
 
         guard let device = Self.findSimDevice(udid: deviceUDID) else {
             throw makeError(1, "Device \(deviceUDID) not found")

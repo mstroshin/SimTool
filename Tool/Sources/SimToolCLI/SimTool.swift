@@ -143,9 +143,12 @@ struct Doctor: AsyncParsableCommand {
     func run() async throws {
         async let simctl = check(executable: "/usr/bin/xcrun", arguments: ["--find", "simctl"])
         async let axe = check(executable: "/usr/bin/which", arguments: ["axe"])
+        let developerDir = DeveloperFrameworks.developerDir()
         let checks = [
             ToolCheck(name: "simctl", available: await simctl.available, detail: await simctl.detail),
             ToolCheck(name: "axe", available: await axe.available, detail: await axe.detail),
+            framework(named: "CoreSimulator", developerDir: developerDir),
+            framework(named: "SimulatorKit", developerDir: developerDir),
         ]
         if common.json {
             try printJSON(["checks": checks])
@@ -154,6 +157,14 @@ struct Doctor: AsyncParsableCommand {
                 [$0.name, $0.available ? "available" : "missing", $0.detail]
             })
         }
+    }
+
+    private func framework(named name: String, developerDir: String) -> ToolCheck {
+        if let path = DeveloperFrameworks.frameworkBundlePath(name, developerDir: developerDir) {
+            return ToolCheck(name: name, available: true, detail: path)
+        }
+        let searched = DeveloperFrameworks.candidateBundlePaths(name, developerDir: developerDir).joined(separator: ", ")
+        return ToolCheck(name: name, available: false, detail: "not found in: \(searched)")
     }
 
     private func check(executable: String, arguments: [String]) async -> (available: Bool, detail: String) {

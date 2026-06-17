@@ -3,7 +3,7 @@ import Foundation
 public actor SimulatorDirectInputClient {
     public static let shared = SimulatorDirectInputClient()
 
-    private static let helperVersion = "1"
+    private static let helperVersion = "2"
 
     private var session: SimulatorDirectInputSession?
 
@@ -336,13 +336,32 @@ private enum SimulatorDirectInputHelperSource {
 
     static void say(const char *s) { fprintf(stderr, "%s\n", s ?: "error"); }
 
+    // Loads the first framework bundle that exists among the candidate paths.
+    // Xcode <= 26 keeps SimulatorKit under Developer/Library/PrivateFrameworks;
+    // Xcode 27 moved it to Contents/SharedFrameworks (outside DEVELOPER_DIR).
+    static BOOL loadFramework(NSArray<NSString *> *candidates) {
+      for (NSString *path in candidates) {
+        NSBundle *bundle = [NSBundle bundleWithPath:path];
+        if (bundle && [bundle load]) { return YES; }
+      }
+      return NO;
+    }
+
     static BOOL loadFrameworks(void) {
-      NSBundle *cs = [NSBundle bundleWithPath:@"/Library/Developer/PrivateFrameworks/CoreSimulator.framework"];
-      if (![cs load]) { say("Failed to load CoreSimulator"); return NO; }
       NSString *dev = NSProcessInfo.processInfo.environment[@"DEVELOPER_DIR"];
       if (dev.length == 0) { dev = @"/Applications/Xcode.app/Contents/Developer"; }
-      NSString *skPath = [[dev stringByAppendingPathComponent:@"Library/PrivateFrameworks"] stringByAppendingPathComponent:@"SimulatorKit.framework"];
-      if (![[NSBundle bundleWithPath:skPath] load]) { say("Failed to load SimulatorKit"); return NO; }
+      NSArray *coreSim = @[
+        @"/Library/Developer/PrivateFrameworks/CoreSimulator.framework",
+        [dev stringByAppendingPathComponent:@"Library/PrivateFrameworks/CoreSimulator.framework"],
+        [dev stringByAppendingPathComponent:@"../SharedFrameworks/CoreSimulator.framework"],
+      ];
+      if (!loadFramework(coreSim)) { say("Failed to load CoreSimulator"); return NO; }
+      NSArray *simKit = @[
+        [dev stringByAppendingPathComponent:@"Library/PrivateFrameworks/SimulatorKit.framework"],
+        [dev stringByAppendingPathComponent:@"../SharedFrameworks/SimulatorKit.framework"],
+        @"/Library/Developer/PrivateFrameworks/SimulatorKit.framework",
+      ];
+      if (!loadFramework(simKit)) { say("Failed to load SimulatorKit"); return NO; }
       return YES;
     }
 
