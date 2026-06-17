@@ -361,6 +361,14 @@ public enum SimulatorAppBuildFingerprinter {
 
     public static func inputFiles(selection: SimulatorAppBuildSelection, cacheRoot: URL? = nil) throws -> [SimulatorAppBuildInputFile] {
         let root = selection.projectRoot.standardizedFileURL
+        // When the project lives in a git work tree, hash only non-ignored files.
+        // Generated artifacts (Tuist's `.xcodeproj`/`Derived/`, DerivedData, SPM
+        // checkouts) are gitignored; they get rewritten on every build and would
+        // otherwise destabilize the checksum, breaking cache reuse. Outside git,
+        // fall back to the filesystem walk.
+        if let gitFiles = gitInputFiles(root: root, cacheRoot: cacheRoot) {
+            return gitFiles
+        }
         let excludedRoot = cacheRoot?.standardizedFileURL.path
         let resourceKeys: [URLResourceKey] = [.isDirectoryKey, .fileSizeKey]
         guard let enumerator = FileManager.default.enumerator(
@@ -392,6 +400,56 @@ public enum SimulatorAppBuildFingerprinter {
 
     public static func sha256Hex(_ data: Data) throws -> String {
         hex(SHA256.hash(data: data))
+    }
+
+    /// Returns the build-input files known to git (tracked plus untracked but
+    /// not ignored), or `nil` when `root` is not inside a git work tree (or git
+    /// is unavailable) so the caller falls back to the filesystem walk. Listing
+    /// via git is what excludes gitignored generated artifacts from the
+    /// fingerprint; the same type filter (`isBuildInputFile`) is then applied so
+    /// the included file set matches the filesystem walk for tracked files.
+    private static func gitInputFiles(root: URL, cacheRoot: URL?) -> [SimulatorAppBuildInputFile]? {
+        guard let output = runGit(
+            ["-C", root.path, "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+            in: root
+        ), output.status == 0 else { return nil }
+
+        let excludedRoot = cacheRoot?.standardizedFileURL.path
+        var files: [SimulatorAppBuildInputFile] = []
+        var seen = Set<String>()
+        for relative in String(decoding: output.stdout, as: UTF8.self).split(separator: "\0") {
+            let relativePath = String(relative)
+            if relativePath.isEmpty { continue }
+            let url = root.appendingPathComponent(relativePath).standardizedFileURL
+            let path = url.path
+            guard seen.insert(path).inserted else { continue }
+            if let excludedRoot, path == excludedRoot || path.hasPrefix(excludedRoot + "/") { continue }
+            guard isBuildInputFile(url, root: root) else { continue }
+            // Skip directories and stale index entries (deleted/renamed files).
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), !isDirectory.boolValue else { continue }
+            let byteCount = ((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init)) ?? 0
+            files.append(SimulatorAppBuildInputFile(relativePath: url.pathRelative(to: root), path: path, byteCount: byteCount))
+        }
+        return files.sorted { $0.relativePath < $1.relativePath }
+    }
+
+    /// Runs git synchronously, returning its exit status and stdout, or `nil` if
+    /// git could not be launched. stderr is discarded; stdout is drained before
+    /// `waitUntilExit` to avoid pipe-buffer deadlock.
+    private static func runGit(_ arguments: [String], in directory: URL) -> (status: Int32, stdout: Data)? {
+        let gitURL = URL(fileURLWithPath: "/usr/bin/git")
+        guard FileManager.default.isExecutableFile(atPath: gitURL.path) else { return nil }
+        let process = Process()
+        process.executableURL = gitURL
+        process.arguments = arguments
+        let stdoutPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = FileHandle.nullDevice
+        do { try process.run() } catch { return nil }
+        let data = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return (process.terminationStatus, data)
     }
 
     private static func update(_ hasher: inout SHA256, with string: String) {
@@ -448,7 +506,56 @@ public enum SimulatorAppBuildFingerprinter {
     ]
 }
 
+/// The result of the checksum stage: the source fingerprint plus the resolved
+/// cache decision, computed without running xcodebuild. A non-nil
+/// `cachedMetadata` means a prior build of the same sources can be reused.
+public struct SimulatorAppBuildPlan: Sendable {
+    public var selection: SimulatorAppBuildSelection
+    public var fingerprint: SimulatorAppBuildFingerprint
+    public var derivedDataPath: String
+    public var cachedMetadata: SimulatorAppBuildCacheMetadata?
+
+    public init(
+        selection: SimulatorAppBuildSelection,
+        fingerprint: SimulatorAppBuildFingerprint,
+        derivedDataPath: String,
+        cachedMetadata: SimulatorAppBuildCacheMetadata?
+    ) {
+        self.selection = selection
+        self.fingerprint = fingerprint
+        self.derivedDataPath = derivedDataPath
+        self.cachedMetadata = cachedMetadata
+    }
+
+    public var isCacheHit: Bool { cachedMetadata != nil }
+}
+
 public enum SimulatorAppLifecycleClient {
+    /// Checksum stage: fingerprints the sources and resolves the build cache
+    /// without running xcodebuild. Split out from `build` so callers (e.g. the
+    /// `run` progress UI) can present it as its own step. `force` skips the
+    /// cache lookup so the plan always reports a miss.
+    public static func plan(
+        selection: SimulatorAppBuildSelection,
+        force: Bool = false,
+        cache: SimulatorAppBuildCache = SimulatorAppBuildCache(simtoolDirectory: SimToolDirectory.resolve())
+    ) throws -> SimulatorAppBuildPlan {
+        let fingerprint = try SimulatorAppBuildFingerprinter.fingerprint(selection: selection, cacheRoot: cache.derivedDataRoot)
+        let derivedDataPath: String
+        if let selectedDerivedDataPath = selection.identity.derivedDataPath {
+            derivedDataPath = selectedDerivedDataPath
+        } else {
+            derivedDataPath = try cache.derivedDataPath(for: selection.identity)
+        }
+        let cachedMetadata = force ? nil : cache.validMetadata(for: selection.identity, checksum: fingerprint.checksum)
+        return SimulatorAppBuildPlan(
+            selection: selection,
+            fingerprint: fingerprint,
+            derivedDataPath: derivedDataPath,
+            cachedMetadata: cachedMetadata
+        )
+    }
+
     /// `progress` receives short build statuses ("Compiling Foo.swift") parsed
     /// from xcodebuild output. It is invoked on a background thread as output
     /// arrives; blocking inside it backpressures pipe reads.
@@ -459,8 +566,22 @@ public enum SimulatorAppLifecycleClient {
         timeoutSeconds: TimeInterval? = 1_800,
         progress: (@Sendable (String) -> Void)? = nil
     ) async throws -> SimulatorAppBuildPayload {
-        let fingerprint = try SimulatorAppBuildFingerprinter.fingerprint(selection: selection, cacheRoot: cache.derivedDataRoot)
-        if !force, let metadata = cache.validMetadata(for: selection.identity, checksum: fingerprint.checksum) {
+        let plan = try plan(selection: selection, force: force, cache: cache)
+        return try await build(plan: plan, cache: cache, timeoutSeconds: timeoutSeconds, progress: progress)
+    }
+
+    /// Build stage: runs xcodebuild for a planned build, or returns a cache-hit
+    /// payload instantly when `plan.cachedMetadata` is set. Pair with `plan`,
+    /// passing the same `cache`.
+    public static func build(
+        plan: SimulatorAppBuildPlan,
+        cache: SimulatorAppBuildCache = SimulatorAppBuildCache(simtoolDirectory: SimToolDirectory.resolve()),
+        timeoutSeconds: TimeInterval? = 1_800,
+        progress: (@Sendable (String) -> Void)? = nil
+    ) async throws -> SimulatorAppBuildPayload {
+        let selection = plan.selection
+        let fingerprint = plan.fingerprint
+        if let metadata = plan.cachedMetadata {
             return SimulatorAppBuildPayload(
                 identity: selection.identity,
                 checksum: fingerprint.checksum,
@@ -473,12 +594,7 @@ public enum SimulatorAppLifecycleClient {
             )
         }
 
-        let derivedDataPath: String
-        if let selectedDerivedDataPath = selection.identity.derivedDataPath {
-            derivedDataPath = selectedDerivedDataPath
-        } else {
-            derivedDataPath = try cache.derivedDataPath(for: selection.identity)
-        }
+        let derivedDataPath = plan.derivedDataPath
         let buildArguments = xcodebuildArguments(selection: selection, derivedDataPath: derivedDataPath)
         let onStdoutLine: (@Sendable (String) -> Void)? = progress.map { progress in
             { @Sendable line in
@@ -495,8 +611,8 @@ public enum SimulatorAppLifecycleClient {
         )
         let buildStep = SimulatorAppProcessStepSummary(name: "xcodebuild", output: buildOutput)
         guard buildOutput.status == 0 else {
-            let detail = buildOutput.stderrString.isEmpty ? buildOutput.stdoutString : buildOutput.stderrString
-            throw SimToolError("xcodebuild failed for scheme \(selection.identity.scheme): \(detail.trimmingCharacters(in: .whitespacesAndNewlines))")
+            let detail = XcodebuildFailure.detail(from: buildOutput)
+            throw SimToolError("xcodebuild failed for scheme \(selection.identity.scheme): \(detail)")
         }
 
         let product = try await builtProduct(selection: selection, derivedDataPath: derivedDataPath)
@@ -522,6 +638,53 @@ public enum SimulatorAppLifecycleClient {
             appBundlePath: product.appBundleURL.path,
             bundleIdentifier: bundleIdentifier,
             xcodebuild: buildStep
+        )
+    }
+
+    /// Records checksum-cache metadata for an app built outside SimTool — for
+    /// example, from an Xcode post-build phase. Computes the same source
+    /// fingerprint `build` does and writes it alongside the externally built
+    /// `.app` path and its bundle identifier, so a later `simtool run` (or
+    /// `app build`) sees a cache hit and reuses the bundle instead of
+    /// re-running xcodebuild. `appBundleURL` must point at an existing `.app`
+    /// directory. The fingerprint must use the same `cache` (hence the same
+    /// excluded DerivedData root) as `run`, or the checksum will not match.
+    @discardableResult
+    public static func recordExternalBuild(
+        selection: SimulatorAppBuildSelection,
+        appBundleURL: URL,
+        cache: SimulatorAppBuildCache = SimulatorAppBuildCache(simtoolDirectory: SimToolDirectory.resolve())
+    ) throws -> SimulatorAppBuildPayload {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: appBundleURL.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            throw SimToolError("App bundle not found: \(appBundleURL.path)")
+        }
+        let fingerprint = try SimulatorAppBuildFingerprinter.fingerprint(selection: selection, cacheRoot: cache.derivedDataRoot)
+        let bundleIdentifier = try bundleIdentifier(appBundleURL: appBundleURL)
+        var metadata = SimulatorAppBuildCacheMetadata(
+            identity: selection.identity,
+            checksum: fingerprint.checksum,
+            inputFileCount: fingerprint.inputFileCount,
+            appBundlePath: appBundleURL.standardizedFileURL.path,
+            bundleIdentifier: bundleIdentifier
+        )
+        // Drop install records for older checksums: the externally built app no
+        // longer matches what any device has installed. Records matching the new
+        // checksum (a rebuild with no source change) stay valid.
+        if let previous = cache.readMetadata(for: selection.identity) {
+            metadata.installRecords = previous.installRecords.filter { $0.value.checksum == fingerprint.checksum }
+        }
+        try cache.write(metadata)
+
+        return SimulatorAppBuildPayload(
+            identity: selection.identity,
+            checksum: fingerprint.checksum,
+            inputFileCount: fingerprint.inputFileCount,
+            cacheHit: false,
+            xcodebuildRan: false,
+            appBundlePath: metadata.appBundlePath,
+            bundleIdentifier: bundleIdentifier,
+            xcodebuild: SimulatorAppProcessStepSummary(name: "xcodebuild", ran: false)
         )
     }
 

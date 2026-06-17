@@ -32,6 +32,8 @@ struct SimTool: AsyncParsableCommand {
             AppCommand.self,
             TestCommand.self,
             Run.self,
+            Init.self,
+            Checksum.self,
             Open.self,
             Interactive.self,
         ],
@@ -625,17 +627,32 @@ func buildAppWithProgress(
     force: Bool,
     cache: SimulatorAppBuildCache
 ) async throws -> SimulatorAppBuildPayload {
-    let stage = "Building \(selection.identity.scheme) (\(selection.identity.configuration))"
+    let scheme = selection.identity.scheme
+    let configuration = selection.identity.configuration
+
+    // Checksum stage: fingerprint the sources and resolve the cache. Kept
+    // separate from the build so a slow fingerprint on a large project reads as
+    // its own step rather than stalling silently under "Building".
+    let (checksumNoora, _) = interactiveProgressTerminal()
+    let plan = try await checksumNoora.progressStep(
+        message: "Checking sources",
+        successMessage: "Checked sources",
+        errorMessage: "Failed to checksum sources",
+        showSpinner: true
+    ) { _ in
+        try SimulatorAppLifecycleClient.plan(selection: selection, force: force, cache: cache)
+    }
+
+    let stage = "Building \(scheme) (\(configuration))"
     let (noora, interactive) = interactiveProgressTerminal()
     return try await noora.progressStep(
-        message: stage,
-        successMessage: "Built \(selection.identity.scheme) (\(selection.identity.configuration))",
-        errorMessage: "Build failed for \(selection.identity.scheme)",
+        message: plan.isCacheHit ? "Reusing cached build" : stage,
+        successMessage: plan.isCacheHit ? "Reused cached build (checksum match)" : "Built \(scheme) (\(configuration))",
+        errorMessage: "Build failed for \(scheme)",
         showSpinner: true
     ) { updateMessage in
         return try await SimulatorAppLifecycleClient.build(
-            selection: selection,
-            force: force,
+            plan: plan,
             cache: cache,
             progress: liveStatusForwarder(stage: stage, isInteractive: interactive, updateMessage: updateMessage)
         )
@@ -1169,6 +1186,9 @@ struct Run: AsyncParsableCommand {
     @Flag(name: .long, help: "Print verbose diagnostic output to stderr.")
     var verbose = false
 
+    @Option(name: .shortAndLong, help: "Simulator UDID or name to run on, overriding `simulator:` in the config. Pass 'booted' for the first booted simulator.")
+    var device: String?
+
     @Option(help: "Path to the project config. Defaults to .simtool/config.yml discovered from the working directory upward.")
     var config: String?
 
@@ -1202,10 +1222,12 @@ struct Run: AsyncParsableCommand {
             setenv("SIMCTL_CHILD_SIMTOOL_SERVER_URL", projectConfig.appFacingServerURL, 1)
         }
 
+        // `--device` overrides `simulator:` from the config when provided.
+        let simulatorSelector = device ?? projectConfig.simulator
         let booted: SimulatorDevice
         let launch: SimulatorAppLaunchPayload
         if common.json {
-            let resolved = try await SimulatorDeviceClient.resolve(projectConfig.simulator)
+            let resolved = try await SimulatorDeviceClient.resolve(simulatorSelector)
             booted = try await SimulatorDeviceClient.ensureBooted(resolved)
             launch = try await SimulatorAppLifecycleClient.launch(
                 selection: try projectConfig.buildSelection(),
@@ -1214,7 +1236,7 @@ struct Run: AsyncParsableCommand {
                 cache: buildCache
             )
         } else {
-            let resolved = try await resolveSimulatorWithProgress(projectConfig.simulator)
+            let resolved = try await resolveSimulatorWithProgress(simulatorSelector)
             booted = try await bootSimulatorWithProgress(resolved)
             let buildPayload = try await buildAppWithProgress(
                 selection: try projectConfig.buildSelection(),
@@ -1246,6 +1268,113 @@ struct Run: AsyncParsableCommand {
             openBrowser: shouldOpenBrowser(webRequested: web, json: common.json, nativeWindow: native, detachedChild: false),
             sessionId: nil
         )
+    }
+}
+
+struct Init: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "init",
+        abstract: "Scaffold a starter .simtool/config.yml in the current directory, detecting the workspace/scheme where possible."
+    )
+
+    @Flag(name: .long, help: "Overwrite an existing .simtool/config.yml.")
+    var force = false
+
+    @OptionGroup var common: CommonJSON
+
+    struct InitResult: Encodable {
+        var configPath: String
+        var workspace: String?
+        var project: String?
+        var scheme: String?
+        var created: Bool
+    }
+
+    func run() throws {
+        let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        let simtoolDir = cwd.appendingPathComponent(SimToolDirectory.directoryName, isDirectory: true)
+        let configURL = simtoolDir.appendingPathComponent(SimToolDirectory.configFileName)
+        let alreadyExists = FileManager.default.fileExists(atPath: configURL.path)
+        if alreadyExists, !force {
+            throw SimToolError("\(ProjectConfigLoader.displayPath) already exists. Edit it, or pass --force to overwrite.")
+        }
+
+        let detected = ProjectConfigTemplate.detect(in: cwd)
+        // Creates `.simtool/` and its self-ignoring `.gitignore` (never clobbered).
+        try SimToolDirectory.ensure(simtoolDir)
+        try Data(ProjectConfigTemplate.render(detected).utf8).write(to: configURL, options: [.atomic])
+
+        let result = InitResult(
+            configPath: configURL.standardizedFileURL.path,
+            workspace: detected.workspace,
+            project: detected.project,
+            scheme: detected.scheme,
+            created: !alreadyExists
+        )
+        if common.json {
+            try printJSON(result)
+            return
+        }
+
+        var todos: [TerminalText] = ["Set `bundleId` to the app's bundle identifier."]
+        if detected.scheme == nil { todos.append("Set `build.scheme` to the app scheme.") }
+        if detected.workspace == nil && detected.project == nil {
+            todos.append("Set `build.workspace` or `build.project`.")
+        }
+        let detail = [detected.workspace.map { "Workspace: \($0)" }, detected.project.map { "Project: \($0)" }, detected.scheme.map { "Scheme: \($0)" }]
+            .compactMap { $0 }
+        makeNoora().success(.alert(
+            TerminalText(stringLiteral: "\(alreadyExists ? "Overwrote" : "Created") \(ProjectConfigLoader.displayPath)"),
+            takeaways: [TerminalText(stringLiteral: "Config: \(result.configPath)")] + detail.map { TerminalText(stringLiteral: $0) } + todos
+        ))
+    }
+}
+
+struct Checksum: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Record the source checksum for an externally built app so a later `simtool run` reuses it. Intended for an Xcode post-build phase."
+    )
+
+    @Option(help: "Path to the project config. Defaults to .simtool/config.yml discovered from the working directory upward.")
+    var config: String?
+
+    @Option(name: .customLong("app-path"), help: "Path to the built .app. Defaults to $BUILT_PRODUCTS_DIR/$FULL_PRODUCT_NAME (set by Xcode build phases).")
+    var appPath: String?
+
+    @OptionGroup var common: CommonJSON
+
+    func run() async throws {
+        let projectConfig = try ProjectConfigLoader.load(explicitPath: config)
+        let buildCache = SimulatorAppBuildCache(simtoolDirectory: projectConfig.simtoolDirectory)
+        let payload = try SimulatorAppLifecycleClient.recordExternalBuild(
+            selection: try projectConfig.buildSelection(),
+            appBundleURL: try resolveAppBundleURL(),
+            cache: buildCache
+        )
+        if common.json {
+            try printJSON(payload)
+            return
+        }
+        makeNoora().success(.alert("Recorded build checksum", takeaways: [
+            "Scheme: \(payload.identity.scheme)",
+            "Bundle: \(payload.bundleIdentifier)",
+            "App: \(payload.appBundlePath)",
+            "Checksum: \(payload.checksum)",
+        ]))
+    }
+
+    /// Resolves the built `.app`: an explicit `--app-path`, else the standard
+    /// Xcode build-phase pair `$BUILT_PRODUCTS_DIR/$FULL_PRODUCT_NAME`.
+    private func resolveAppBundleURL() throws -> URL {
+        if let appPath, !appPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return URL(fileURLWithPath: NSString(string: appPath).expandingTildeInPath)
+        }
+        let environment = ProcessInfo.processInfo.environment
+        if let productsDir = environment["BUILT_PRODUCTS_DIR"], !productsDir.isEmpty,
+           let productName = environment["FULL_PRODUCT_NAME"], !productName.isEmpty {
+            return URL(fileURLWithPath: productsDir).appendingPathComponent(productName)
+        }
+        throw SimToolError("Pass --app-path <path-to-.app>, or run inside an Xcode build phase where BUILT_PRODUCTS_DIR and FULL_PRODUCT_NAME are set.")
     }
 }
 

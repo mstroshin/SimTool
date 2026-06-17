@@ -51,6 +51,23 @@ final class SimToolCommandSurfaceTests: XCTestCase {
         XCTAssertTrue(names.contains("open"))
     }
 
+    func testTopLevelCommandIncludesChecksum() {
+        let names = SimTool.configuration.subcommands.map { commandName(for: $0) }
+        XCTAssertTrue(names.contains("checksum"))
+    }
+
+    func testChecksumParserAcceptsConfigAndAppPath() throws {
+        let command = try Checksum.parse(["--config", ".simtool/config.yml", "--app-path", "/tmp/Example.app", "--json"])
+        XCTAssertEqual(command.config, ".simtool/config.yml")
+        XCTAssertEqual(command.appPath, "/tmp/Example.app")
+        XCTAssertTrue(command.common.json)
+
+        let bare = try Checksum.parse([])
+        XCTAssertNil(bare.config)
+        XCTAssertNil(bare.appPath)
+        XCTAssertFalse(bare.common.json)
+    }
+
     func testRunParserAcceptsViewerFlagsAndConfig() throws {
         let command = try Run.parse(["--native", "--no-network", "--no-state", "--config", ".simtool/config.yml", "--json"])
         XCTAssertTrue(command.native)

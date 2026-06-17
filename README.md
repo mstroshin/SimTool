@@ -315,9 +315,15 @@ git-ignored via its own auto-created `.gitignore`. Pass `--config <path>` to poi
 at a specific file; its directory then plays the `.simtool` role, so relative paths
 in the config resolve against that directory's parent.
 
+Run `simtool init` from the project root to scaffold a starter `.simtool/config.yml`:
+it detects the `.xcworkspace`/`.xcodeproj` and scheme where it can, defaults
+`simulator` to `booted`, creates the self-ignoring `.gitignore`, and leaves `# TODO`
+fields (such as `bundleId`) for you to fill in. It refuses to clobber an existing
+config unless you pass `--force`.
+
 ```yaml
 # .simtool/config.yml
-simulator: "iPhone 16 Pro"          # UDID or name
+simulator: "iPhone 16 Pro"          # UDID, name, or `booted` for the first booted simulator
 bundleId: com.example.MyApp
 build:
   workspace: MyApp.xcworkspace      # or `project: MyApp.xcodeproj`
@@ -349,6 +355,8 @@ stops it).
 swift run simtool run            # server only; open the printed URL yourself
 swift run simtool run --web      # …and open the browser viewer
 swift run simtool run --native
+swift run simtool run --device booted        # run on the first booted simulator
+swift run simtool run --device "iPhone 16"   # …or a specific UDID/name, overriding the config
 swift run simtool run --config path/to/.simtool/config.yml
 ```
 
@@ -361,10 +369,33 @@ corresponding logger package and are compiled out of Release builds. Turn them
 off with `--no-network` / `--no-state` or `networkLogger: false` /
 `stateLogger: false` in the config.
 
+The source fingerprint hashes only git-tracked (and untracked-but-not-ignored)
+files when the project is in a git work tree, falling back to a filesystem walk
+otherwise. This keeps gitignored, generated artifacts — a Tuist-managed
+`.xcodeproj`/`Derived/` that xcodebuild rewrites on every build, DerivedData,
+SPM checkouts — out of the checksum, so they don't spuriously invalidate the
+cache.
+
 `run --force` skips the checksum cache: it always runs xcodebuild and
 reinstalls the app. Use it when a dependency the fingerprint cannot see
 changed — e.g. a local package outside the project root, or a Tuist binary
 cache that went stale (then regenerate with `tuist generate` first).
+
+`simtool checksum` records the source checksum for an app you built outside
+SimTool — typically from an Xcode post-build phase — so the next `simtool run`
+sees a cache hit and reuses that `.app` instead of re-running xcodebuild. It
+reads the same `.simtool/config.yml` as `run` (so the recorded checksum and its
+cache key match what `run` looks up) and writes the metadata against the built
+bundle. The bundle path defaults to `$BUILT_PRODUCTS_DIR/$FULL_PRODUCT_NAME`
+(set inside Xcode build phases); pass `--app-path` to override.
+
+```sh
+# As an Xcode "Run Script" post-build phase, from $SRCROOT:
+simtool checksum --config "$SRCROOT/.simtool/config.yml"
+
+# Or standalone, pointing at a built bundle:
+swift run simtool checksum --app-path /path/to/MyApp.app --json
+```
 
 `simtool open` opens a configured deeplink on the configured simulator via
 `xcrun simctl openurl`. Pass a deeplink `name` to open it directly, or omit it to
