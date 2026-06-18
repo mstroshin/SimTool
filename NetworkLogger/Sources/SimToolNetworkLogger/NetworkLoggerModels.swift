@@ -155,6 +155,10 @@ public struct NetworkLoggerEvent: Codable, Equatable, Sendable, Identifiable {
     /// App launch this event belongs to, assigned by the SimTool server on ingestion. Apps leave
     /// this `nil`; only the server populates it.
     public var launchId: Int?
+    /// True when this event's response was produced by a SimTool mock rule rather than the backend.
+    public var mocked: Bool
+    /// Identifier of the mock rule that produced the response, when `mocked` is true.
+    public var mockRuleId: String?
 
     public init(
         id: String = UUID().uuidString,
@@ -168,7 +172,9 @@ public struct NetworkLoggerEvent: Codable, Equatable, Sendable, Identifiable {
         error: NetworkLoggerError? = nil,
         rawMetadata: [String: NetworkLoggerJSONValue] = [:],
         pid: Int? = nil,
-        launchId: Int? = nil
+        launchId: Int? = nil,
+        mocked: Bool = false,
+        mockRuleId: String? = nil
     ) {
         self.id = id
         self.timestamp = timestamp
@@ -182,6 +188,8 @@ public struct NetworkLoggerEvent: Codable, Equatable, Sendable, Identifiable {
         self.rawMetadata = rawMetadata
         self.pid = pid
         self.launchId = launchId
+        self.mocked = mocked
+        self.mockRuleId = mockRuleId
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -197,6 +205,26 @@ public struct NetworkLoggerEvent: Codable, Equatable, Sendable, Identifiable {
         case rawMetadata
         case pid
         case launchId
+        case mocked
+        case mockRuleId
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        timestamp = try container.decode(String.self, forKey: .timestamp)
+        appBundleID = try container.decodeIfPresent(String.self, forKey: .appBundleID)
+        appDisplayName = try container.decodeIfPresent(String.self, forKey: .appDisplayName)
+        networkProtocol = try container.decode(NetworkLoggerProtocol.self, forKey: .networkProtocol)
+        durationMilliseconds = try container.decode(Double.self, forKey: .durationMilliseconds)
+        request = try container.decode(NetworkLoggerRequest.self, forKey: .request)
+        response = try container.decodeIfPresent(NetworkLoggerResponse.self, forKey: .response)
+        error = try container.decodeIfPresent(NetworkLoggerError.self, forKey: .error)
+        rawMetadata = try container.decodeIfPresent([String: NetworkLoggerJSONValue].self, forKey: .rawMetadata) ?? [:]
+        pid = try container.decodeIfPresent(Int.self, forKey: .pid)
+        launchId = try container.decodeIfPresent(Int.self, forKey: .launchId)
+        mocked = try container.decodeIfPresent(Bool.self, forKey: .mocked) ?? false
+        mockRuleId = try container.decodeIfPresent(String.self, forKey: .mockRuleId)
     }
 }
 

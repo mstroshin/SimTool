@@ -86,7 +86,9 @@ public final class SimToolNetworkLogger: @unchecked Sendable {
         responseBody: Data? = nil,
         durationMilliseconds: Double,
         error: Error? = nil,
-        rawMetadata: [String: NetworkLoggerJSONValue] = [:]
+        rawMetadata: [String: NetworkLoggerJSONValue] = [:],
+        mocked: Bool = false,
+        mockRuleId: String? = nil
     ) async -> NetworkLoggerEvent {
         let event = makeHTTPEvent(
             request: request,
@@ -95,7 +97,9 @@ public final class SimToolNetworkLogger: @unchecked Sendable {
             responseBody: responseBody,
             durationMilliseconds: durationMilliseconds,
             error: error,
-            rawMetadata: rawMetadata
+            rawMetadata: rawMetadata,
+            mocked: mocked,
+            mockRuleId: mockRuleId
         )
         await record(event)
         return event
@@ -108,7 +112,9 @@ public final class SimToolNetworkLogger: @unchecked Sendable {
         responseBody: Data? = nil,
         durationMilliseconds: Double,
         error: Error? = nil,
-        rawMetadata: [String: NetworkLoggerJSONValue] = [:]
+        rawMetadata: [String: NetworkLoggerJSONValue] = [:],
+        mocked: Bool = false,
+        mockRuleId: String? = nil
     ) -> NetworkLoggerEvent {
         let body = requestBody ?? request.httpBody
         let requestMetadata = NetworkLoggerRequest(
@@ -136,7 +142,9 @@ public final class SimToolNetworkLogger: @unchecked Sendable {
             request: requestMetadata,
             response: responseMetadata,
             error: error.map(NetworkLoggerError.init),
-            rawMetadata: rawMetadata
+            rawMetadata: rawMetadata,
+            mocked: mocked,
+            mockRuleId: mockRuleId
         )
     }
 
@@ -179,7 +187,9 @@ public final class SimToolNetworkLogger: @unchecked Sendable {
         responseMessagePreview: String? = nil,
         durationMilliseconds: Double,
         error: Error? = nil,
-        rawMetadata: [String: NetworkLoggerJSONValue] = [:]
+        rawMetadata: [String: NetworkLoggerJSONValue] = [:],
+        mocked: Bool = false,
+        mockRuleId: String? = nil
     ) async -> NetworkLoggerEvent {
         let request = NetworkLoggerRequest(
             path: fullMethod,
@@ -205,7 +215,9 @@ public final class SimToolNetworkLogger: @unchecked Sendable {
             request: request,
             response: response,
             error: error.map(NetworkLoggerError.init),
-            rawMetadata: rawMetadata
+            rawMetadata: rawMetadata,
+            mocked: mocked,
+            mockRuleId: mockRuleId
         )
         await record(event)
         return event
