@@ -7,7 +7,7 @@ final class XcodebuildFailureTests: XCTestCase {
     func testSurfacesScriptCommandNotFoundFromStdout() {
         let stdout = """
         PhaseScriptExecution Compile\\ assets /path/Script-FAD2A85B.sh
-        /path/Script-FAD2A85B.sh: line 4: sampletool: command not found
+        /path/Script-FAD2A85B.sh: line 4: assetgen: command not found
         Command PhaseScriptExecution failed with a nonzero exit code
         """
         let stderr = """
@@ -21,7 +21,7 @@ final class XcodebuildFailureTests: XCTestCase {
 
         let detail = XcodebuildFailure.detail(stdout: stdout, stderr: stderr)
 
-        XCTAssertTrue(detail.contains("sampletool: command not found"), detail)
+        XCTAssertTrue(detail.contains("assetgen: command not found"), detail)
         // The summary stays for context.
         XCTAssertTrue(detail.contains("** BUILD FAILED **"), detail)
     }
@@ -41,7 +41,7 @@ final class XcodebuildFailureTests: XCTestCase {
     // When neither stream has a recognizable error line, fall back to the
     // previous behavior: stderr if non-empty, else stdout.
     func testFallsBackToStderrWhenNoErrorLines() {
-        let stdout = "Building workspace SampleApp with scheme App\nnoise\n"
+        let stdout = "Building workspace MyApp with scheme App\nnoise\n"
         let stderr = "** BUILD FAILED **\n(1 failure)"
 
         let detail = XcodebuildFailure.detail(stdout: stdout, stderr: stderr)
@@ -58,7 +58,7 @@ final class XcodebuildFailureTests: XCTestCase {
     // deprecation warning) is not a compiler diagnostic and must be ignored.
     func testIgnoresErrorColonInsideSwiftParameterLabels() {
         let stdout = """
-        /path/Foo.swift:35:29: warning: 'defaultError(title:message:isLoading:error:buttonAction:)' is deprecated: replaced by 'HolaFullscreenAlert.error()'
+        /path/Foo.swift:35:29: warning: 'defaultError(title:message:isLoading:error:buttonAction:)' is deprecated: replaced by 'MyFullscreenAlert.error()'
         /path/Bar.swift:10:5: error: real failure here
         """
         let stderr = "** BUILD FAILED **"
