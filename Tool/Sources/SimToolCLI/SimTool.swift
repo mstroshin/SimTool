@@ -29,6 +29,7 @@ struct SimTool: AsyncParsableCommand {
             AX.self,
             Logs.self,
             Network.self,
+            Mock.self,
             AppCommand.self,
             TestCommand.self,
             Run.self,
@@ -452,6 +453,122 @@ extension Network {
             return url
         }
 
+    }
+}
+
+// MARK: - Mock
+
+struct Mock: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "mock",
+        abstract: "Configure mocked backend responses served to the app.",
+        subcommands: [Set.self, List.self, Remove.self, Clear.self]
+    )
+
+    struct ServerOptions: ParsableArguments {
+        @Option(help: "SimTool server URL, for example http://127.0.0.1:3200.") var server: String?
+        @Option(help: "SimTool server host.") var host: String?
+        @Option(help: "SimTool server port.") var port: UInt16?
+
+        func baseURL() throws -> URL {
+            if let server, !server.isEmpty {
+                guard let url = URL(string: server) else { throw SimToolError("Invalid server URL: \(server)") }
+                return url
+            }
+            let host = host ?? "127.0.0.1"
+            let port = port ?? 3200
+            guard let url = URL(string: "http://\(host):\(port)") else {
+                throw SimToolError("Invalid server host or port: \(host):\(port)")
+            }
+            return url
+        }
+    }
+
+    struct Set: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(commandName: "set", abstract: "Add a mock rule.")
+
+        @Option(help: "gRPC full-method or HTTP path to match. Supports * globbing.") var method: String
+        @Option(name: .customLong("match-header"), help: "Header/metadata equality constraint key=value (repeatable).") var matchHeader: [String] = []
+        @Option(name: .customLong("match-body"), help: "JSON subset the request must contain.") var matchBody: String?
+        @Option(help: "Success response body as JSON (mutually exclusive with --error).") var body: String?
+        @Option(help: "gRPC error status name, e.g. unavailable (mutually exclusive with --body).") var error: String?
+        @Option(help: "Error status message.") var message: String?
+        @Option(help: "Artificial delay before responding, milliseconds.") var delay: Int = 0
+        @Option(help: "Skip the first N matches before firing.") var skip: Int = 0
+        @Option(help: "Fire at most M times after skip.") var times: Int?
+        @OptionGroup var server: ServerOptions
+        @OptionGroup var common: CommonJSON
+
+        func makeDraft() throws -> MockRuleDraft {
+            var headerMatch: [String: String] = [:]
+            for pair in matchHeader {
+                let parts = pair.split(separator: "=", maxSplits: 1).map(String.init)
+                guard parts.count == 2 else { throw SimToolError("Invalid --match-header '\(pair)'; expected key=value.") }
+                headerMatch[parts[0]] = parts[1]
+            }
+            let bodyMatch = try matchBody.map { try NetworkLoggerJSON.decoder.decode(NetworkLoggerJSONValue.self, from: Data($0.utf8)) }
+            let response: MockResponse
+            switch (body, error) {
+            case let (body?, nil):
+                response = MockResponse(kind: .success, bodyJSON: body)
+            case let (nil, error?):
+                response = MockResponse(kind: .error, grpcStatus: error, message: message)
+            default:
+                throw SimToolError("Provide exactly one of --body or --error.")
+            }
+            return MockRuleDraft(
+                match: MockMatch(method: method, headerMatch: headerMatch.isEmpty ? nil : headerMatch, bodyMatch: bodyMatch, skip: skip, times: times),
+                response: response,
+                delayMs: delay
+            )
+        }
+
+        func run() async throws {
+            let client = SimToolClient(baseURL: try server.baseURL())
+            let created = try await client.setMock(try makeDraft())
+            if common.json { try printJSON(created) } else { makeNoora().info("Added mock \(created.id) (generation \(created.generation)).") }
+        }
+    }
+
+    struct List: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(commandName: "list", abstract: "List active mock rules.")
+        @OptionGroup var server: ServerOptions
+        @OptionGroup var common: CommonJSON
+        func run() async throws {
+            let client = SimToolClient(baseURL: try server.baseURL())
+            let payload = try await client.mocks(since: nil)
+            if common.json { try printJSON(payload) }
+            else if payload.rules.isEmpty { makeNoora().info("No mock rules configured.") }
+            else {
+                makeNoora().table(
+                    headers: ["ID", "Method", "Kind", "Status/Body", "Delay"],
+                    rows: payload.rules.map { rule in
+                        [rule.id, rule.match.method, rule.response.kind.rawValue,
+                         rule.response.kind == .error ? (rule.response.grpcStatus ?? "") : (rule.response.bodyJSON ?? ""),
+                         "\(rule.delayMs)ms"]
+                    }
+                )
+            }
+        }
+    }
+
+    struct Remove: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(commandName: "remove", abstract: "Remove a mock rule by id.")
+        @Argument(help: "Mock rule id, e.g. mock-1.") var id: String
+        @OptionGroup var server: ServerOptions
+        func run() async throws {
+            _ = try await SimToolClient(baseURL: try server.baseURL()).removeMock(id: id)
+            makeNoora().info("Removed mock \(id).")
+        }
+    }
+
+    struct Clear: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(commandName: "clear", abstract: "Remove all mock rules.")
+        @OptionGroup var server: ServerOptions
+        func run() async throws {
+            _ = try await SimToolClient(baseURL: try server.baseURL()).clearMocks()
+            makeNoora().info("Cleared all mock rules.")
+        }
     }
 }
 
