@@ -46,6 +46,7 @@ public final class StreamServer: @unchecked Sendable {
     private let directInput = SimulatorDirectInputClient.shared
     private let metrics = StreamMetricsStore()
     private let networkLoggerEvents = NetworkLoggerEventStore(capacity: 1_000)
+    private let mockRules = MockRuleRegistry()
     private let stateLoggerEvents = StateLoggerEventStore()
     private let logEntries = LogEntryStore(capacity: 5_000)
     /// App launches detected for the inspected app, shared by the log and network ingest paths and
@@ -224,6 +225,36 @@ public final class StreamServer: @unchecked Sendable {
             } catch {
                 return self.errorResponse(error, statusCode: 400, reason: "Bad Request")
             }
+        }
+
+        server.POST["/api/v1/mocks"] = { request in
+            do {
+                let draft = try self.decodeJSON(MockRuleDraft.self, from: request)
+                return try self.jsonEncodedResponse(self.mockRules.add(draft))
+            } catch {
+                return self.errorResponse(error, statusCode: 400, reason: "Bad Request")
+            }
+        }
+
+        server.GET["/api/v1/mocks"] = { request in
+            do {
+                return try self.jsonEncodedResponse(self.mockRules.list(since: request.queryInt("since")))
+            } catch {
+                return self.errorResponse(error)
+            }
+        }
+
+        server.DELETE["/api/v1/mocks/:id"] = { request in
+            guard let id = request.params[":id"], !id.isEmpty else {
+                return self.errorResponse(SimToolError("Missing mock id"), statusCode: 400, reason: "Bad Request")
+            }
+            let removed = self.mockRules.remove(id: id)
+            return self.jsonResponse(["ok": true, "removed": removed ? 1 : 0])
+        }
+
+        server.DELETE["/api/v1/mocks"] = { _ in
+            let removed = self.mockRules.clear()
+            return self.jsonResponse(["ok": true, "removed": removed])
         }
 
         server.DELETE["/api/v1/network/launches/:launchId"] = { request in
