@@ -283,6 +283,8 @@ public enum WebViewer {
     .network-row .time { color: rgba(244,247,251,0.5); }
     .network-row .status { font-weight: 700; }
     .network-row .dur { color: rgba(244,247,251,0.6); }
+    .network-row.mocked { border-left: 3px solid #a78bfa; }
+    .network-row .mock-badge { color: #a78bfa; margin-left: 4px; }
     .status-ok { color: #4ade80; }
     .status-warn { color: #fbbf24; }
     .status-err { color: #f87171; }
@@ -1027,7 +1029,7 @@ public enum WebViewer {
         }
         if (launchCollapsed) continue;
         const row = document.createElement("li");
-        row.className = "network-row" + (event.id === networkSelectedId ? " selected" : "");
+        row.className = "network-row" + (event.id === networkSelectedId ? " selected" : "") + (event.mocked ? " mocked" : "");
         const time = document.createElement("span");
         time.className = "time";
         time.textContent = clockTime(event.timestamp);
@@ -1035,6 +1037,13 @@ public enum WebViewer {
         req.className = "req";
         req.textContent = summarizeRequestShort(event);
         req.title = summarizeRequest(event);
+        if (event.mocked) {
+          const badge = document.createElement("span");
+          badge.className = "mock-badge";
+          badge.textContent = "🎭";
+          badge.title = event.mockRuleId ? ("Mocked by " + event.mockRuleId) : "Mocked response";
+          req.appendChild(badge);
+        }
         const status = document.createElement("span");
         status.className = "status " + statusClass(event);
         status.textContent = summarizeStatus(event);
@@ -1079,6 +1088,9 @@ public enum WebViewer {
         event.timestamp,
         event.appBundleID || ""
       ].filter(Boolean).join("\n"));
+      if (event.mocked) {
+        lines.push(`<div class="kv"><span class="kv-key">Mocked</span><span class="kv-val">${escapeHTML(event.mockRuleId || "yes")}</span></div>`);
+      }
 
       const request = event.request || {};
       section("Request");
