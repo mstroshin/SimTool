@@ -26,4 +26,16 @@ final class MockCommandTests: XCTestCase {
         let set = try? Mock.Set.parse(["--method", "/m"])
         XCTAssertThrowsError(try set?.makeDraft())
     }
+
+    func testSetRejectsUnknownErrorStatus() throws {
+        let set = try Mock.Set.parse(["--method", "/m", "--error", "unavailble"])
+        XCTAssertThrowsError(try set.makeDraft())
+    }
+
+    func testSetAcceptsValidErrorStatus() throws {
+        let set = try Mock.Set.parse(["--method", "/m", "--error", "unavailable"])
+        let draft = try set.makeDraft()
+        XCTAssertEqual(draft.response.kind, .error)
+        XCTAssertEqual(draft.response.grpcStatus, "unavailable")
+    }
 }

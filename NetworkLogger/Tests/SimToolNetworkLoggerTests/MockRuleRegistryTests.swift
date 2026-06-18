@@ -36,8 +36,18 @@ final class MockRuleRegistryTests: XCTestCase {
         let registry = MockRuleRegistry()
         _ = registry.add(draft)
         _ = registry.add(draft)
+        let before = registry.list(since: nil).generation
         let removed = registry.clear()
         XCTAssertEqual(removed, 2)
         XCTAssertEqual(registry.list(since: nil).rules.count, 0)
+        XCTAssertEqual(registry.list(since: nil).generation, before + 1)
+    }
+
+    func testClearOnEmptyRegistryDoesNotBumpGeneration() {
+        let registry = MockRuleRegistry()
+        let g0 = registry.list(since: nil).generation
+        let removed = registry.clear()
+        XCTAssertEqual(removed, 0)
+        XCTAssertEqual(registry.list(since: nil).generation, g0)
     }
 }

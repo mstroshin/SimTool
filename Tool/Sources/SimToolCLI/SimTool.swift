@@ -487,6 +487,13 @@ struct Mock: AsyncParsableCommand {
     struct Set: AsyncParsableCommand {
         static let configuration = CommandConfiguration(commandName: "set", abstract: "Add a mock rule.")
 
+        static let knownGRPCStatuses: Swift.Set<String> = [
+            "ok", "cancelled", "unknown", "invalidArgument", "deadlineExceeded",
+            "notFound", "alreadyExists", "permissionDenied", "resourceExhausted",
+            "failedPrecondition", "aborted", "outOfRange", "unimplemented",
+            "internal", "unavailable", "dataLoss", "unauthenticated",
+        ]
+
         @Option(help: "gRPC full-method or HTTP path to match. Supports * globbing.") var method: String
         @Option(name: .customLong("match-header"), help: "Header/metadata equality constraint key=value (repeatable).") var matchHeader: [String] = []
         @Option(name: .customLong("match-body"), help: "JSON subset the request must contain.") var matchBody: String?
@@ -512,6 +519,10 @@ struct Mock: AsyncParsableCommand {
             case let (body?, nil):
                 response = MockResponse(kind: .success, bodyJSON: body)
             case let (nil, error?):
+                guard Mock.Set.knownGRPCStatuses.contains(error) else {
+                    let known = Mock.Set.knownGRPCStatuses.sorted().joined(separator: ", ")
+                    throw SimToolError("Unknown gRPC status '\(error)'. Expected one of: \(known)")
+                }
                 response = MockResponse(kind: .error, grpcStatus: error, message: message)
             default:
                 throw SimToolError("Provide exactly one of --body or --error.")
