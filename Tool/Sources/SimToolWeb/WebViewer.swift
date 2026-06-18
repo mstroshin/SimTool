@@ -232,12 +232,22 @@ public enum WebViewer {
     .tests-status-interrupted { color: rgba(244,247,251,0.45); }
     .tests-empty { color: rgba(244,247,251,0.45); font-size: 12px; padding: 10px; }
     .tests-timeline { display: flex; flex-direction: column; gap: 3px; min-height: 0; flex: 1; overflow: auto; }
-    .tests-timeline-header { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: rgba(244,247,251,0.5); padding: 4px 2px; }
-    .tests-step { display: flex; gap: 8px; padding: 5px 8px; border-radius: 6px; border: 1px solid transparent; cursor: pointer; font-size: 12px; }
+    .tests-timeline-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: rgba(244,247,251,0.5); padding: 4px 2px; }
+    .tests-timeline-title { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+    .tests-timeline-toggle { flex: 0 0 auto; cursor: pointer; user-select: none; color: rgba(244,247,251,0.5); padding: 2px 6px; font-size: 18px; line-height: 1; }
+    .tests-timeline-toggle:hover { color: #7dd3fc; }
+    .tests-step { display: flex; align-items: flex-start; gap: 8px; padding: 5px 8px; border-radius: 6px; border: 1px solid transparent; cursor: pointer; font-size: 12px; }
     .tests-step:hover { border-color: rgba(125,211,252,0.45); }
     .tests-step.current { border-color: #7dd3fc; background: rgba(125,211,252,0.10); }
     .tests-step-t { flex: 0 0 38px; color: #7dd3fc; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .tests-step-text { flex: 1; min-width: 0; }
+    .tests-step-toggle { flex: 0 0 auto; color: rgba(244,247,251,0.5); cursor: pointer; user-select: none; padding: 0 4px; font-size: 16px; line-height: 1; }
+    .tests-step-toggle:hover { color: #7dd3fc; }
+    .tests-detail { margin-left: 46px; display: flex; flex-direction: column; gap: 3px; padding: 2px 0 4px; }
+    .tests-detail[hidden] { display: none; }
+    .tests-detail-text { padding: 2px 8px; font-size: 12px; color: rgba(244,247,251,0.7); }
     .tests-logline { margin-left: 46px; padding: 2px 8px; border-left: 2px solid rgba(74,222,128,0.5); font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; color: rgba(190,242,164,0.85); word-break: break-all; }
+    .tests-detail .tests-logline { margin-left: 0; }
     .tests-log { display: flex; gap: 8px; padding: 3px 8px; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; color: rgba(190,242,164,0.85); word-break: break-all; }
     /* Test session playback over the screen pane */
     .test-playback { position: absolute; inset: 0; z-index: 2; display: flex; flex-direction: column; background: #03040a; }
@@ -711,6 +721,7 @@ public enum WebViewer {
     let launchesById = {};
     const collapsedLogLaunches = new Set();
     const collapsedNetworkLaunches = new Set();
+    const expandedTestSteps = new Set();   // "<sessionId>:<entryIndex>" of steps whose detail is open
 
     async function loadLaunches() {
       try {
@@ -972,6 +983,17 @@ public enum WebViewer {
       if (event.error) return "ERR";
       const response = event.response || {};
       if (event.protocol === "grpc") {
+        return response.grpcStatusCode != null ? String(response.grpcStatusCode) : "—";
+      }
+      return response.statusCode != null ? String(response.statusCode) : "—";
+    }
+
+    // Full status incl. the gRPC message — kept out of the row's status cell (code only),
+    // but used for the row tooltip and the search haystack so the message stays discoverable.
+    function fullStatusText(event) {
+      if (event.error) return "ERR";
+      const response = event.response || {};
+      if (event.protocol === "grpc") {
         return [response.grpcStatusCode, response.grpcStatusMessage].filter(Boolean).join(" ") || "—";
       }
       return response.statusCode != null ? String(response.statusCode) : "—";
@@ -993,7 +1015,7 @@ public enum WebViewer {
 
     function networkEventHaystack(event) {
       const request = event.request || {};
-      return [summarizeRequest(event), summarizeStatus(event), event.protocol, request.host]
+      return [summarizeRequest(event), fullStatusText(event), event.protocol, request.host]
         .filter(Boolean).join(" ").toLowerCase();
     }
 
@@ -1053,6 +1075,7 @@ public enum WebViewer {
         const status = document.createElement("span");
         status.className = "status " + statusClass(event);
         status.textContent = summarizeStatus(event);
+        status.title = fullStatusText(event);
         const dur = document.createElement("span");
         dur.className = "dur";
         dur.textContent = Math.round(event.durationMilliseconds) + "ms";
@@ -2163,6 +2186,25 @@ public enum WebViewer {
       else showLiveStream();
     }
 
+    // Split a step's text into a short white heading and the detailed tail that goes
+    // into the collapsible block. Cuts at the earliest of " — ", "; " or " (" (the
+    // paren is kept with the tail). No separator → whole text is the heading.
+    function splitStep(text) {
+      const t = (text || "").trim();
+      const dash = t.search(/ — /);
+      const semi = t.indexOf("; ");
+      const paren = t.search(/ \(/);
+      const cands = [];
+      if (dash >= 0) cands.push([dash, dash + 3]);
+      if (semi >= 0) cands.push([semi, semi + 2]);
+      if (paren >= 0) cands.push([paren, paren + 1]);
+      if (!cands.length) return { head: t, tail: "" };
+      cands.sort((a, b) => a[0] - b[0]);
+      const [idx, tailStart] = cands[0];
+      const head = t.slice(0, idx).trim();
+      return { head: head || t, tail: t.slice(tailStart).trim() };
+    }
+
     function renderTestTimeline() {
       if (activeTab !== "tests") return;
       const session = testsSessions.find((s) => s.id === selectedTestId);
@@ -2171,11 +2213,26 @@ public enum WebViewer {
       if (!session) return;
       const header = document.createElement("div");
       header.className = "tests-timeline-header";
-      header.textContent = session.title + (session.videoError ? " · video unavailable" : "");
+      const headerTitle = document.createElement("span");
+      headerTitle.className = "tests-timeline-title";
+      headerTitle.textContent = session.title + (session.videoError ? " · video unavailable" : "");
+      const headerToggle = document.createElement("span");
+      headerToggle.className = "tests-timeline-toggle";
+      header.append(headerTitle, headerToggle);
       testsTimelineEl.appendChild(header);
+
+      // Keys of all steps that have a collapsible detail — backs the expand/collapse-all control.
+      const detailKeys = [];
       (session.entries || []).forEach((entry, index) => {
         const offset = entryOffsetSeconds(session, entry);
         if (entry.kind === "step") {
+          const { head, tail } = splitStep(entry.text);
+          const logs = entry.logs || [];
+          const hasDetail = !!tail || logs.length > 0;
+          const stepKey = selectedTestId + ":" + index;
+          const expanded = expandedTestSteps.has(stepKey);
+          if (hasDetail) detailKeys.push(stepKey);
+
           const row = document.createElement("div");
           row.className = "tests-step";
           row.dataset.index = String(index);
@@ -2183,17 +2240,50 @@ public enum WebViewer {
           time.className = "tests-step-t";
           time.textContent = formatOffset(offset);
           const text = document.createElement("span");
-          text.textContent = entry.text || "";
+          text.className = "tests-step-text";
+          text.textContent = head;
           row.append(time, text);
           row.addEventListener("click", () => seekTestVideo(offset));
-          testsTimelineEl.appendChild(row);
-          for (const line of entry.logs || []) {
-            const log = document.createElement("div");
-            log.className = "tests-logline";
-            log.textContent = line;
-            testsTimelineEl.appendChild(log);
+
+          let detail;
+          if (hasDetail) {
+            const toggle = document.createElement("span");
+            toggle.className = "tests-step-toggle";
+            toggle.textContent = expanded ? "▾" : "▸";
+            toggle.title = expanded ? "Свернуть детали" : "Показать детали";
+            row.appendChild(toggle);
+
+            detail = document.createElement("div");
+            detail.className = "tests-detail";
+            detail.hidden = !expanded;
+            if (tail) {
+              const tailEl = document.createElement("div");
+              tailEl.className = "tests-detail-text";
+              tailEl.textContent = tail;
+              detail.appendChild(tailEl);
+            }
+            for (const line of logs) {
+              const log = document.createElement("div");
+              log.className = "tests-logline";
+              log.textContent = line;
+              detail.appendChild(log);
+            }
+
+            toggle.addEventListener("click", (domEvent) => {
+              domEvent.stopPropagation();
+              const open = expandedTestSteps.has(stepKey);
+              if (open) expandedTestSteps.delete(stepKey);
+              else expandedTestSteps.add(stepKey);
+              detail.hidden = open;
+              toggle.textContent = open ? "▸" : "▾";
+              toggle.title = open ? "Показать детали" : "Свернуть детали";
+            });
           }
+
+          testsTimelineEl.appendChild(row);
+          if (detail) testsTimelineEl.appendChild(detail);
         } else {
+          // (non-step entries handled below)
           for (const line of entry.logs || []) {
             const log = document.createElement("div");
             log.className = "tests-log";
@@ -2207,6 +2297,25 @@ public enum WebViewer {
           }
         }
       });
+
+      // Expand/collapse-all control in the header — collapses all when everything is open,
+      // otherwise opens every step that has detail. Hidden when no step has detail.
+      if (detailKeys.length) {
+        const allOpen = detailKeys.every((k) => expandedTestSteps.has(k));
+        headerToggle.textContent = allOpen ? "▾" : "▸";
+        headerToggle.title = allOpen ? "Свернуть все шаги" : "Развернуть все шаги";
+        headerToggle.addEventListener("click", () => {
+          if (detailKeys.every((k) => expandedTestSteps.has(k))) {
+            detailKeys.forEach((k) => expandedTestSteps.delete(k));
+          } else {
+            detailKeys.forEach((k) => expandedTestSteps.add(k));
+          }
+          renderTestTimeline();
+        });
+      } else {
+        headerToggle.hidden = true;
+      }
+
       restoreScroll(testsTimelineEl, "bottom", prevScroll);
     }
 
