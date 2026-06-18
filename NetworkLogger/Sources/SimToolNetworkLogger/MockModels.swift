@@ -84,12 +84,13 @@ public struct MockRuleDraft: Codable, Equatable, Sendable {
 }
 
 /// The outcome of matching a request against the store, handed to the interceptor.
-public struct MockDecision: Equatable, Sendable {
+public struct MockDecision: Codable, Equatable, Sendable {
     public var ruleId: String
     public var kind: MockResponseKind
     public var bodyJSON: String?
     public var grpcStatus: String?
     public var message: String?
+    /// Always concrete (defaults to `[:]`), unlike `MockResponse.trailers` which is optional.
     public var trailers: [String: String]
     public var delayMs: Int
 
