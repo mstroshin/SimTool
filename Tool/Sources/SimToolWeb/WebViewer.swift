@@ -296,6 +296,10 @@ public enum WebViewer {
     .network-detail .kv { display: grid; grid-template-columns: minmax(96px, 38%) 1fr; column-gap: 12px; row-gap: 3px; margin: 0 0 6px; padding: 6px 8px; border-radius: 8px; background: rgba(255,255,255,0.04); }
     .network-detail .kv-key { color: rgba(125,211,252,0.82); overflow-wrap: anywhere; }
     .network-detail .kv-val { color: rgba(244,247,251,0.92); overflow-wrap: anywhere; }
+    .network-detail .mock-value { color: #a78bfa; }
+    .network-detail details.mock-rule { margin: 0 0 6px; padding: 6px 8px; border-radius: 8px; background: rgba(167,139,250,0.08); }
+    .network-detail details.mock-rule summary { cursor: pointer; color: #a78bfa; font-weight: 700; }
+    .network-detail details.mock-rule pre { margin: 6px 0 0; background: transparent; padding: 0; }
     .network-empty, .logs-empty { color: rgba(244,247,251,0.5); padding: 10px; display: block; }
 
     .detail-back { appearance: none; width: 100%; text-align: left; background: rgba(255,255,255,0.03); border: 0; border-bottom: 1px solid rgba(255,255,255,0.08); color: #bae6fd; padding: 8px 12px; font: 12px ui-sans-serif, system-ui, sans-serif; cursor: pointer; }
@@ -809,6 +813,8 @@ public enum WebViewer {
     // ---- Network ----
 
     let networkEvents = [];
+    let mockRulesById = {};
+    let mockRuleExpanded = false;
     let networkSelectedId = null;
     let networkTimer = null;
 
@@ -1071,12 +1077,12 @@ public enum WebViewer {
     function renderNetworkDetail(event) {
       const lines = [];
       const section = (title) => lines.push(`<h3>${escapeHTML(title)}</h3>`);
-      const pre = (text) => lines.push(`<pre>${escapeHTML(text)}</pre>`);
-      const kv = (entries) => {
+      const pre = (text, mocked) => lines.push(`<pre${mocked ? ' class="mock-value"' : ''}>${escapeHTML(text)}</pre>`);
+      const kv = (entries, mocked) => {
         const pairs = Object.entries(entries || {});
         if (!pairs.length) return;
         const cells = pairs.map(([key, value]) =>
-          `<span class="kv-key">${escapeHTML(key)}</span><span class="kv-val">${escapeHTML(value)}</span>`
+          `<span class="kv-key">${escapeHTML(key)}</span><span class="kv-val${mocked ? ' mock-value' : ''}">${escapeHTML(value)}</span>`
         ).join("");
         lines.push(`<div class="kv">${cells}</div>`);
       };
@@ -1089,7 +1095,13 @@ public enum WebViewer {
         event.appBundleID || ""
       ].filter(Boolean).join("\n"));
       if (event.mocked) {
-        lines.push(`<div class="kv"><span class="kv-key">Mocked</span><span class="kv-val">${escapeHTML(event.mockRuleId || "yes")}</span></div>`);
+        lines.push(`<div class="kv"><span class="kv-key">Mocked</span><span class="kv-val mock-value">${escapeHTML(event.mockRuleId || "yes")}</span></div>`);
+        const rule = event.mockRuleId ? mockRulesById[event.mockRuleId] : null;
+        if (rule) {
+          lines.push(`<details class="mock-rule"${mockRuleExpanded ? " open" : ""}><summary>Mock rule</summary><pre class="mock-value">${escapeHTML(JSON.stringify(rule, null, 2))}</pre></details>`);
+        } else if (event.mockRuleId) {
+          lines.push(`<div class="kv"><span class="kv-key">Mock rule</span><span class="kv-val">(no longer active)</span></div>`);
+        }
       }
 
       const request = event.request || {};
@@ -1100,8 +1112,16 @@ public enum WebViewer {
       if (event.response) {
         const response = event.response;
         section("Response");
+        const mocked = !!event.mocked;
+        if (event.protocol === "grpc") {
+          const status = [response.grpcStatusCode, response.grpcStatusMessage].filter((s) => s != null && s !== "").join(" · ");
+          if (status) kv({ "gRPC status": status }, mocked);
+        } else if (response.statusCode != null) {
+          kv({ "Status": String(response.statusCode) }, mocked);
+        }
         kv(event.protocol === "grpc" ? response.metadata : response.headers);
-        if (response.bodyPreview) pre(response.bodyPreview);
+        if (response.bodyPreview) pre(response.bodyPreview, mocked);
+        else if (mocked) pre("(mock returned no body)", mocked);
       }
 
       if (event.error) {
@@ -1110,6 +1130,10 @@ public enum WebViewer {
       }
 
       detailBody.innerHTML = lines.join("");
+      const mockRuleEl = detailBody.querySelector("details.mock-rule");
+      if (mockRuleEl) {
+        mockRuleEl.addEventListener("toggle", () => { mockRuleExpanded = mockRuleEl.open; });
+      }
     }
 
     async function loadNetwork() {
@@ -1119,6 +1143,13 @@ public enum WebViewer {
         const payload = await response.json();
         networkEvents = payload.events || [];
         networkCount.textContent = networkEvents.length;
+        try {
+          const mockResponse = await api("/api/v1/mocks");
+          const mockPayload = await mockResponse.json();
+          const map = {};
+          (mockPayload.rules || []).forEach((rule) => { map[rule.id] = rule; });
+          mockRulesById = map;
+        } catch (_) { /* keep last known mock rules */ }
         if (activeTab === "network") {
           if (inspectorView === "list") renderNetworkList();
           else if (networkSelectedId != null) {
