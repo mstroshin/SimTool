@@ -4,6 +4,7 @@ import XCTest
 import SimToolCore
 import SimToolNetworkLogger
 import SimToolServer
+import SimToolClient
 
 final class MockRouteTests: XCTestCase {
     func testCreateListRemoveLifecycle() async throws {
@@ -23,6 +24,20 @@ final class MockRouteTests: XCTestCase {
         try await delete(url: baseURL.appendingPathComponent("api/v1/mocks/\(created.id)"))
         let afterDelete = try await getJSON(MockRuleListPayload.self, url: baseURL.appendingPathComponent("api/v1/mocks"), query: "")
         XCTAssertEqual(afterDelete.rules.count, 0)
+    }
+
+    func testClientRoundTrip() async throws {
+        let (server, baseURL) = try startServer()
+        defer { server.stop() }
+        let client = SimToolClient(baseURL: baseURL)
+        let created = try await client.setMock(MockRuleDraft(match: MockMatch(method: "/m"), response: MockResponse(kind: .error, grpcStatus: "unavailable")))
+        XCTAssertEqual(created.id, "mock-1")
+        let listAfterCreate = try await client.mocks(since: nil)
+        XCTAssertEqual(listAfterCreate.rules.count, 1)
+        let removed = try await client.removeMock(id: created.id)
+        XCTAssertTrue(removed)
+        let listAfterRemove = try await client.mocks(since: nil)
+        XCTAssertEqual(listAfterRemove.rules.count, 0)
     }
 
     // --- helpers (mirror LogCaptureRouteTests) ---

@@ -155,6 +155,37 @@ public struct SimToolClient: Sendable {
         try await sendJSON(NetworkLoggerIngestionResponse.self, path: "network/events", payload: batch, method: "POST")
     }
 
+    public func setMock(_ draft: MockRuleDraft) async throws -> MockRuleCreateResponse {
+        try await sendJSON(MockRuleCreateResponse.self, path: "mocks", payload: draft, method: "POST")
+    }
+
+    public func mocks(since: Int? = nil) async throws -> MockRuleListPayload {
+        if let since {
+            var components = URLComponents(url: apiURL.appendingPathComponent("mocks"), resolvingAgainstBaseURL: false)!
+            components.queryItems = [URLQueryItem(name: "since", value: String(since))]
+            return try await getJSON(MockRuleListPayload.self, url: components.url!)
+        }
+        return try await getJSON(MockRuleListPayload.self, path: "mocks")
+    }
+
+    @discardableResult
+    public func removeMock(id: String) async throws -> Bool {
+        let url = apiURL.appendingPathComponent("mocks/\(id)")
+        let request = makeRequest(url: url, method: "DELETE")
+        let (data, response) = try await session.data(for: request)
+        try validate(response: response, data: data)
+        return true
+    }
+
+    @discardableResult
+    public func clearMocks() async throws -> Bool {
+        let url = apiURL.appendingPathComponent("mocks")
+        let request = makeRequest(url: url, method: "DELETE")
+        let (data, response) = try await session.data(for: request)
+        try validate(response: response, data: data)
+        return true
+    }
+
     public func stateLoggerEvents(since: Int? = nil, limit: Int = 500) async throws -> StateLoggerEventsPayload {
         var components = URLComponents(url: apiURL.appendingPathComponent("state/events"), resolvingAgainstBaseURL: false)!
         var queryItems = [URLQueryItem(name: "limit", value: "\(limit)")]
