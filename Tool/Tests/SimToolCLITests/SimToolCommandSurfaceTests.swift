@@ -69,8 +69,7 @@ final class SimToolCommandSurfaceTests: XCTestCase {
     }
 
     func testRunParserAcceptsViewerFlagsAndConfig() throws {
-        let command = try Run.parse(["--native", "--no-network", "--no-state", "--config", ".simtool/config.yml", "--json"])
-        XCTAssertTrue(command.native)
+        let command = try Run.parse(["--no-network", "--no-state", "--config", ".simtool/config.yml", "--json"])
         XCTAssertFalse(command.web)
         XCTAssertTrue(command.noNetwork)
         XCTAssertTrue(command.noState)
@@ -90,19 +89,13 @@ final class SimToolCommandSurfaceTests: XCTestCase {
         XCTAssertFalse(try Run.parse([]).force, "force must default to off")
     }
 
-    func testRunRejectsBothViewerFlags() {
-        XCTAssertThrowsError(try Run.parse(["--web", "--native"]))
-    }
-
     func testBrowserOpensOnlyWhenWebRequested() {
-        XCTAssertFalse(shouldOpenBrowser(webRequested: false, json: false, nativeWindow: false, detachedChild: false),
+        XCTAssertFalse(shouldOpenBrowser(webRequested: false, json: false, detachedChild: false),
                        "the browser must stay closed unless --web is passed")
-        XCTAssertTrue(shouldOpenBrowser(webRequested: true, json: false, nativeWindow: false, detachedChild: false))
-        XCTAssertFalse(shouldOpenBrowser(webRequested: true, json: true, nativeWindow: false, detachedChild: false),
+        XCTAssertTrue(shouldOpenBrowser(webRequested: true, json: false, detachedChild: false))
+        XCTAssertFalse(shouldOpenBrowser(webRequested: true, json: true, detachedChild: false),
                        "--json output is for scripts; never open a browser")
-        XCTAssertFalse(shouldOpenBrowser(webRequested: true, json: false, nativeWindow: true, detachedChild: false),
-                       "the native window replaces the browser viewer")
-        XCTAssertFalse(shouldOpenBrowser(webRequested: true, json: false, nativeWindow: false, detachedChild: true),
+        XCTAssertFalse(shouldOpenBrowser(webRequested: true, json: false, detachedChild: true),
                        "detached children run headless")
     }
 
@@ -111,7 +104,6 @@ final class SimToolCommandSurfaceTests: XCTestCase {
         XCTAssertTrue(try Serve.parse(["--web"]).web)
         // --no-open is a deprecated no-op kept so existing scripts keep parsing.
         XCTAssertTrue(try Serve.parse(["--no-open"]).noOpen)
-        XCTAssertThrowsError(try Serve.parse(["--web", "--window"]))
     }
 
     func testOpenParserAcceptsOptionalNameAndConfig() throws {
