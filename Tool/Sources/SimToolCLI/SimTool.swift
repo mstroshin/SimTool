@@ -6,12 +6,6 @@ import SimToolClient
 import SimToolCore
 import SimToolNetworkLogger
 import SimToolServer
-import SimToolUI
-
-#if canImport(AppKit) && canImport(SwiftUI)
-import AppKit
-import SwiftUI
-#endif
 
 @main
 struct SimTool: AsyncParsableCommand {
@@ -1133,9 +1127,6 @@ struct Serve: AsyncParsableCommand {
     @Flag(help: "Deprecated no-op: the browser is no longer opened automatically; pass --web to open it.")
     var noOpen = false
 
-    @Flag(help: "Open a native SwiftUI window with direct simulator rendering.")
-    var window = false
-
     @Flag(name: .long, help: "Print verbose diagnostic output to stderr.")
     var verbose = false
 
@@ -1146,12 +1137,6 @@ struct Serve: AsyncParsableCommand {
     var detachedChild = false
 
     @OptionGroup var common: CommonJSON
-
-    func validate() throws {
-        if web && window {
-            throw ValidationError("Pass at most one of --web or --window.")
-        }
-    }
 
     func run() async throws {
         DebugLog.isEnabled = verbose
@@ -1166,9 +1151,8 @@ struct Serve: AsyncParsableCommand {
             port: port,
             defaultLogApp: app.flatMap { $0.isEmpty ? nil : $0 },
             testSessionsRoot: SimToolDirectory.testSessionsDirectory(in: SimToolDirectory.resolve()),
-            window: window,
             printSessionJSON: common.json || detachedChild,
-            openBrowser: shouldOpenBrowser(webRequested: web, json: common.json, nativeWindow: window, detachedChild: detachedChild),
+            openBrowser: shouldOpenBrowser(webRequested: web, json: common.json, detachedChild: detachedChild),
             sessionId: sessionId
         )
     }
@@ -1204,23 +1188,22 @@ struct Serve: AsyncParsableCommand {
 }
 
 /// The browser viewer is opt-in: it opens only when the user passes `--web`, and
-/// never for machine-facing invocations (JSON output, detached children) or when
-/// the native window replaces it. The server starts and prints its URL regardless.
-func shouldOpenBrowser(webRequested: Bool, json: Bool, nativeWindow: Bool, detachedChild: Bool) -> Bool {
-    webRequested && !json && !nativeWindow && !detachedChild
+/// never for machine-facing invocations (JSON output, detached children). The
+/// server starts and prints its URL regardless.
+func shouldOpenBrowser(webRequested: Bool, json: Bool, detachedChild: Bool) -> Bool {
+    webRequested && !json && !detachedChild
 }
 
 /// Shared simulator-stream viewer bootstrap used by both `serve` and `run`:
 /// start the server (reclaiming the port if needed), persist the session,
-/// install signal handlers, report it, optionally open the browser, and either
-/// run the native window or block in the foreground.
+/// install signal handlers, report it, optionally open the browser, and block
+/// in the foreground until interrupted.
 func runViewer(
     device: SimulatorDevice,
     host: String,
     port: UInt16,
     defaultLogApp: String?,
     testSessionsRoot: URL,
-    window: Bool,
     printSessionJSON: Bool,
     openBrowser: Bool,
     sessionId: String?
@@ -1233,7 +1216,7 @@ func runViewer(
         host: host,
         port: port,
         device: device,
-        captureEnabled: !window,
+        captureEnabled: true,
         defaultLogApp: defaultLogApp,
         testSessionsRoot: testSessionsRoot
     )
@@ -1264,10 +1247,6 @@ func runViewer(
     }
     if openBrowser {
         _ = try? await ProcessRunner.run(executable: URL(fileURLWithPath: "/usr/bin/open"), arguments: [server.baseURL])
-    }
-    if window {
-        await runNativeWindow(session: session, server: server)
-        return
     }
     while !Task.isCancelled {
         try await Task.sleep(for: .seconds(3600))
@@ -1329,7 +1308,7 @@ func gracefulShutdown(sessionId: String, server: StreamServer) async {
 }
 
 /// Shuts down every simulator this process booted itself, then forgets them so a
-/// second pass (e.g. signal cleanup racing the native-window delegate) is a no-op.
+/// second pass (e.g. repeated signal cleanup) is a no-op.
 func shutdownBootedSimulators() async {
     for udid in BootedSimulatorRegistry.shared.all() {
         await SimulatorDeviceClient.shutdown(udid)
@@ -1366,14 +1345,11 @@ func reapDeadSessions() async {
 
 struct Run: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Read .simtool/config.yml, launch the configured app, and open the web or native viewer."
+        abstract: "Read .simtool/config.yml, launch the configured app, and start the web viewer server."
     )
 
     @Flag(help: "Open the browser viewer automatically. The server always starts and prints its URL.")
     var web = false
-
-    @Flag(help: "Open a native SwiftUI window instead of the browser viewer.")
-    var native = false
 
     @Flag(name: .long, help: "Disable the SimTool network logger for the launched app (enabled by default).")
     var noNetwork = false
@@ -1394,12 +1370,6 @@ struct Run: AsyncParsableCommand {
     var config: String?
 
     @OptionGroup var common: CommonJSON
-
-    func validate() throws {
-        if web && native {
-            throw ValidationError("Pass at most one of --web or --native.")
-        }
-    }
 
     func run() async throws {
         DebugLog.isEnabled = verbose
@@ -1464,9 +1434,8 @@ struct Run: AsyncParsableCommand {
             port: projectConfig.server.port,
             defaultLogApp: projectConfig.bundleId,
             testSessionsRoot: SimToolDirectory.testSessionsDirectory(in: projectConfig.simtoolDirectory),
-            window: native,
             printSessionJSON: common.json,
-            openBrowser: shouldOpenBrowser(webRequested: web, json: common.json, nativeWindow: native, detachedChild: false),
+            openBrowser: shouldOpenBrowser(webRequested: web, json: common.json, detachedChild: false),
             sessionId: nil
         )
     }
@@ -1690,76 +1659,6 @@ struct Interactive: AsyncParsableCommand {
         }
     }
 }
-
-#if canImport(AppKit) && canImport(SwiftUI)
-@MainActor
-private func runNativeWindow(session: SessionInfo, server: StreamServer) {
-    guard let url = URL(string: session.api) else { return }
-    let app = NSApplication.shared
-    let delegate = SimToolWindowDelegate(sessionID: session.sessionId, server: server)
-    SimToolWindowDelegateRetainer.shared.delegate = delegate
-    app.delegate = delegate
-    app.setActivationPolicy(.regular)
-
-    let client = SimToolClient(baseURL: url)
-    let root = SimToolSessionView(client: client, mode: .window, session: session)
-    let hostingController = NSHostingController(rootView: root)
-    let window = NSWindow(contentViewController: hostingController)
-    window.title = "SimTool — \(session.device.name)"
-    window.setContentSize(NSSize(width: 1120, height: 720))
-    window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-    window.center()
-    window.delegate = delegate
-    delegate.window = window
-    window.makeKeyAndOrderFront(nil)
-    app.activate(ignoringOtherApps: true)
-    app.run()
-}
-
-private final class SimToolWindowDelegateRetainer {
-    static let shared = SimToolWindowDelegateRetainer()
-    var delegate: SimToolWindowDelegate?
-}
-
-private final class SimToolWindowDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
-    weak var window: NSWindow?
-    private let sessionID: String
-    private let server: StreamServer
-    private var stopped = false
-
-    init(sessionID: String, server: StreamServer) {
-        self.sessionID = sessionID
-        self.server = server
-    }
-
-    func windowWillClose(_ notification: Notification) {
-        stopOnce()
-        NSApplication.shared.terminate(nil)
-    }
-
-    func applicationWillTerminate(_ notification: Notification) {
-        stopOnce()
-    }
-
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
-
-    private func stopOnce() {
-        guard !stopped else { return }
-        stopped = true
-        server.stop()
-        // Power down simulators this process booted before the app exits. The
-        // window is closing, so blocking briefly here is fine; cap it so a hung
-        // simctl can't keep the app alive.
-        let done = DispatchSemaphore(value: 0)
-        Task {
-            await shutdownBootedSimulators()
-            done.signal()
-        }
-        _ = done.wait(timeout: .now() + .seconds(8))
-        SessionStore.shared.remove(sessionID)
-    }
-}
-#endif
 
 private extension URL {
     func creatingFileIfNeeded() throws -> URL {
