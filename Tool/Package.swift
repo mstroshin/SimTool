@@ -42,7 +42,6 @@ let package = Package(
     products: [
         .executable(name: "simtool", targets: ["SimToolCLI"]),
         .library(name: "SimToolClient", targets: ["SimToolClient"]),
-        .library(name: "SimToolUI", targets: ["SimToolUI"]),
     ],
     dependencies: [
         .package(path: ".."),
@@ -104,15 +103,6 @@ let package = Package(
                 .product(name: "SimToolStateLogger", package: "SimTool"),
             ]
         ),
-        .target(
-            name: "SimToolUI",
-            dependencies: [
-                "SimToolClient",
-                "SimToolCore",
-                "SimToolStream",
-                .product(name: "SimToolNetworkLogger", package: "SimTool"),
-            ]
-        ),
         .executableTarget(
             name: "SimToolCLI",
             dependencies: [
@@ -120,7 +110,6 @@ let package = Package(
                 "SimToolClient",
                 .product(name: "SimToolNetworkLogger", package: "SimTool"),
                 "SimToolServer",
-                "SimToolUI",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Noora", package: "Noora"),
             ]
