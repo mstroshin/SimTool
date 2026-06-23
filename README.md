@@ -2,9 +2,8 @@
 
 Swift CLI/server for streaming and automating Apple Simulators.
 
-The MVP focuses on a local browser viewer with JPEG and H.264/AVCC streams, a
-machine-readable CLI for agents, and a SwiftUI package surface for native
-consumers.
+The MVP focuses on a local browser viewer with JPEG and H.264/AVCC streams and a
+machine-readable CLI for agents.
 
 ## Build
 
@@ -347,14 +346,12 @@ file's directory.
 (reusing the checksum cache), installs, and launches the app, then starts the
 viewer server and prints its URL (`Open http://…`, or the `url` field with
 `--json`) — handy for scripts that open the page themselves. Pass `--web` to
-also open the browser viewer, or `--native` for a native SwiftUI window; the
-flags are mutually exclusive. It runs in the foreground like `serve` (Ctrl-C
+also open the browser viewer. It runs in the foreground like `serve` (Ctrl-C
 stops it).
 
 ```sh
 swift run simtool run            # server only; open the printed URL yourself
 swift run simtool run --web      # …and open the browser viewer
-swift run simtool run --native
 swift run simtool run --device booted        # run on the first booted simulator
 swift run simtool run --device "iPhone 16"   # …or a specific UDID/name, overriding the config
 swift run simtool run --config path/to/.simtool/config.yml
@@ -440,6 +437,4 @@ The `logs/capture` routes drive a continuous capture (OSLog plus optional
 stdout/`print`) into a bounded buffer that clients poll incrementally by cursor;
 `GET /api/v1/logs` remains the one-shot bounded snapshot.
 
-`SimToolClient` exposes these routes as typed async Swift calls. `SimToolUI`
-provides an embeddable SwiftUI view with a native renderer, controls,
-logs, network sampling, and stream metrics.
+`SimToolClient` exposes these routes as typed async Swift calls.
