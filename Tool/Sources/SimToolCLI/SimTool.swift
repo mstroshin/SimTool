@@ -118,7 +118,7 @@ struct Kill: AsyncParsableCommand {
 
     @OptionGroup var common: CommonJSON
 
-    func run() throws {
+    func run() async throws {
         let session: SessionInfo?
         if let sessionId {
             session = try SessionStore.shared.session(id: sessionId)
@@ -126,7 +126,21 @@ struct Kill: AsyncParsableCommand {
             session = try SessionStore.shared.latest()
         }
         guard let session else { throw SimToolError("No matching session found") }
+
+        // SIGTERM lets the server run its own graceful cleanup (including powering
+        // down simulators it booted). Give it a moment; if it won't die, force it
+        // and power those simulators down ourselves so a wedged or detached server
+        // can't leak the simulator backend.
         Darwin.kill(session.pid, SIGTERM)
+        for _ in 0..<60 where isProcessAlive(session.pid) {
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        if isProcessAlive(session.pid) {
+            Darwin.kill(session.pid, SIGKILL)
+            for udid in session.bootedDevices {
+                await SimulatorDeviceClient.shutdown(udid)
+            }
+        }
         SessionStore.shared.remove(session.sessionId)
         if common.json {
             try printJSON(["killed": session.sessionId])
@@ -1212,6 +1226,9 @@ func runViewer(
     sessionId: String?
 ) async throws {
     let id = sessionId ?? UUID().uuidString
+    // Power down simulators left booted by earlier SimTool runs that were
+    // SIGKILLed or crashed before they could clean up after themselves.
+    await reapDeadSessions()
     let config = StreamServerConfig(
         host: host,
         port: port,
@@ -1227,7 +1244,8 @@ func runViewer(
         device: device,
         url: server.baseURL,
         api: server.apiURL,
-        startedAt: Date()
+        startedAt: Date(),
+        bootedDevices: BootedSimulatorRegistry.shared.all()
     )
     try SessionStore.shared.write(session)
     installSignalTrap(sessionId: id, server: server)
@@ -1297,8 +1315,52 @@ func cleanupSessions(for pids: [Int32]) {
 
 func installSignalTrap(sessionId: String, server: StreamServer) {
     SignalTrap.shared.installCleanup {
-        server.stop()
-        SessionStore.shared.remove(sessionId)
+        await gracefulShutdown(sessionId: sessionId, server: server)
+    }
+}
+
+/// Tears the session down in dependency order: stop the server (which kills the
+/// log-stream/recorder children it spawned), then power down any simulators this
+/// process booted, then drop the session file. Safe to call more than once.
+func gracefulShutdown(sessionId: String, server: StreamServer) async {
+    server.stop()
+    await shutdownBootedSimulators()
+    SessionStore.shared.remove(sessionId)
+}
+
+/// Shuts down every simulator this process booted itself, then forgets them so a
+/// second pass (e.g. signal cleanup racing the native-window delegate) is a no-op.
+func shutdownBootedSimulators() async {
+    for udid in BootedSimulatorRegistry.shared.all() {
+        await SimulatorDeviceClient.shutdown(udid)
+        BootedSimulatorRegistry.shared.forget(udid)
+    }
+}
+
+/// True if a process with this PID still exists (EPERM means it exists but is
+/// owned by someone else — still alive for our purposes).
+func isProcessAlive(_ pid: Int32) -> Bool {
+    if Darwin.kill(pid, 0) == 0 { return true }
+    return errno == EPERM
+}
+
+/// SIGKILL and crashes skip the signal cleanup above, leaving the simulators a
+/// now-dead session booted. On the next `serve`/`run` we sweep those orphans:
+/// shut down devices booted only by dead sessions (never one a live session or
+/// this process still uses) and delete the stale session files.
+func reapDeadSessions() async {
+    guard let sessions = try? SessionStore.shared.list() else { return }
+    let dead = sessions.filter { !isProcessAlive($0.pid) }
+    guard !dead.isEmpty else { return }
+    let live = sessions.filter { isProcessAlive($0.pid) }
+    let protectedByUs = Set(BootedSimulatorRegistry.shared.all())
+    let toShutDown = SessionReaper.devicesToReap(dead: dead, live: live)
+        .filter { !protectedByUs.contains($0) }
+    for udid in toShutDown {
+        await SimulatorDeviceClient.shutdown(udid)
+    }
+    for session in dead {
+        SessionStore.shared.remove(session.sessionId)
     }
 }
 
@@ -1685,6 +1747,15 @@ private final class SimToolWindowDelegate: NSObject, NSApplicationDelegate, NSWi
         guard !stopped else { return }
         stopped = true
         server.stop()
+        // Power down simulators this process booted before the app exits. The
+        // window is closing, so blocking briefly here is fine; cap it so a hung
+        // simctl can't keep the app alive.
+        let done = DispatchSemaphore(value: 0)
+        Task {
+            await shutdownBootedSimulators()
+            done.signal()
+        }
+        _ = done.wait(timeout: .now() + .seconds(8))
         SessionStore.shared.remove(sessionID)
     }
 }

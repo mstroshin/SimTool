@@ -78,8 +78,21 @@ public enum SimulatorDeviceClient {
             let detail = output.stderrString.isEmpty ? output.stdoutString : output.stderrString
             throw SimToolError("Failed to boot simulator \(device.name) (\(device.udid)): \(detail.trimmingCharacters(in: .whitespacesAndNewlines))")
         }
+        // We booted it, so we own shutting it down on exit (simulators that were
+        // already booted take the early return above and are never recorded).
+        BootedSimulatorRegistry.shared.record(device.udid)
         if let refreshed = try? await resolve(device.udid) { return refreshed }
         return device
+    }
+
+    /// Powers a simulator down. Best-effort: a failure (already shut down, gone)
+    /// must never block process teardown, so errors are swallowed.
+    public static func shutdown(_ udid: String) async {
+        _ = try? await ProcessRunner.run(
+            executable: URL(fileURLWithPath: "/usr/bin/xcrun"),
+            arguments: ["simctl", "shutdown", udid],
+            timeoutSeconds: 30
+        )
     }
 
     /// Brings the Simulator.app UI on screen. `simctl` boots devices headless;
