@@ -1308,7 +1308,7 @@ func gracefulShutdown(sessionId: String, server: StreamServer) async {
 }
 
 /// Shuts down every simulator this process booted itself, then forgets them so a
-/// second pass (e.g. signal cleanup racing the native-window delegate) is a no-op.
+/// second pass (e.g. repeated signal cleanup) is a no-op.
 func shutdownBootedSimulators() async {
     for udid in BootedSimulatorRegistry.shared.all() {
         await SimulatorDeviceClient.shutdown(udid)
