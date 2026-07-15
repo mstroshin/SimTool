@@ -65,6 +65,12 @@ public enum WebViewer {
                       </div>
                       <button id="filterHelp" class="filter-help" type="button" title="Filter help">?</button>
                     </div>
+                    <div id="inspectorNotice" class="inspector-notice" hidden>
+                      <b>No app attached</b> — Network, Logs and State need the app relaunched by simtool.
+                      Restart the server as
+                      <code id="inspectorNoticeCmd" title="Click to copy">simtool serve --app &lt;bundle-id&gt;</code>
+                      or run <code id="inspectorNoticeRunCmd" title="Click to copy">simtool run --web</code> from your project.
+                    </div>
                     <div id="logsControls" class="logs-controls" hidden>
                       <span id="logsStatus">idle</span>
                     </div>
@@ -280,6 +286,12 @@ public enum WebViewer {
 
     .logs-controls { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 6px 10px; border-bottom: 1px solid rgba(255,255,255,0.08); }
     .logs-controls[hidden] { display: none; }
+    .inspector-notice { padding: 8px 10px; border-bottom: 1px solid rgba(255,193,7,0.25); background: rgba(255,193,7,0.10); color: #ffd869; font: 12px/1.5 -apple-system, system-ui, sans-serif; }
+    .inspector-notice[hidden] { display: none; }
+    .inspector-notice code { padding: 1px 5px; border-radius: 4px; background: rgba(0,0,0,0.35); color: #ffe9a8; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; cursor: pointer; overflow-wrap: anywhere; }
+    .inspector-notice code:hover { background: rgba(0,0,0,0.55); }
+    /* The serve command carries a UDID and never fits inline: give it its own wrapped line. */
+    .inspector-notice #inspectorNoticeCmd { display: block; margin: 4px 0; padding: 4px 8px; }
     #logsStatus { font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; color: rgba(244,247,251,0.55); white-space: nowrap; }
 
     .scroll-pane { overflow: auto; flex: 1 1 auto; min-height: 0; }
@@ -410,6 +422,9 @@ public enum WebViewer {
     const networkCount = $("networkCount");
     const logsCount = $("logsCount");
     const networkList = $("networkList");
+    const inspectorNotice = $("inspectorNotice");
+    const inspectorNoticeCmd = $("inspectorNoticeCmd");
+    const inspectorNoticeRunCmd = $("inspectorNoticeRunCmd");
     const logsControls = $("logsControls");
     const logsList = $("logsList");
     const axPane = $("axPane");
@@ -1317,13 +1332,19 @@ public enum WebViewer {
     }
 
     async function startLogsCapture() {
+      const app = (logsTargetApp || "").trim();
+      // Capture only ever starts scoped to an app: an unscoped capture streams OSLog for the
+      // entire simulator, which drowns the viewer in unrelated system noise.
+      if (!app) {
+        logsStatus.textContent = "no app attached";
+        return;
+      }
       logsEntries = [];
       logsCursor = null;
       logsList.innerHTML = "";
-      const app = (logsTargetApp || "").trim();
       // OSLog only: the target app logs via os_log/Logger, so stdout/print capture (which would
       // relaunch the app to attach its console) is never requested.
-      const body = app ? { app } : {};
+      const body = { app };
       try {
         await api("/api/v1/logs/capture", { method: "POST", body: JSON.stringify(body) });
         logsStatus.textContent = "capturing oslog";
@@ -2332,6 +2353,22 @@ public enum WebViewer {
     let inspectorOpen = false;
     let activeTab = "network";
     let inspectorView = "list";
+    // Empty until /config reports a logApp; the notice stays visible on app-scoped tabs so the
+    // user learns why they are empty instead of watching blank panes. Gated on the config fetch
+    // so it cannot flash before the attached app is known.
+    let attachedApp = "";
+    let attachedAppKnown = false;
+    const APP_SCOPED_TABS = ["network", "logs", "state"];
+
+    function updateInspectorNotice() {
+      inspectorNotice.hidden = !attachedAppKnown || !!attachedApp || !APP_SCOPED_TABS.includes(activeTab);
+    }
+
+    for (const codeEl of [inspectorNoticeCmd, inspectorNoticeRunCmd]) {
+      codeEl.addEventListener("click", () => {
+        if (navigator.clipboard) navigator.clipboard.writeText(codeEl.textContent).catch(() => {});
+      });
+    }
     const filterByTab = { network: "", logs: "", state: "", ax: "", tests: "" };
 
     const FILTER_PLACEHOLDER = {
@@ -2368,6 +2405,7 @@ public enum WebViewer {
       inspectorFilter.placeholder = FILTER_PLACEHOLDER[tab] || "";
       inspectorFilter.disabled = false;
       renderFilterChips();
+      updateInspectorNotice();
       if (tab !== "network") { hideNetworkMenu(); hideNetworkLaunchMenu(); }
       if (tab !== "logs") { hideLogsMenu(); hideLogsLaunchMenu(); }
       if (tab !== "tests") hideTestsMenu();
@@ -2710,13 +2748,20 @@ public enum WebViewer {
         const response = await api("/config");
         const config = await response.json();
         if (config.device) deviceName.textContent = config.device;
-        if (config.logApp) {
+        attachedApp = config.logApp || "";
+        attachedAppKnown = true;
+        if (attachedApp) {
           // Pre-scope log capture to the server's default app so logs are already buffering when
           // the inspector is opened. Polling only starts once the inspector is shown.
-          logsTargetApp = config.logApp;
+          logsTargetApp = attachedApp;
           await startLogsCapture();
           if (inspectorOpen) startLogsPolling();
+        } else {
+          const port = location.port ? ` --port ${location.port}` : "";
+          const device = config.udid ? ` --device ${config.udid}` : "";
+          inspectorNoticeCmd.textContent = `simtool serve --app <bundle-id>${device}${port} --web`;
         }
+        updateInspectorNotice();
       } catch (_) {}
     }
     bootstrap();
