@@ -21,6 +21,11 @@ public final class FrameCapture: @unchecked Sendable {
     private var lastSeeds: [ObjectIdentifier: UInt32] = [:]
     private var rewireTickCount = 0
     private var descriptors: [NSObject] = []
+    // Descriptors are ROCKit remote proxies: every message to them is an XPC
+    // round-trip that also leaks a forwarding-proxy registration inside
+    // ROCKSessionManager, so the framebuffer surface must be fetched once per
+    // (re)wire and cached — never queried from the capture hot path.
+    private var surfaces: [ObjectIdentifier: IOSurface] = [:]
     private var callbackUUIDs: [ObjectIdentifier: NSUUID] = [:]
     private var ioClient: NSObject?
 
@@ -77,6 +82,7 @@ public final class FrameCapture: @unchecked Sendable {
         }
         callbackUUIDs.removeAll()
         descriptors.removeAll()
+        surfaces.removeAll()
         lastSeeds.removeAll()
         ioClient = nil
         onFrame = nil
@@ -102,12 +108,14 @@ public final class FrameCapture: @unchecked Sendable {
         }
         callbackUUIDs.removeAll()
         lastSeeds.removeAll()
+        surfaces.removeAll()
         descriptors = candidates
-        for desc in candidates { try registerFrameCallbacks(desc: desc) }
+        for desc in candidates {
+            try registerFrameCallbacks(desc: desc)
+            refreshSurface(for: desc)
+        }
 
-        if let best = pickBestDescriptor(),
-           let surfObj = best.perform(NSSelectorFromString("framebufferSurface"))?.takeUnretainedValue() {
-            let surface = unsafeBitCast(surfObj, to: IOSurface.self)
+        if let surface = bestSurface() {
             capturedWidth = IOSurfaceGetWidth(surface)
             capturedHeight = IOSurfaceGetHeight(surface)
         }
@@ -158,7 +166,10 @@ public final class FrameCapture: @unchecked Sendable {
             self?.captureQueue.async { self?.captureFrame() }
         }
         let surfacesCallback: @convention(block) () -> Void = { [weak self] in
-            self?.captureQueue.async { self?.captureFrame() }
+            self?.captureQueue.async {
+                self?.refreshSurface(for: desc)
+                self?.captureFrame()
+            }
         }
         let propertiesCallback: @convention(block) () -> Void = {}
 
@@ -193,12 +204,9 @@ public final class FrameCapture: @unchecked Sendable {
     }
 
     private func captureFrame(forceIdleRefresh: Bool = false) {
-        guard let desc = pickBestDescriptor() else { return }
-        let surfSel = NSSelectorFromString("framebufferSurface")
-        guard let surfObj = desc.perform(surfSel)?.takeUnretainedValue() else { return }
-        let surface = unsafeBitCast(surfObj, to: IOSurface.self)
+        guard let surface = bestSurface() else { return }
 
-        let key = ObjectIdentifier(desc)
+        let key = ObjectIdentifier(surface)
         let seed = IOSurfaceGetSeed(surface)
         let nowMs = DispatchTime.now().uptimeNanoseconds / 1_000_000
         let seedChanged = lastSeeds[key] != seed
@@ -226,16 +234,24 @@ public final class FrameCapture: @unchecked Sendable {
         onFrame?(pixelBuffer, CMTime(value: CMTimeValue(frameCount), timescale: 60))
     }
 
-    private func pickBestDescriptor() -> NSObject? {
-        let surfSel = NSSelectorFromString("framebufferSurface")
-        var best: NSObject?
+    private func refreshSurface(for desc: NSObject) {
+        let key = ObjectIdentifier(desc)
+        if let old = surfaces.removeValue(forKey: key) {
+            lastSeeds[ObjectIdentifier(old)] = nil
+        }
+        guard let surfObj = desc.perform(NSSelectorFromString("framebufferSurface"))?.takeUnretainedValue() else {
+            return
+        }
+        surfaces[key] = unsafeBitCast(surfObj, to: IOSurface.self)
+    }
+
+    private func bestSurface() -> IOSurface? {
+        var best: IOSurface?
         var bestArea = 0
-        for desc in descriptors {
-            guard let surfObj = desc.perform(surfSel)?.takeUnretainedValue() else { continue }
-            let surface = unsafeBitCast(surfObj, to: IOSurface.self)
+        for surface in surfaces.values {
             let area = IOSurfaceGetWidth(surface) * IOSurfaceGetHeight(surface)
             if area > bestArea {
-                best = desc
+                best = surface
                 bestArea = area
             }
         }
