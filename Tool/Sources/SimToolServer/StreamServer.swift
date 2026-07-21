@@ -18,6 +18,8 @@ public struct StreamServerConfig: Sendable {
     public var defaultLogApp: String?
     /// Where test sessions persist: the project's `.simtool/test-sessions`.
     public var testSessionsRoot: URL
+    /// Where declarative UI test flows live: the project's `.simtool/flows`.
+    public var flowsRoot: URL
 
     public init(
         host: String = "127.0.0.1",
@@ -25,7 +27,8 @@ public struct StreamServerConfig: Sendable {
         device: SimulatorDevice,
         captureEnabled: Bool = true,
         defaultLogApp: String? = nil,
-        testSessionsRoot: URL = SimToolDirectory.testSessionsDirectory(in: SimToolDirectory.resolve())
+        testSessionsRoot: URL = SimToolDirectory.testSessionsDirectory(in: SimToolDirectory.resolve()),
+        flowsRoot: URL = SimToolDirectory.flowsDirectory(in: SimToolDirectory.resolve())
     ) {
         self.host = host
         self.port = port
@@ -33,6 +36,7 @@ public struct StreamServerConfig: Sendable {
         self.captureEnabled = captureEnabled
         self.defaultLogApp = defaultLogApp
         self.testSessionsRoot = testSessionsRoot
+        self.flowsRoot = flowsRoot
     }
 }
 
@@ -54,6 +58,7 @@ public final class StreamServer: @unchecked Sendable {
     private let launches = AppLaunchRegistry()
     /// Agent test sessions: timeline + screen recording, persisted on disk.
     private let testSessions: TestSessionController
+    private let flowRuns: FlowRunController
     /// OSLog category that, by convention, carries a crash summary of the previous run (apps can
     /// only write it after relaunching - crash handlers cannot safely log at crash time).
     private static let crashReportCategory = "Crash"
@@ -86,6 +91,7 @@ public final class StreamServer: @unchecked Sendable {
             device: config.device,
             makeRecorder: { SimctlVideoRecorder() }
         )
+        self.flowRuns = FlowRunController(flowsRoot: config.flowsRoot)
     }
 
     public func start() throws {
@@ -355,6 +361,35 @@ public final class StreamServer: @unchecked Sendable {
                 return try self.jsonEncodedResponse(self.testSessions.list())
             } catch {
                 return self.errorResponse(error)
+            }
+        }
+
+        server.GET["/api/v1/flows"] = { _ in
+            do {
+                return try self.jsonEncodedResponse(self.flowRuns.list())
+            } catch {
+                return self.errorResponse(error)
+            }
+        }
+
+        server.GET["/api/v1/flows/run"] = { _ in
+            do {
+                return try self.jsonEncodedResponse(self.flowRuns.status())
+            } catch {
+                return self.errorResponse(error)
+            }
+        }
+
+        server.POST["/api/v1/flows/run"] = { request in
+            do {
+                let body = try self.decodeJSON(FlowRunRequest.self, from: request)
+                guard let serverURL = URL(string: self.baseURL) else {
+                    return self.errorResponse(SimToolError("Cannot resolve own base URL"))
+                }
+                let status = try self.flowRuns.start(file: body.file, serverURL: serverURL)
+                return try self.jsonEncodedResponse(status)
+            } catch {
+                return self.errorResponse(error, statusCode: 409, reason: "Conflict")
             }
         }
 

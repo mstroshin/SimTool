@@ -88,6 +88,7 @@ let package = Package(
             name: "SimToolServer",
             dependencies: [
                 "SimToolCore",
+                "SimToolClient",
                 .product(name: "SimToolNetworkLogger", package: "SimTool"),
                 .product(name: "SimToolStateLogger", package: "SimTool"),
                 "SimToolStream",

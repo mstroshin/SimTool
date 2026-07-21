@@ -1308,6 +1308,7 @@ struct Serve: AsyncParsableCommand {
             port: parameters.port,
             defaultLogApp: app.flatMap { $0.isEmpty ? nil : $0 },
             testSessionsRoot: SimToolDirectory.testSessionsDirectory(in: SimToolDirectory.resolve()),
+            flowsRoot: SimToolDirectory.flowsDirectory(in: SimToolDirectory.resolve()),
             printSessionJSON: common.json || detachedChild,
             openBrowser: shouldOpenBrowser(webRequested: web, json: common.json, detachedChild: detachedChild),
             sessionId: sessionId
@@ -1401,6 +1402,7 @@ func runViewer(
     port: UInt16,
     defaultLogApp: String?,
     testSessionsRoot: URL,
+    flowsRoot: URL,
     printSessionJSON: Bool,
     openBrowser: Bool,
     sessionId: String?
@@ -1415,7 +1417,8 @@ func runViewer(
         device: device,
         captureEnabled: true,
         defaultLogApp: defaultLogApp,
-        testSessionsRoot: testSessionsRoot
+        testSessionsRoot: testSessionsRoot,
+        flowsRoot: flowsRoot
     )
     let server = try await startStreamServer(config: config)
     let session = SessionInfo(
@@ -1646,6 +1649,7 @@ struct Run: AsyncParsableCommand {
             port: projectConfig.server.port,
             defaultLogApp: projectConfig.bundleId,
             testSessionsRoot: SimToolDirectory.testSessionsDirectory(in: projectConfig.simtoolDirectory),
+            flowsRoot: SimToolDirectory.flowsDirectory(in: projectConfig.simtoolDirectory),
             printSessionJSON: common.json,
             openBrowser: shouldOpenBrowser(webRequested: web, json: common.json, detachedChild: false),
             sessionId: nil

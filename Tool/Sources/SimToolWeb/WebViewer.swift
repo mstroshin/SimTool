@@ -36,8 +36,15 @@ public enum WebViewer {
                     <div id="axOverlay" class="ax-overlay" hidden></div>
                     <div id="testPlayback" class="test-playback" hidden>
                       <button id="testBackLive" class="test-back-live" type="button">← Live</button>
-                      <video id="testVideo" class="test-video" controls playsinline></video>
+                      <!-- Custom controls: Orca's embedded browser drops clicks on the
+                           <video> element itself, so native controls are unreachable. -->
+                      <video id="testVideo" class="test-video" playsinline></video>
                       <div id="testVideoNote" class="test-video-note" hidden>video unavailable</div>
+                      <div id="testControls" class="test-controls">
+                        <button id="testPlayPause" class="test-ctl-btn" type="button" title="Play/Pause">▶</button>
+                        <span id="testTime" class="test-ctl-time">0:00 / 0:00</span>
+                        <input id="testSeek" class="test-ctl-seek" type="range" min="0" max="1000" value="0" step="1">
+                      </div>
                     </div>
                   </div>
                   <div id="placeholder">connecting…</div>
@@ -92,6 +99,8 @@ public enum WebViewer {
                       <div id="stateHistory" class="state-history"></div>
                     </div>
                     <div id="testsPane" class="tests-pane" hidden>
+                      <div id="testsFlows" class="flows-list"></div>
+                      <div class="tests-section-header">Sessions</div>
                       <div id="testsSessions" class="tests-sessions"></div>
                       <div id="testsTimeline" class="tests-timeline scroll-pane"></div>
                     </div>
@@ -237,6 +246,16 @@ public enum WebViewer {
     .tests-status-running { color: #fbbf24; }
     .tests-status-interrupted { color: rgba(244,247,251,0.45); }
     .tests-empty { color: rgba(244,247,251,0.45); font-size: 12px; padding: 10px; }
+    .tests-section-header { flex-shrink: 0; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: rgba(244,247,251,0.5); padding: 4px 2px 0; }
+    .flows-list { display: flex; flex-direction: column; gap: 4px; max-height: 30%; overflow: auto; flex-shrink: 0; }
+    .flows-row { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; font-size: 12px; }
+    .flows-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .flows-desc { margin-top: 2px; font-size: 11px; color: rgba(244,247,251,0.5); white-space: normal; overflow-wrap: anywhere; }
+    .flows-meta { flex-shrink: 0; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; color: rgba(244,247,251,0.5); }
+    .flows-error { color: #f87171; }
+    .flows-run { flex-shrink: 0; cursor: pointer; border: 1px solid rgba(125,211,252,0.45); background: none; color: #7dd3fc; border-radius: 6px; padding: 2px 10px; font-size: 11px; }
+    .flows-run:hover:not(:disabled) { background: rgba(125,211,252,0.10); }
+    .flows-run:disabled { opacity: 0.4; cursor: default; }
     .tests-timeline { display: flex; flex-direction: column; gap: 3px; min-height: 0; flex: 1; overflow: auto; }
     .tests-timeline-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: rgba(244,247,251,0.5); padding: 4px 2px; }
     .tests-timeline-title { flex: 1; min-width: 0; overflow-wrap: anywhere; }
@@ -261,6 +280,11 @@ public enum WebViewer {
     .test-back-live { align-self: flex-start; margin: 8px 0 8px 10px; padding: 4px 10px; border: 1px solid rgba(125,211,252,0.6); border-radius: 8px; background: rgba(7,10,18,0.8); color: #bae6fd; font-size: 12px; cursor: pointer; }
     .test-back-live:hover { background: rgba(125,211,252,0.18); }
     .test-video { flex: 1; min-height: 0; width: 100%; object-fit: contain; }
+    .test-controls { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: rgba(11,16,32,0.92); border-top: 1px solid rgba(255,255,255,0.10); }
+    .test-ctl-btn { flex: 0 0 auto; width: 32px; height: 26px; cursor: pointer; border: 1px solid rgba(125,211,252,0.45); background: none; color: #7dd3fc; border-radius: 6px; font-size: 12px; line-height: 1; }
+    .test-ctl-btn:hover { background: rgba(125,211,252,0.10); }
+    .test-ctl-time { flex: 0 0 auto; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; color: rgba(244,247,251,0.75); }
+    .test-ctl-seek { flex: 1; min-width: 0; accent-color: #7dd3fc; cursor: pointer; }
     .test-video-note { position: absolute; left: 0; right: 0; bottom: 52px; z-index: 6; text-align: center; color: rgba(244,247,251,0.6); font-size: 11px; pointer-events: none; }
     .insp-tab-soon { color: rgba(244,247,251,0.32); }
     .filter-row { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-bottom: 1px solid rgba(255,255,255,0.08); }
@@ -463,6 +487,7 @@ public enum WebViewer {
     const testsSessionsEl = $("testsSessions");
     const testsTimelineEl = $("testsTimeline");
     const testsCountEl = $("testsCount");
+    const testsFlowsEl = $("testsFlows");
     const testPlayback = $("testPlayback");
     const testVideo = $("testVideo");
     const testBackLive = $("testBackLive");
@@ -2083,6 +2108,7 @@ public enum WebViewer {
 
     // The current step follows the playhead.
     testVideo.addEventListener("timeupdate", () => {
+      updateTestControls();
       const session = testsSessions.find((s) => s.id === playbackTestId);
       if (!session || activeTab !== "tests") return;
       let currentIndex = -1;
@@ -2104,9 +2130,152 @@ public enum WebViewer {
 
     testBackLive.addEventListener("click", showLiveStream);
 
+    const testPlayPause = $("testPlayPause");
+    const testSeek = $("testSeek");
+    const testTime = $("testTime");
+    let testSeekDragging = false;
+
+    function toggleTestPlayback() {
+      if (testVideo.paused) testVideo.play().catch(() => {});
+      else testVideo.pause();
+    }
+
+    function updateTestControls() {
+      const duration = isFinite(testVideo.duration) ? testVideo.duration : 0;
+      testPlayPause.textContent = testVideo.paused ? "▶" : "⏸";
+      testTime.textContent = formatOffset(testVideo.currentTime) + " / " + formatOffset(duration);
+      if (!testSeekDragging) {
+        testSeek.value = duration ? String(Math.round(testVideo.currentTime / duration * 1000)) : "0";
+      }
+    }
+
+    testPlayPause.addEventListener("click", toggleTestPlayback);
+    // The video element itself never receives clicks in Orca's embedded
+    // browser; in regular browsers this adds click-to-toggle for free.
+    testVideo.addEventListener("click", toggleTestPlayback);
+    testSeek.addEventListener("pointerdown", () => { testSeekDragging = true; });
+    testSeek.addEventListener("pointerup", () => { testSeekDragging = false; });
+    testSeek.addEventListener("input", () => {
+      const duration = isFinite(testVideo.duration) ? testVideo.duration : 0;
+      if (!duration) return;
+      testVideo.currentTime = Number(testSeek.value) / 1000 * duration;
+    });
+    for (const eventName of ["play", "pause", "loadedmetadata", "ended", "seeked"]) {
+      testVideo.addEventListener(eventName, updateTestControls);
+    }
+
+    let flowsList = [];
+    let flowRunStatus = null;
+    let flowsLastPayload = "";
+
+    async function loadFlows() {
+      try {
+        const [flowsResponse, runResponse] = await Promise.all([
+          fetch("/api/v1/flows"),
+          fetch("/api/v1/flows/run"),
+        ]);
+        if (!flowsResponse.ok || !runResponse.ok) return;
+        const flowsPayload = await flowsResponse.json();
+        const runPayload = await runResponse.json();
+        const serialized = JSON.stringify([flowsPayload.flows || [], runPayload]);
+        if (serialized === flowsLastPayload) return;
+        flowsLastPayload = serialized;
+        flowsList = flowsPayload.flows || [];
+        const previousRun = flowRunStatus;
+        flowRunStatus = runPayload;
+        // Follow the run: select its session so the timeline streams the steps
+        // live; when it finishes, the regular auto-switch plays the recording.
+        if (runPayload.active && runPayload.sessionId &&
+            (!previousRun || previousRun.sessionId !== runPayload.sessionId)) {
+          selectedTestId = runPayload.sessionId;
+          showLiveStream();
+        }
+        renderFlowsList();
+      } catch (_) {}
+    }
+
+    async function runFlow(file) {
+      try {
+        const response = await fetch("/api/v1/flows/run", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ file }),
+        });
+        const payload = await response.json().catch(() => null);
+        if (response.ok && payload) {
+          flowRunStatus = payload;
+          flowsLastPayload = "";
+          renderFlowsList();
+          loadTests();
+        } else if (payload && payload.error) {
+          flowRunStatus = { active: false, file, status: "failed", error: payload.error, completedSteps: 0, totalSteps: 0 };
+          renderFlowsList();
+        }
+      } catch (_) {}
+    }
+
+    function renderFlowsList() {
+      if (activeTab !== "tests") return;
+      const prevScroll = captureScroll(testsFlowsEl);
+      testsFlowsEl.innerHTML = "";
+      const header = document.createElement("div");
+      header.className = "tests-section-header";
+      header.textContent = "Flows · .simtool/flows";
+      testsFlowsEl.appendChild(header);
+      if (!flowsList.length) {
+        const empty = document.createElement("div");
+        empty.className = "tests-empty";
+        empty.textContent = "no flows yet — add a YAML flow to .simtool/flows";
+        testsFlowsEl.appendChild(empty);
+        return;
+      }
+      const busy = Boolean(flowRunStatus && flowRunStatus.active);
+      for (const flow of flowsList) {
+        const row = document.createElement("div");
+        row.className = "flows-row";
+        const title = document.createElement("span");
+        title.className = "flows-title";
+        title.textContent = flow.name || flow.file;
+        title.title = flow.file;
+        if (flow.description) {
+          const desc = document.createElement("div");
+          desc.className = "flows-desc";
+          desc.textContent = flow.description;
+          title.appendChild(desc);
+        }
+        const meta = document.createElement("span");
+        meta.className = "flows-meta";
+        const isCurrent = flowRunStatus && flowRunStatus.file === flow.file;
+        if (flow.parseError) {
+          meta.textContent = "parse error";
+          meta.classList.add("flows-error");
+          meta.title = flow.parseError;
+        } else if (isCurrent && flowRunStatus.active) {
+          meta.textContent = "● " + flowRunStatus.completedSteps + "/" + flowRunStatus.totalSteps;
+          meta.classList.add("tests-status-running");
+        } else if (isCurrent && flowRunStatus.status) {
+          meta.textContent = flowRunStatus.status === "passed" ? "✓ passed" : "✗ failed";
+          meta.classList.add(flowRunStatus.status === "passed" ? "tests-status-passed" : "tests-status-failed");
+          if (flowRunStatus.error) meta.title = flowRunStatus.error;
+        } else {
+          meta.textContent = flow.stepCount + " steps";
+        }
+        const runButton = document.createElement("button");
+        runButton.className = "flows-run";
+        runButton.type = "button";
+        runButton.textContent = "Run";
+        runButton.disabled = busy || Boolean(flow.parseError);
+        runButton.addEventListener("click", () => runFlow(flow.file));
+        row.append(title, meta, runButton);
+        testsFlowsEl.appendChild(row);
+      }
+      restoreScroll(testsFlowsEl, "none", prevScroll);
+    }
+
     function startTestsPolling() {
       loadTests();
-      if (!testsTimer) testsTimer = setInterval(loadTests, 1500);
+      loadFlows();
+      if (!testsTimer) testsTimer = setInterval(() => { loadTests(); loadFlows(); }, 1500);
     }
 
     function stopTestsPolling() {
@@ -2304,18 +2473,67 @@ public enum WebViewer {
           testsTimelineEl.appendChild(row);
           if (detail) testsTimelineEl.appendChild(detail);
         } else {
-          // (non-step entries handled below)
-          for (const line of entry.logs || []) {
-            const log = document.createElement("div");
-            log.className = "tests-log";
-            const time = document.createElement("span");
-            time.className = "tests-step-t";
-            time.textContent = formatOffset(offset);
-            const text = document.createElement("span");
-            text.textContent = line;
-            log.append(time, text);
+          const logs = entry.logs || [];
+          if (!logs.length) return;
+          // A failure log entry carries the error first and a long screen dump
+          // after it — keep the first line visible, collapse the rest.
+          const collapsible = logs.length > 2;
+          const stepKey = selectedTestId + ":" + index;
+          const expanded = expandedTestSteps.has(stepKey);
+          if (collapsible) detailKeys.push(stepKey);
+
+          const log = document.createElement("div");
+          log.className = "tests-log";
+          const time = document.createElement("span");
+          time.className = "tests-step-t";
+          time.textContent = formatOffset(offset);
+          const text = document.createElement("span");
+          text.textContent = logs[0];
+          log.append(time, text);
+
+          if (!collapsible) {
             testsTimelineEl.appendChild(log);
+            for (const line of logs.slice(1)) {
+              const extra = document.createElement("div");
+              extra.className = "tests-log";
+              const pad = document.createElement("span");
+              pad.className = "tests-step-t";
+              const extraText = document.createElement("span");
+              extraText.textContent = line;
+              extra.append(pad, extraText);
+              testsTimelineEl.appendChild(extra);
+            }
+            return;
           }
+
+          const toggle = document.createElement("span");
+          toggle.className = "tests-step-toggle";
+          toggle.textContent = (expanded ? "▾" : "▸") + " " + (logs.length - 1);
+          toggle.title = expanded ? "Collapse log lines" : "Show " + (logs.length - 1) + " log lines";
+          log.appendChild(toggle);
+
+          const detail = document.createElement("div");
+          detail.className = "tests-detail";
+          detail.hidden = !expanded;
+          for (const line of logs.slice(1)) {
+            const detailLine = document.createElement("div");
+            detailLine.className = "tests-logline";
+            detailLine.textContent = line;
+            detail.appendChild(detailLine);
+          }
+
+          toggle.addEventListener("click", (domEvent) => {
+            domEvent.stopPropagation();
+            const open = expandedTestSteps.has(stepKey);
+            if (open) expandedTestSteps.delete(stepKey);
+            else expandedTestSteps.add(stepKey);
+            detail.hidden = open;
+            toggle.textContent = (open ? "▸" : "▾") + " " + (logs.length - 1);
+            toggle.title = open ? "Show " + (logs.length - 1) + " log lines" : "Collapse log lines";
+          });
+
+          testsTimelineEl.appendChild(log);
+          testsTimelineEl.appendChild(detail);
         }
       });
 
@@ -2415,7 +2633,7 @@ public enum WebViewer {
       else if (tab === "logs") { renderLogsList(); ensureLogs(); }
       else if (tab === "state") renderState();
       else if (tab === "ax") { renderAxTree(); renderAxSelected(); }
-      else if (tab === "tests") { renderTestsList(); renderTestTimeline(); }
+      else if (tab === "tests") { renderFlowsList(); renderTestsList(); renderTestTimeline(); }
       if (tab === "state") startStatePolling(); else stopStatePolling();
       if (tab === "ax") startAxPolling(); else stopAxPolling();
       if (tab === "tests") startTestsPolling(); else { stopTestsPolling(); showLiveStream(); }
