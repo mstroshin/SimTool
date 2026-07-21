@@ -254,6 +254,11 @@ final class SimToolCommandSurfaceTests: XCTestCase {
         XCTAssertNil(command.config)
     }
 
+    func testRunParsesDetachFlag() throws {
+        XCTAssertFalse(try Run.parse([]).detach)
+        XCTAssertTrue(try Run.parse(["--detach"]).detach)
+    }
+
     func testServeParametersPreferExplicitFlagsOverConfig() {
         let params = ServeParameters.resolve(device: "UDID-1", host: "0.0.0.0", port: 3311, config: configFixture)
         XCTAssertEqual(params, ServeParameters(device: "UDID-1", host: "0.0.0.0", port: 3311))

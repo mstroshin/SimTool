@@ -1183,37 +1183,7 @@ struct Serve: AsyncParsableCommand {
     }
 
     private func runDetached(_ parameters: ServeParameters) async throws {
-        let id = UUID().uuidString
-        try SessionStore.shared.ensureRoot()
-        let logPath = SessionStore.shared.logPath(for: id)
-        let executable = Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])
-        let process = Process()
-        process.executableURL = executable
-        var args = ["serve", "--port", "\(parameters.port)", "--host", parameters.host, "--session-id", id, "--detached-child"]
-        if let device = parameters.device { args += ["--device", device] }
-        if let app, !app.isEmpty { args += ["--app", app] }
-        if verbose { args += ["--verbose"] }
-        process.arguments = args
-        let log = try FileHandle(forWritingTo: logPath.creatingFileIfNeeded())
-        process.standardOutput = log
-        process.standardError = log
-        try process.run()
-
-        // The child may have to boot the simulator first (up to ensureBooted's
-        // 300-second budget), so poll generously but fail as soon as it dies.
-        let deadline = Date().addingTimeInterval(330)
-        while Date() < deadline {
-            if let session = try SessionStore.shared.session(id: id) {
-                if common.json { try printJSON(session) }
-                else { makeNoora().success(.alert("SimTool server started", takeaways: ["Open \(session.url)"])) }
-                return
-            }
-            if !process.isRunning {
-                throw SimToolError("Detached server exited before reporting a session. See \(logPath.path)")
-            }
-            try await Task.sleep(for: .milliseconds(100))
-        }
-        throw SimToolError("Detached server did not report a session within 330 seconds. See \(logPath.path)")
+        try await launchDetachedServer(parameters: parameters, app: app, verbose: verbose, json: common.json)
     }
 }
 
@@ -1231,6 +1201,43 @@ struct ServeParameters: Equatable {
             port: port ?? config?.server.port ?? 3200
         )
     }
+}
+
+/// Spawns a background `serve --detached-child` process (inheriting this
+/// process's environment, including the `SIMCTL_CHILD_` logger exports), waits
+/// for it to report a session, and prints the session with its viewer URL.
+func launchDetachedServer(parameters: ServeParameters, app: String?, verbose: Bool, json: Bool) async throws {
+    let id = UUID().uuidString
+    try SessionStore.shared.ensureRoot()
+    let logPath = SessionStore.shared.logPath(for: id)
+    let executable = Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])
+    let process = Process()
+    process.executableURL = executable
+    var args = ["serve", "--port", "\(parameters.port)", "--host", parameters.host, "--session-id", id, "--detached-child"]
+    if let device = parameters.device { args += ["--device", device] }
+    if let app, !app.isEmpty { args += ["--app", app] }
+    if verbose { args += ["--verbose"] }
+    process.arguments = args
+    let log = try FileHandle(forWritingTo: logPath.creatingFileIfNeeded())
+    process.standardOutput = log
+    process.standardError = log
+    try process.run()
+
+    // The child may have to boot the simulator first (up to ensureBooted's
+    // 300-second budget), so poll generously but fail as soon as it dies.
+    let deadline = Date().addingTimeInterval(330)
+    while Date() < deadline {
+        if let session = try SessionStore.shared.session(id: id) {
+            if json { try printJSON(session) }
+            else { makeNoora().success(.alert("SimTool server started", takeaways: ["Open \(session.url)"])) }
+            return
+        }
+        if !process.isRunning {
+            throw SimToolError("Detached server exited before reporting a session. See \(logPath.path)")
+        }
+        try await Task.sleep(for: .milliseconds(100))
+    }
+    throw SimToolError("Detached server did not report a session within 330 seconds. See \(logPath.path)")
 }
 
 /// The browser viewer is opt-in: it opens only when the user passes `--web`, and
@@ -1397,6 +1404,9 @@ struct Run: AsyncParsableCommand {
     @Flag(help: "Open the browser viewer automatically. The server always starts and prints its URL.")
     var web = false
 
+    @Flag(help: "Return once the app is launched, leaving the viewer server running in the background (build/launch still report in the foreground; the session URL is printed).")
+    var detach = false
+
     @Flag(name: .long, help: "Disable the SimTool network logger for the launched app (enabled by default).")
     var noNetwork = false
 
@@ -1473,6 +1483,18 @@ struct Run: AsyncParsableCommand {
                 "Network logger: \(networkLoggerEnabled ? "on → \(projectConfig.appFacingServerURL)" : "off")",
                 "State logger: \(stateLoggerEnabled ? "on → \(projectConfig.appFacingServerURL)" : "off")",
             ]))
+        }
+        if detach {
+            // The device is already booted, so the child reports quickly. It
+            // inherits the SIMCTL_CHILD_ logger exports set above, keeping the
+            // Network/State panels armed across the stdout-capture relaunch.
+            try await launchDetachedServer(
+                parameters: ServeParameters(device: booted.udid, host: projectConfig.server.host, port: projectConfig.server.port),
+                app: projectConfig.bundleId,
+                verbose: verbose,
+                json: common.json
+            )
+            return
         }
         try await runViewer(
             device: booted,

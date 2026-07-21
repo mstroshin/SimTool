@@ -355,11 +355,14 @@ file's directory.
 viewer server and prints its URL (`Open http://…`, or the `url` field with
 `--json`) — handy for scripts that open the page themselves. Pass `--web` to
 also open the browser viewer. It runs in the foreground like `serve` (Ctrl-C
-stops it).
+stops it), or pass `--detach` to leave the viewer server running in the
+background once the app is launched — build and launch still report in the
+foreground, and the printed session (`url` with `--json`) is ready to open.
 
 ```sh
 swift run simtool run            # server only; open the printed URL yourself
 swift run simtool run --web      # …and open the browser viewer
+swift run simtool run --detach   # build, launch, leave the server in the background
 swift run simtool run --device booted        # run on the first booted simulator
 swift run simtool run --device "iPhone 16"   # …or a specific UDID/name, overriding the config
 swift run simtool run --config path/to/.simtool/config.yml
