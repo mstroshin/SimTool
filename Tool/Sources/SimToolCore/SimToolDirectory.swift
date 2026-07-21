@@ -77,4 +77,9 @@ public enum SimToolDirectory {
     public static func testSessionsDirectory(in directory: URL) -> URL {
         directory.appendingPathComponent("test-sessions", isDirectory: true)
     }
+
+    /// `<.simtool>/flows` — declarative UI test flows for `simtool test run`.
+    public static func flowsDirectory(in directory: URL) -> URL {
+        directory.appendingPathComponent("flows", isDirectory: true)
+    }
 }

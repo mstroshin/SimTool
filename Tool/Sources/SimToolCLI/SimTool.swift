@@ -962,7 +962,7 @@ struct TestCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "test",
         abstract: "Record an agent test session: timestamped steps, curated logs, and a screen recording.",
-        subcommands: [Start.self, Step.self, LogLines.self, Stop.self, List.self]
+        subcommands: [Run.self, Start.self, Step.self, LogLines.self, Stop.self, List.self]
     )
 
     struct ServerOptions: ParsableArguments {
@@ -978,6 +978,150 @@ struct TestCommand: AsyncParsableCommand {
                 throw SimToolError("No running SimTool server found. Start one with `simtool serve` or pass --server.")
             }
             return SimToolClient(baseURL: url)
+        }
+    }
+
+    struct Run: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "run",
+            abstract: "Run a declarative YAML UI test flow on the served simulator, recorded as a test session.",
+            discussion: """
+            Flow file format:
+
+              name: Tab bar badge
+              description: >                  # optional; what is tested and the expected result
+                Settings state: Settings shows the current value and
+                selecting Settings updates it.
+              app: com.example.demo        # optional; relaunches the app before steps
+              environment:                    # optional; rendered into launch arguments
+                sampleAccount: "sample-user"   #   -SampleAccount (Debug/Beta builds)
+                country: sample-region               #   -SampleRegion
+                env: stable                   #   -UITesting -Environment stable
+              setup:                          # optional; shell commands run before launch,
+                - xcrun simctl spawn {udid} … #   {udid}/{app} substituted, failures recorded
+              launchArguments: [-SampleMode, "1"]
+              timeout: 10                     # default per-step wait, seconds
+              steps:
+                - waitFor: { id: settingsButton, timeout: 20 }
+                - tap: { id: settingsButton }
+                - type: "hello"
+                - swipe: up
+                - assertVisible: { text: "Welcome" }
+                - assertHidden: { label: "Badge" }
+                - wait: 2
+
+            Every step polls the accessibility tree until its target appears (or
+            disappears for assertHidden), so flows need no explicit sleeps.
+            Setup commands reset persisted state; their exit codes are recorded
+            in the session but never fail the flow.
+            """
+        )
+
+        @Argument(help: "Path to a YAML flow file.")
+        var flow: String
+
+        @Option(help: "Test session title. Defaults to the flow's `name`, then the file name.")
+        var title: String?
+
+        @Flag(help: "Run the flow without recording a test session.")
+        var noSession = false
+
+        @OptionGroup var serverOptions: ServerOptions
+        @OptionGroup var common: CommonJSON
+
+        func run() async throws {
+            let flowURL = URL(fileURLWithPath: flow)
+            let parsed = try TestFlowParser.load(contentsOf: flowURL)
+            if !common.json, let description = parsed.description {
+                print(description)
+            }
+            let client = try serverOptions.client()
+            let config = try await client.config()
+
+            var session: TestSession?
+            if !noSession {
+                session = try await client.startTestSession(
+                    title: title ?? parsed.name ?? flowURL.deletingPathExtension().lastPathComponent
+                )
+            }
+            let recording = session != nil
+            let echo = !common.json
+
+            let runner = FlowRunner(
+                client: client,
+                udid: config.udid,
+                screenWidth: Double(config.width),
+                screenHeight: Double(config.height),
+                defaultTimeout: parsed.stepTimeout,
+                record: { text in
+                    if echo { print(text) }
+                    if recording {
+                        _ = try? await client.appendTestSessionEntry(TestSessionEntryRequest(kind: .step, text: text))
+                    }
+                }
+            )
+
+            do {
+                try await runner.run(parsed)
+            } catch {
+                let failure = (error as? SimToolError)?.message ?? error.localizedDescription
+                var artifacts: [String] = []
+                if let path = await saveScreenshot(client: client, flowURL: flowURL) {
+                    artifacts.append("Screenshot: \(path)")
+                }
+                if recording {
+                    let screen = await runner.visibleSummary()
+                    _ = try? await client.appendTestSessionEntry(TestSessionEntryRequest(
+                        kind: .log,
+                        logs: [failure] + artifacts + (screen.isEmpty ? [] : ["On screen:"] + screen)
+                    ))
+                    session = try? await client.stopTestSession(status: .failed)
+                }
+                if common.json {
+                    if let session {
+                        try printJSON(session)
+                    } else {
+                        try printJSON(["status": "failed", "error": failure])
+                    }
+                } else {
+                    let takeaways = artifacts + (session.map { ["Session: \($0.id)"] } ?? [])
+                    makeNoora().error(.alert(
+                        "Flow failed: \(failure)",
+                        takeaways: takeaways.map { TerminalText("\($0)") }
+                    ))
+                }
+                throw ExitCode(1)
+            }
+
+            if recording {
+                session = try await client.stopTestSession(status: .passed)
+            }
+            if common.json {
+                if let session {
+                    try printJSON(session)
+                } else {
+                    try printJSON(["status": "passed"])
+                }
+            } else {
+                makeNoora().success(.alert(
+                    "Flow passed",
+                    takeaways: (session.map { ["Session: \($0.id)", "Steps and video recorded"] } ?? [])
+                        .map { TerminalText("\($0)") }
+                ))
+            }
+        }
+
+        private func saveScreenshot(client: SimToolClient, flowURL: URL) async -> String? {
+            guard let data = try? await client.screenshot() else { return nil }
+            let name = flowURL.deletingPathExtension().lastPathComponent
+            let path = FileManager.default.temporaryDirectory
+                .appendingPathComponent("simtool-flow-\(name)-\(Int(Date().timeIntervalSince1970)).png")
+            do {
+                try data.write(to: path)
+                return path.path
+            } catch {
+                return nil
+            }
         }
     }
 
