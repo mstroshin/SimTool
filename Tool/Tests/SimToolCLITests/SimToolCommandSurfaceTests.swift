@@ -222,28 +222,21 @@ final class SimToolCommandSurfaceTests: XCTestCase {
         XCTAssertTrue(names.contains("test"))
     }
 
-    func testTestStartParsesTitle() throws {
-        let command = try TestCommand.Start.parse(["Verify preference editing", "--json"])
-        XCTAssertEqual(command.title, "Verify preference editing")
+    func testTestSubcommandsAreRunAndList() {
+        let names = TestCommand.configuration.subcommands.map { commandName(for: $0) }
+        XCTAssertEqual(names, ["run", "list"])
+    }
+
+    func testTestRunParsesFlowPathAndOptions() throws {
+        let command = try TestCommand.Run.parse(["flows/badges.yml", "--title", "Badges", "--no-session", "--json"])
+        XCTAssertEqual(command.flow, "flows/badges.yml")
+        XCTAssertEqual(command.title, "Badges")
+        XCTAssertTrue(command.noSession)
         XCTAssertTrue(command.common.json)
     }
 
-    func testTestStepParsesRepeatedLogOptions() throws {
-        let command = try TestCommand.Step.parse(["Tapped Save", "--log", "[Settings] save OK", "--log", "[Sync] pushed"])
-        XCTAssertEqual(command.text, "Tapped Save")
-        XCTAssertEqual(command.logs, ["[Settings] save OK", "[Sync] pushed"])
-    }
-
-    func testTestLogRequiresAtLeastOneLine() {
-        XCTAssertThrowsError(try TestCommand.LogLines.parse([]))
-    }
-
-    func testTestStopRequiresTerminalStatus() throws {
-        XCTAssertThrowsError(try TestCommand.Stop.parse([]))
-        XCTAssertThrowsError(try TestCommand.Stop.parse(["--status", "maybe"]))
-        XCTAssertThrowsError(try TestCommand.Stop.parse(["--status", "running"]))
-        let command = try TestCommand.Stop.parse(["--status", "passed"])
-        XCTAssertEqual(command.status, "passed")
+    func testTestRunRequiresFlowPath() {
+        XCTAssertThrowsError(try TestCommand.Run.parse([]))
     }
 
     func testServeParsesWithoutBuiltInPortAndHostDefaults() throws {

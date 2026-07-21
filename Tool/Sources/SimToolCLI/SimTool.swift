@@ -961,8 +961,8 @@ extension AppCommand {
 struct TestCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "test",
-        abstract: "Record an agent test session: timestamped steps, curated logs, and a screen recording.",
-        subcommands: [Run.self, Start.self, Step.self, LogLines.self, Stop.self, List.self]
+        abstract: "Run declarative YAML UI test flows on the served simulator, recorded as test sessions.",
+        subcommands: [Run.self, List.self]
     )
 
     struct ServerOptions: ParsableArguments {
@@ -1121,106 +1121,6 @@ struct TestCommand: AsyncParsableCommand {
                 return path.path
             } catch {
                 return nil
-            }
-        }
-    }
-
-    struct Start: AsyncParsableCommand {
-        static let configuration = CommandConfiguration(abstract: "Start a test session and begin recording the simulator screen.")
-
-        @Argument(help: "Session title, for example \"Verify preference editing\".")
-        var title: String
-
-        @OptionGroup var serverOptions: ServerOptions
-        @OptionGroup var common: CommonJSON
-
-        func run() async throws {
-            let session = try await serverOptions.client().startTestSession(title: title)
-            if common.json {
-                try printJSON(session)
-            } else {
-                makeNoora().success(.alert("Started test session", takeaways: [
-                    "Id: \(session.id)",
-                    session.videoError.map { "Video unavailable: \($0)" } ?? "Recording the simulator screen",
-                ]))
-            }
-        }
-    }
-
-    struct Step: AsyncParsableCommand {
-        static let configuration = CommandConfiguration(abstract: "Append a timestamped step to the active test session.")
-
-        @Argument(help: "What just happened, for example \"Tapped Save — toast appeared\".")
-        var text: String
-
-        @Option(name: .customLong("log"), help: "Attach a log line to this step. Repeatable.")
-        var logs: [String] = []
-
-        @OptionGroup var serverOptions: ServerOptions
-        @OptionGroup var common: CommonJSON
-
-        func run() async throws {
-            let session = try await serverOptions.client().appendTestSessionEntry(
-                TestSessionEntryRequest(kind: .step, text: text, logs: logs.isEmpty ? nil : logs)
-            )
-            if common.json {
-                try printJSON(session)
-            } else {
-                let stepCount = session.entries.filter { $0.kind == .step }.count
-                makeNoora().success("Recorded step \(stepCount) of \(session.id)")
-            }
-        }
-    }
-
-    struct LogLines: AsyncParsableCommand {
-        static let configuration = CommandConfiguration(
-            commandName: "log",
-            abstract: "Record important log lines in the active test session, without a step."
-        )
-
-        @Argument(help: "One or more log lines worth keeping.")
-        var lines: [String]
-
-        @OptionGroup var serverOptions: ServerOptions
-        @OptionGroup var common: CommonJSON
-
-        func validate() throws {
-            guard !lines.isEmpty else { throw ValidationError("Provide at least one log line.") }
-        }
-
-        func run() async throws {
-            let session = try await serverOptions.client().appendTestSessionEntry(
-                TestSessionEntryRequest(kind: .log, logs: lines)
-            )
-            if common.json {
-                try printJSON(session)
-            } else {
-                makeNoora().success("Recorded \(lines.count) log line(s) in \(session.id)")
-            }
-        }
-    }
-
-    struct Stop: AsyncParsableCommand {
-        static let configuration = CommandConfiguration(abstract: "Stop the active test session and finalize its recording.")
-
-        @Option(help: "Final status: passed or failed.")
-        var status: String
-
-        @OptionGroup var serverOptions: ServerOptions
-        @OptionGroup var common: CommonJSON
-
-        func validate() throws {
-            guard status == "passed" || status == "failed" else {
-                throw ValidationError("--status must be passed or failed.")
-            }
-        }
-
-        func run() async throws {
-            let session = try await serverOptions.client().stopTestSession(status: TestSessionStatus(rawValue: status)!)
-            if common.json {
-                try printJSON(session)
-            } else {
-                makeNoora().success("Stopped \(session.id): \(session.status.rawValue)")
             }
         }
     }

@@ -97,27 +97,27 @@ swift run simtool logs tail --app com.example.MyApp --stdout --seconds 4 --json
 swift run simtool network snapshot --seconds 2 --limit 50 --json
 ```
 
-### Test sessions
+### Test flows and sessions
 
-When an agent verifies a feature by driving the simulator, it can record the
-whole run as a reviewable test session: timestamped steps, the log lines it
-judged important, and a screen recording. The session shows up in the web
-viewer's **Tests** tab — finished sessions play their recording in place of
-the live stream, and clicking a step seeks the video to that moment.
+Declarative YAML flows in `<project>/.simtool/flows/` drive the simulator
+through the served accessibility tree: every step polls until its target
+appears, so flows need no sleeps. Each run is recorded as a reviewable test
+session — timestamped steps and a screen recording — shown in the web
+viewer's **Tests** tab, which also lists the flows with Run buttons and live
+progress. Finished sessions play their recording in place of the live
+stream, and clicking a step seeks the video to that moment.
 
 ```bash
-swift run simtool test start "Verify preference editing" --json
-swift run simtool test step "Opened the preferences screen" --json
-swift run simtool test step "Tapped Save — toast appeared" --log "[Settings] save OK" --json
-swift run simtool test log "[Sync] cache refreshed" --json
-swift run simtool test stop --status passed --json
+swift run simtool test run .simtool/flows/my-flow.yml
 swift run simtool test list --json
 ```
 
-Sessions persist under `<project>/.simtool/test-sessions/<session-id>/` (`session.json`
-plus `video.mp4`) alongside the project the server was started for, and survive
-server restarts. One session is active at a time;
-`stop` requires `--status passed` or `--status failed`.
+See `simtool test run --help` for the flow file format (steps, environment,
+setup commands, launch arguments). Sessions persist under
+`<project>/.simtool/test-sessions/<session-id>/` (`session.json` plus
+`video.mp4`) alongside the project the server was started for, and survive
+server restarts. One session is active at a time; sessions can also be
+driven directly over HTTP via `POST /api/v1/tests/start|entries|stop`.
 
 `ax tree` and `ax find` omit the bulky raw AXe payload by default; pass `--raw`
 (or `?raw=1` on `/api/v1/ax/tree` and `/api/v1/ax/find`) to include it. For the

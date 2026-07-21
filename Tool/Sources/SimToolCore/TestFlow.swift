@@ -213,6 +213,24 @@ public struct FlowRunStatusPayload: Codable, Equatable, Sendable {
 }
 
 public enum TestFlowParser {
+    /// Summaries of every YAML flow in a directory, sorted by file name;
+    /// unparseable flows are reported through `parseError` instead of thrown.
+    public static func summaries(in root: URL) -> [FlowSummary] {
+        let files = (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
+        return files
+            .filter { ["yml", "yaml"].contains($0.pathExtension.lowercased()) }
+            .sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
+            .map { url in
+                do {
+                    let flow = try load(contentsOf: url)
+                    return FlowSummary(file: url.lastPathComponent, name: flow.name, description: flow.description, stepCount: flow.steps.count)
+                } catch {
+                    let message = (error as? SimToolError)?.message ?? error.localizedDescription
+                    return FlowSummary(file: url.lastPathComponent, parseError: message)
+                }
+            }
+    }
+
     public static func load(contentsOf url: URL) throws -> TestFlow {
         let yaml: String
         do {

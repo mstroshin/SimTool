@@ -25,19 +25,7 @@ final class FlowRunController: @unchecked Sendable {
     }
 
     func list() -> FlowListPayload {
-        let files = (try? FileManager.default.contentsOfDirectory(at: flowsRoot, includingPropertiesForKeys: nil)) ?? []
-        let flows = files
-            .filter { ["yml", "yaml"].contains($0.pathExtension.lowercased()) }
-            .sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
-            .map { url -> FlowSummary in
-                do {
-                    let flow = try TestFlowParser.load(contentsOf: url)
-                    return FlowSummary(file: url.lastPathComponent, name: flow.name, description: flow.description, stepCount: flow.steps.count)
-                } catch {
-                    return FlowSummary(file: url.lastPathComponent, parseError: message(of: error))
-                }
-            }
-        return FlowListPayload(flows: flows)
+        FlowListPayload(flows: TestFlowParser.summaries(in: flowsRoot))
     }
 
     func status() -> FlowRunStatusPayload {

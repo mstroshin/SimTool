@@ -2337,7 +2337,7 @@ public enum WebViewer {
         empty.className = "tests-empty";
         empty.textContent = testsSessions.length
           ? "no sessions match the filter"
-          : "no test sessions yet — run `simtool test start`";
+          : "no test sessions yet — run a flow";
         testsSessionsEl.appendChild(empty);
         return;
       }
