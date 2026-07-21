@@ -246,6 +246,38 @@ final class SimToolCommandSurfaceTests: XCTestCase {
         XCTAssertEqual(command.status, "passed")
     }
 
+    func testServeParsesWithoutBuiltInPortAndHostDefaults() throws {
+        let command = try Serve.parse([])
+        XCTAssertNil(command.device)
+        XCTAssertNil(command.host)
+        XCTAssertNil(command.port)
+        XCTAssertNil(command.config)
+    }
+
+    func testServeParametersPreferExplicitFlagsOverConfig() {
+        let params = ServeParameters.resolve(device: "UDID-1", host: "0.0.0.0", port: 3311, config: configFixture)
+        XCTAssertEqual(params, ServeParameters(device: "UDID-1", host: "0.0.0.0", port: 3311))
+    }
+
+    func testServeParametersFallBackToConfigValues() {
+        let params = ServeParameters.resolve(device: nil, host: nil, port: nil, config: configFixture)
+        XCTAssertEqual(params, ServeParameters(device: "iPhone 16 Pro", host: "192.168.0.10", port: 4400))
+    }
+
+    func testServeParametersFallBackToBuiltInsWithoutConfig() {
+        let params = ServeParameters.resolve(device: nil, host: nil, port: nil, config: nil)
+        XCTAssertEqual(params, ServeParameters(device: nil, host: "127.0.0.1", port: 3200))
+    }
+
+    private var configFixture: ProjectConfig {
+        ProjectConfig(
+            simulator: "iPhone 16 Pro",
+            bundleId: "com.example.MyApp",
+            build: ProjectConfig.Build(workspace: "App.xcworkspace", scheme: "App"),
+            server: ProjectConfig.Server(host: "192.168.0.10", port: 4400)
+        )
+    }
+
     private func commandName(for command: ParsableCommand.Type) -> String {
         command.configuration.commandName ?? String(describing: command).lowercased()
     }

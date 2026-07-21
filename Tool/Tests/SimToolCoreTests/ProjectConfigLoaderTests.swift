@@ -234,6 +234,40 @@ final class ProjectConfigLoaderTests: XCTestCase {
 
     // MARK: - Helpers
 
+    func testLoadIfPresentReturnsNilWhenNoConfigExists() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        XCTAssertNil(try ProjectConfigLoader.loadIfPresent(startDirectory: root))
+    }
+
+    func testLoadIfPresentLoadsDiscoveredConfig() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try writeConfig(minimalYAML, in: root)
+
+        let config = try ProjectConfigLoader.loadIfPresent(startDirectory: root)
+        XCTAssertEqual(config?.simulator, "iPhone 16 Pro")
+        XCTAssertEqual(config?.bundleId, "com.example.MyApp")
+    }
+
+    func testLoadIfPresentStillThrowsOnInvalidDiscoveredConfig() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try writeConfig("bundleId: com.example.MyApp", in: root)
+
+        XCTAssertThrowsError(try ProjectConfigLoader.loadIfPresent(startDirectory: root)) { error in
+            XCTAssertTrue("\(error)".contains("simulator"), "\(error)")
+        }
+    }
+
+    func testLoadIfPresentRequiresExplicitPathToExist() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let missing = root.appendingPathComponent("custom.yml").path
+
+        XCTAssertThrowsError(try ProjectConfigLoader.loadIfPresent(explicitPath: missing, startDirectory: root))
+    }
+
     private let minimalYAML = """
     simulator: iPhone 16 Pro
     bundleId: com.example.MyApp

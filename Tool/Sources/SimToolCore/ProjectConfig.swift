@@ -246,6 +246,21 @@ public enum ProjectConfigLoader {
         return try make(from: raw, sourceURL: url)
     }
 
+    /// Loads the project config when one is available. An absent config is not
+    /// an error here (returns nil) so commands that merely default from the
+    /// config can use it opportunistically — but a config that exists and fails
+    /// to parse or validate still throws, and an explicit path must exist.
+    public static func loadIfPresent(
+        explicitPath: String? = nil,
+        startDirectory: URL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    ) throws -> ProjectConfig? {
+        if let explicitPath, !explicitPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return try load(explicitPath: explicitPath, startDirectory: startDirectory)
+        }
+        guard search(startDirectory: startDirectory) != nil else { return nil }
+        return try load(startDirectory: startDirectory)
+    }
+
     static func locate(explicitPath: String?, startDirectory: URL) throws -> URL {
         if let explicitPath, !explicitPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             let expanded = NSString(string: explicitPath).expandingTildeInPath
@@ -255,7 +270,11 @@ public enum ProjectConfigLoader {
             }
             return url
         }
+        if let found = search(startDirectory: startDirectory) { return found }
+        throw SimToolError("No \(displayPath) found in the current directory or any parent. Create one or pass --config <path>.")
+    }
 
+    static func search(startDirectory: URL) -> URL? {
         // Walk up using filesystem path strings rather than `URL` path manipulation: `NSString`'s
         // `deletingLastPathComponent` converges deterministically at the root ("/" -> "/"), whereas
         // `URL.deletingLastPathComponent()` does not reach a `.path` fixed point on newer Foundation
@@ -272,7 +291,7 @@ public enum ProjectConfigLoader {
             if parent == directory { break }
             directory = parent
         }
-        throw SimToolError("No \(displayPath) found in the current directory or any parent. Create one or pass --config <path>.")
+        return nil
     }
 
     static func make(from raw: RawProjectConfig, sourceURL: URL) throws -> ProjectConfig {

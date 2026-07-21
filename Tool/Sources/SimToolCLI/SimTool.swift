@@ -1106,17 +1106,20 @@ struct TestCommand: AsyncParsableCommand {
 struct Serve: AsyncParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Start a local simulator stream server.")
 
-    @Option(name: .shortAndLong, help: "Simulator UDID or name. Defaults to the first booted simulator.")
+    @Option(name: .shortAndLong, help: "Simulator UDID or name. Defaults to `simulator:` from .simtool/config.yml, else the first booted simulator.")
     var device: String?
 
     @Option(help: "App bundle id to scope log capture to by default (enables stdout/print capture, restarts the app).")
     var app: String?
 
-    @Option(name: .shortAndLong, help: "HTTP port.")
-    var port: UInt16 = 3200
+    @Option(name: .shortAndLong, help: "HTTP port. Defaults to `server.port` from .simtool/config.yml, else 3200.")
+    var port: UInt16?
 
-    @Option(help: "Host to bind. Defaults to 127.0.0.1.")
-    var host = "127.0.0.1"
+    @Option(help: "Host to bind. Defaults to `server.host` from .simtool/config.yml, else 127.0.0.1.")
+    var host: String?
+
+    @Option(help: "Path to the project config supplying the defaults above. Defaults to .simtool/config.yml discovered from the working directory upward; serve also works without one.")
+    var config: String?
 
     @Flag(help: "Start in the background and print session details.")
     var detach = false
@@ -1140,15 +1143,25 @@ struct Serve: AsyncParsableCommand {
 
     func run() async throws {
         DebugLog.isEnabled = verbose
+        let parameters = try resolveParameters()
         if detach {
-            try await runDetached()
+            try await runDetached(parameters)
             return
         }
-        let resolved = try await SimulatorDeviceClient.resolve(device)
+        // Boot via simctl when needed: the web viewer streams the framebuffer
+        // directly, so serving never requires the Simulator.app window.
+        let booted: SimulatorDevice
+        if common.json || detachedChild {
+            let resolved = try await SimulatorDeviceClient.resolve(parameters.device)
+            booted = try await SimulatorDeviceClient.ensureBooted(resolved)
+        } else {
+            let resolved = try await resolveSimulatorWithProgress(parameters.device)
+            booted = try await bootSimulatorWithProgress(resolved)
+        }
         try await runViewer(
-            device: resolved,
-            host: host,
-            port: port,
+            device: booted,
+            host: parameters.host,
+            port: parameters.port,
             defaultLogApp: app.flatMap { $0.isEmpty ? nil : $0 },
             testSessionsRoot: SimToolDirectory.testSessionsDirectory(in: SimToolDirectory.resolve()),
             printSessionJSON: common.json || detachedChild,
@@ -1157,15 +1170,27 @@ struct Serve: AsyncParsableCommand {
         )
     }
 
-    private func runDetached() async throws {
+    private func resolveParameters() throws -> ServeParameters {
+        // Load the config only when a flag is missing (or --config was given):
+        // a fully explicit invocation must not fail on an unrelated broken config.
+        let projectConfig: ProjectConfig?
+        if config != nil || device == nil || host == nil || port == nil {
+            projectConfig = try ProjectConfigLoader.loadIfPresent(explicitPath: config)
+        } else {
+            projectConfig = nil
+        }
+        return ServeParameters.resolve(device: device, host: host, port: port, config: projectConfig)
+    }
+
+    private func runDetached(_ parameters: ServeParameters) async throws {
         let id = UUID().uuidString
         try SessionStore.shared.ensureRoot()
         let logPath = SessionStore.shared.logPath(for: id)
         let executable = Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])
         let process = Process()
         process.executableURL = executable
-        var args = ["serve", "--port", "\(port)", "--host", host, "--session-id", id, "--detached-child"]
-        if let device { args += ["--device", device] }
+        var args = ["serve", "--port", "\(parameters.port)", "--host", parameters.host, "--session-id", id, "--detached-child"]
+        if let device = parameters.device { args += ["--device", device] }
         if let app, !app.isEmpty { args += ["--app", app] }
         if verbose { args += ["--verbose"] }
         process.arguments = args
@@ -1174,16 +1199,37 @@ struct Serve: AsyncParsableCommand {
         process.standardError = log
         try process.run()
 
-        let deadline = Date().addingTimeInterval(10)
+        // The child may have to boot the simulator first (up to ensureBooted's
+        // 300-second budget), so poll generously but fail as soon as it dies.
+        let deadline = Date().addingTimeInterval(330)
         while Date() < deadline {
             if let session = try SessionStore.shared.session(id: id) {
                 if common.json { try printJSON(session) }
                 else { makeNoora().success(.alert("SimTool server started", takeaways: ["Open \(session.url)"])) }
                 return
             }
+            if !process.isRunning {
+                throw SimToolError("Detached server exited before reporting a session. See \(logPath.path)")
+            }
             try await Task.sleep(for: .milliseconds(100))
         }
-        throw SimToolError("Detached server did not report a session within 10 seconds. See \(logPath.path)")
+        throw SimToolError("Detached server did not report a session within 330 seconds. See \(logPath.path)")
+    }
+}
+
+/// The effective `serve` target: explicit flags win, then `.simtool/config.yml`
+/// (`simulator:`, `server.host`, `server.port`), then built-in defaults.
+struct ServeParameters: Equatable {
+    var device: String?
+    var host: String
+    var port: UInt16
+
+    static func resolve(device: String?, host: String?, port: UInt16?, config: ProjectConfig?) -> ServeParameters {
+        ServeParameters(
+            device: device ?? config?.simulator,
+            host: host ?? config?.server.host ?? "127.0.0.1",
+            port: port ?? config?.server.port ?? 3200
+        )
     }
 }
 

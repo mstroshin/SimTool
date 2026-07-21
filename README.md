@@ -62,6 +62,14 @@ swift run simtool serve --device <udid-or-name> --port 3200
 Open `http://127.0.0.1:3200` after starting `serve` (the URL is printed on start),
 or pass `--web` to open the browser viewer automatically.
 
+`serve` runs fully headless: when `--device`, `--host`, or `--port` are omitted
+it falls back to `simulator:` and `server:` from `.simtool/config.yml` (when one
+is discovered, or passed via `--config`), and boots the target simulator via
+`simctl` if it is not running yet — no Simulator.app window is ever opened; watch
+the device in the web viewer instead. With `--detach --json` the started session
+is printed as JSON whose `url` field is the viewer address, ready to feed into a
+browser or another tool.
+
 Run `simtool` with no subcommand (or `simtool interactive`) in a terminal to
 pick and open configured deeplinks in a loop. Requires a `deeplinks:` list in
 `.simtool/config.yml`; select `Exit` or press Ctrl+C to leave. Non-interactive
