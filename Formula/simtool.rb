@@ -1,9 +1,9 @@
 class Simtool < Formula
   desc "Stream and automate Apple Simulators"
   homepage "https://github.com/mstroshin/SimTool"
-  url "https://github.com/mstroshin/SimTool/releases/download/v0.4.0/simtool-v0.4.0-macos-arm64.tar.gz"
-  version "0.4.0"
-  sha256 "9744646a5b19058242ae91884fd51f1c9fbbfaa2b850a5e1ec472730ed7c8859"
+  url "https://github.com/mstroshin/SimTool/releases/download/v0.5.0/simtool-v0.5.0-macos-arm64.tar.gz"
+  version "0.5.0"
+  sha256 "5f8e8dd62e958604d0c84fd1f1b727fc02006deba33b75d74acbc24b15bb3387"
 
   def install
     bin.install "bin/simtool"
