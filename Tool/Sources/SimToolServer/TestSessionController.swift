@@ -31,7 +31,7 @@ public enum TestSessionError: Error, LocalizedError, Equatable {
         case let .entryTooLarge(limitBytes):
             "Entry exceeds the \(limitBytes)-byte limit."
         case let .badStatus(status):
-            "Stop status must be passed or failed, got \(status.rawValue)."
+            "Stop status must be passed, failed or interrupted, got \(status.rawValue)."
         case let .sessionNotFound(id):
             "Test session not found: \(id)"
         case let .sessionRunning(id):
@@ -71,7 +71,7 @@ public final class TestSessionController: @unchecked Sendable {
         self.makeRecorder = makeRecorder
     }
 
-    public func start(title: String) throws -> TestSession {
+    public func start(title: String, video: Bool = true) throws -> TestSession {
         lock.lock()
         defer { lock.unlock() }
         sweepLocked()
@@ -86,14 +86,18 @@ public final class TestSessionController: @unchecked Sendable {
             status: .running
         )
         try store.ensureDirectory(for: session.id)
-        let recorder = makeRecorder()
-        do {
-            try recorder.start(deviceUDID: device.udid, outputFile: store.videoFile(for: session.id))
-            session.recordingStartedAt = Date()
-            self.recorder = recorder
-        } catch {
-            // The report matters more than the footage: keep the session usable.
-            session.videoError = error.localizedDescription
+        if video {
+            let recorder = makeRecorder()
+            do {
+                try recorder.start(deviceUDID: device.udid, outputFile: store.videoFile(for: session.id))
+                session.recordingStartedAt = Date()
+                self.recorder = recorder
+            } catch {
+                // The report matters more than the footage: keep the session usable.
+                session.videoError = error.localizedDescription
+            }
+        } else {
+            session.videoError = "video recording disabled for this run"
         }
         do {
             try store.write(session)
@@ -157,7 +161,7 @@ public final class TestSessionController: @unchecked Sendable {
     }
 
     public func stop(status: TestSessionStatus) async throws -> TestSession {
-        guard status == .passed || status == .failed else {
+        guard status != .running else {
             throw TestSessionError.badStatus(status)
         }
         lock.lock()

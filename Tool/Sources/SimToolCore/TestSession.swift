@@ -83,7 +83,13 @@ public struct TestSessionListPayload: Codable, Equatable, Sendable {
 
 public struct TestSessionStartRequest: Codable, Equatable, Sendable {
     public var title: String
-    public init(title: String) { self.title = title }
+    /// Record a screen video for the session; nil means yes (the default).
+    public var video: Bool?
+
+    public init(title: String, video: Bool? = nil) {
+        self.title = title
+        self.video = video
+    }
 }
 
 public struct TestSessionEntryRequest: Codable, Equatable, Sendable {

@@ -186,7 +186,13 @@ public struct TestListPayload: Codable, Equatable, Sendable {
 
 public struct TestRunRequest: Codable, Equatable, Sendable {
     public var file: String
-    public init(file: String) { self.file = file }
+    /// Record a screen video for the run's session; nil means yes (the default).
+    public var video: Bool?
+
+    public init(file: String, video: Bool? = nil) {
+        self.file = file
+        self.video = video
+    }
 }
 
 public struct TestRunStatusPayload: Codable, Equatable, Sendable {
@@ -196,7 +202,7 @@ public struct TestRunStatusPayload: Codable, Equatable, Sendable {
     public var sessionId: String?
     public var completedSteps: Int
     public var totalSteps: Int
-    /// running | passed | failed; nil when no test has run yet.
+    /// running | passed | failed | stopped; nil when no test has run yet.
     public var status: String?
     public var error: String?
 

@@ -111,8 +111,8 @@ public struct SimToolClient: Sendable {
         try await getJSON(AppLaunchesPayload.self, path: "launches")
     }
 
-    public func startTestSession(title: String) async throws -> TestSession {
-        try await sendJSON(TestSession.self, path: "tests/start", payload: TestSessionStartRequest(title: title), method: "POST")
+    public func startTestSession(title: String, video: Bool = true) async throws -> TestSession {
+        try await sendJSON(TestSession.self, path: "tests/start", payload: TestSessionStartRequest(title: title, video: video), method: "POST")
     }
 
     public func appendTestSessionEntry(_ entry: TestSessionEntryRequest) async throws -> TestSession {

@@ -82,6 +82,22 @@ final class TestSessionControllerTests: XCTestCase {
         }
     }
 
+    func testStartWithoutVideoSkipsRecorderAndAllowsInterruptedStop() async throws {
+        let recorder = MockRecorder()
+        let controller = makeController(recorder: { recorder })
+        let session = try controller.start(title: "No video, please", video: false)
+
+        XCTAssertEqual(session.status, .running)
+        XCTAssertNil(session.recordingStartedAt)
+        XCTAssertNotNil(session.videoError)
+        XCTAssertNil(recorder.startedUdid, "recorder must not be spawned when video is disabled")
+
+        let stopped = try await controller.stop(status: .interrupted)
+        XCTAssertEqual(stopped.status, .interrupted)
+        XCTAssertFalse(recorder.stopped)
+        XCTAssertEqual(try store.session(id: session.id)?.status, .interrupted)
+    }
+
     func testRecorderSpawnFailureSetsVideoErrorButSessionRuns() throws {
         let controller = makeController(recorder: { MockRecorder(behavior: .failToStart) })
         let session = try controller.start(title: "No video")

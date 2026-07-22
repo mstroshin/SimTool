@@ -19,6 +19,7 @@ final class TestRunController: @unchecked Sendable {
     private let testsRoot: URL
     private let lock = NSLock()
     private var run: ActiveRun?
+    private var task: Task<Void, Never>?
 
     init(testsRoot: URL) {
         self.testsRoot = testsRoot
@@ -44,7 +45,7 @@ final class TestRunController: @unchecked Sendable {
         )
     }
 
-    func start(file: String, serverURL: URL) throws -> TestRunStatusPayload {
+    func start(file: String, serverURL: URL, video: Bool = true) throws -> TestRunStatusPayload {
         guard !file.contains("/"), !file.contains(".."), !file.isEmpty else {
             throw SimToolError("Invalid test file name: \(file)")
         }
@@ -64,17 +65,27 @@ final class TestRunController: @unchecked Sendable {
             status: "running",
             error: nil
         )
+        task = Task { await execute(test, file: file, serverURL: serverURL, video: video) }
         lock.unlock()
-
-        Task { await execute(test, file: file, serverURL: serverURL) }
         return status()
     }
 
-    private func execute(_ test: TestDefinition, file: String, serverURL: URL) async {
+    /// Cancels the in-flight run, if any. The runner notices cancellation at
+    /// its next await (step polling sleeps every 500 ms) and finishes the test
+    /// session as interrupted; until then the status stays "running".
+    func stop() -> TestRunStatusPayload {
+        lock.lock()
+        let task = run?.status == "running" ? self.task : nil
+        lock.unlock()
+        task?.cancel()
+        return status()
+    }
+
+    private func execute(_ test: TestDefinition, file: String, serverURL: URL, video: Bool) async {
         let client = SimToolClient(baseURL: serverURL)
         do {
             let config = try await client.config()
-            let session = try await client.startTestSession(title: test.name ?? file)
+            let session = try await client.startTestSession(title: test.name ?? file, video: video)
             update { $0.sessionId = session.id }
 
             let runner = TestRunner(
@@ -95,6 +106,8 @@ final class TestRunController: @unchecked Sendable {
                 try await runner.run(test)
                 _ = try? await client.stopTestSession(status: .passed)
                 update { $0.status = "passed" }
+            } catch where error is CancellationError || Task.isCancelled {
+                await finishStopped(client: client)
             } catch {
                 let failure = message(of: error)
                 let screen = await runner.visibleSummary()
@@ -105,10 +118,22 @@ final class TestRunController: @unchecked Sendable {
                 _ = try? await client.stopTestSession(status: .failed)
                 update { $0.status = "failed"; $0.error = failure }
             }
+        } catch where error is CancellationError || Task.isCancelled {
+            await finishStopped(client: client)
         } catch {
             _ = try? await client.stopTestSession(status: .failed)
             update { $0.status = "failed"; $0.error = message(of: error) }
         }
+    }
+
+    /// A cancelled task cannot make HTTP calls (URLSession throws immediately),
+    /// so the session is closed from a detached task that ignores cancellation.
+    private func finishStopped(client: SimToolClient) async {
+        await Task.detached {
+            _ = try? await client.appendTestSessionEntry(TestSessionEntryRequest(kind: .log, logs: ["Stopped from the web viewer."]))
+            _ = try? await client.stopTestSession(status: .interrupted)
+        }.value
+        update { $0.status = "stopped"; $0.error = nil }
     }
 
     @discardableResult

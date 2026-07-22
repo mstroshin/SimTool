@@ -331,7 +331,7 @@ public final class StreamServer: @unchecked Sendable {
         server.POST["/api/v1/tests/start"] = { request in
             do {
                 let start = try self.decodeJSON(TestSessionStartRequest.self, from: request)
-                return try self.jsonEncodedResponse(self.testSessions.start(title: start.title))
+                return try self.jsonEncodedResponse(self.testSessions.start(title: start.title, video: start.video ?? true))
             } catch {
                 return self.testSessionErrorResponse(error)
             }
@@ -386,10 +386,18 @@ public final class StreamServer: @unchecked Sendable {
                 guard let serverURL = URL(string: self.baseURL) else {
                     return self.errorResponse(SimToolError("Cannot resolve own base URL"))
                 }
-                let status = try self.testRuns.start(file: body.file, serverURL: serverURL)
+                let status = try self.testRuns.start(file: body.file, serverURL: serverURL, video: body.video ?? true)
                 return try self.jsonEncodedResponse(status)
             } catch {
                 return self.errorResponse(error, statusCode: 409, reason: "Conflict")
+            }
+        }
+
+        server.POST["/api/v1/tests/run/stop"] = { _ in
+            do {
+                return try self.jsonEncodedResponse(self.testRuns.stop())
+            } catch {
+                return self.errorResponse(error)
             }
         }
 

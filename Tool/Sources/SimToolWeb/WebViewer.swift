@@ -249,6 +249,7 @@ public enum WebViewer {
     .tests-meta { flex-shrink: 0; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
     .tests-status-passed { color: #4ade80; }
     .tests-status-failed { color: #f87171; }
+    .tests-status-stopped { color: #9ca3af; }
     .tests-status-running { color: #fbbf24; }
     .tests-status-interrupted { color: rgba(244,247,251,0.45); }
     .tests-empty { color: rgba(244,247,251,0.45); font-size: 12px; padding: 10px; }
@@ -275,6 +276,11 @@ public enum WebViewer {
     .tests-def-run { flex-shrink: 0; cursor: pointer; border: 1px solid rgba(125,211,252,0.45); background: none; color: #7dd3fc; border-radius: 6px; padding: 2px 10px; font-size: 11px; }
     .tests-def-run:hover:not(:disabled) { background: rgba(125,211,252,0.10); }
     .tests-def-run:disabled { opacity: 0.4; cursor: default; }
+    .tests-def-stop { border-color: rgba(248,113,113,0.45); color: #f87171; }
+    .tests-def-stop:hover:not(:disabled) { background: rgba(248,113,113,0.10); }
+    .tests-video-toggle { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; cursor: pointer; flex-shrink: 0; text-transform: none; letter-spacing: normal; color: rgba(244,247,251,0.6); }
+    .tests-video-toggle input { accent-color: #7dd3fc; margin: 0; cursor: pointer; }
+    .tests-video-toggle input:disabled { cursor: default; }
     .tests-timeline { display: flex; flex-direction: column; gap: 3px; min-height: 0; flex: 1; overflow: auto; }
     .tests-timeline-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: rgba(244,247,251,0.5); padding: 4px 2px; }
     .tests-timeline-title { flex: 1; min-width: 0; overflow-wrap: anywhere; }
@@ -2192,6 +2198,7 @@ public enum WebViewer {
     let testRunStatus = null;
     let testsDefinitionsLastPayload = "";
     let testsSubtab = "tests";
+    let makeVideoEnabled = true;
     let selectedDefinitionFile = null;
 
     function setTestsSubtab(name) {
@@ -2250,7 +2257,7 @@ public enum WebViewer {
         const response = await fetch("/api/v1/tests/run", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ file }),
+          body: JSON.stringify({ file, video: makeVideoEnabled }),
         });
         const payload = await response.json().catch(() => null);
         if (response.ok && payload) {
@@ -2260,6 +2267,18 @@ public enum WebViewer {
           loadTests();
         } else if (payload && payload.error) {
           testRunStatus = { active: false, file, status: "failed", error: payload.error, completedSteps: 0, totalSteps: 0 };
+          renderTestSteps();
+        }
+      } catch (_) {}
+    }
+
+    async function stopTest() {
+      try {
+        const response = await fetch("/api/v1/tests/run/stop", { method: "POST" });
+        const payload = await response.json().catch(() => null);
+        if (response.ok && payload) {
+          testRunStatus = payload;
+          testsDefinitionsLastPayload = "";
           renderTestSteps();
         }
       } catch (_) {}
@@ -2341,10 +2360,25 @@ public enum WebViewer {
       const runButton = document.createElement("button");
       runButton.className = "tests-def-run";
       runButton.type = "button";
-      runButton.textContent = "Run";
-      runButton.disabled = busy || Boolean(test.parseError);
-      runButton.addEventListener("click", () => runTest(test.file));
-      header.append(label, runButton);
+      if (busy && isCurrent) {
+        runButton.textContent = "Stop";
+        runButton.classList.add("tests-def-stop");
+        runButton.addEventListener("click", stopTest);
+      } else {
+        runButton.textContent = "Run";
+        runButton.disabled = busy || Boolean(test.parseError);
+        runButton.addEventListener("click", () => runTest(test.file));
+      }
+      const videoToggle = document.createElement("label");
+      videoToggle.className = "tests-video-toggle";
+      const videoCheckbox = document.createElement("input");
+      videoCheckbox.type = "checkbox";
+      videoCheckbox.checked = makeVideoEnabled;
+      videoCheckbox.disabled = busy;
+      videoCheckbox.addEventListener("change", () => { makeVideoEnabled = videoCheckbox.checked; });
+      videoToggle.append(videoCheckbox, document.createTextNode("Make video"));
+      videoToggle.title = "Record a screen video for this run";
+      header.append(label, videoToggle, runButton);
       testsStepsEl.appendChild(header);
 
       const session = isCurrent && testRunStatus.sessionId
@@ -2378,6 +2412,10 @@ public enum WebViewer {
           state.textContent = "✗";
           state.classList.add("tests-status-failed");
           if (testRunStatus.error) row.title = testRunStatus.error;
+        } else if (isCurrent && index === testRunStatus.completedSteps && testRunStatus.status === "stopped") {
+          state.textContent = "◼";
+          state.classList.add("tests-status-stopped");
+          row.title = "stopped";
         }
         const text = document.createElement("span");
         text.className = "tests-step-text";
