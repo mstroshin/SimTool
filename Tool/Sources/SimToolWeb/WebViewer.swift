@@ -99,10 +99,16 @@ public enum WebViewer {
                       <div id="stateHistory" class="state-history"></div>
                     </div>
                     <div id="testsPane" class="tests-pane" hidden>
-                      <div id="testsFlows" class="flows-list"></div>
-                      <div class="tests-section-header">Sessions</div>
-                      <div id="testsSessions" class="tests-sessions"></div>
-                      <div id="testsTimeline" class="tests-timeline scroll-pane"></div>
+                      <div class="tests-subtabs">
+                        <button id="testsSubtabTests" class="tests-subtab active" type="button">Tests</button>
+                        <button id="testsSubtabHistory" class="tests-subtab" type="button">History</button>
+                      </div>
+                      <div id="testsDefinitions" class="tests-defs"></div>
+                      <div id="testsSteps" class="tests-steps scroll-pane"></div>
+                      <div id="testsHistory" class="tests-history" hidden>
+                        <div id="testsSessions" class="tests-sessions"></div>
+                        <div id="testsTimeline" class="tests-timeline scroll-pane"></div>
+                      </div>
                     </div>
                   </div>
                   <div id="inspectorDetailView" class="inspector-detail-view" hidden>
@@ -247,15 +253,28 @@ public enum WebViewer {
     .tests-status-interrupted { color: rgba(244,247,251,0.45); }
     .tests-empty { color: rgba(244,247,251,0.45); font-size: 12px; padding: 10px; }
     .tests-section-header { flex-shrink: 0; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: rgba(244,247,251,0.5); padding: 4px 2px 0; }
-    .flows-list { display: flex; flex-direction: column; gap: 4px; max-height: 30%; overflow: auto; flex-shrink: 0; }
-    .flows-row { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; font-size: 12px; }
-    .flows-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .flows-desc { margin-top: 2px; font-size: 11px; color: rgba(244,247,251,0.5); white-space: normal; overflow-wrap: anywhere; }
-    .flows-meta { flex-shrink: 0; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; color: rgba(244,247,251,0.5); }
-    .flows-error { color: #f87171; }
-    .flows-run { flex-shrink: 0; cursor: pointer; border: 1px solid rgba(125,211,252,0.45); background: none; color: #7dd3fc; border-radius: 6px; padding: 2px 10px; font-size: 11px; }
-    .flows-run:hover:not(:disabled) { background: rgba(125,211,252,0.10); }
-    .flows-run:disabled { opacity: 0.4; cursor: default; }
+    .tests-subtabs { display: flex; gap: 4px; flex-shrink: 0; }
+    .tests-subtab { cursor: pointer; border: 1px solid rgba(255,255,255,0.12); background: none; color: rgba(244,247,251,0.6); border-radius: 6px; padding: 3px 12px; font-size: 12px; }
+    .tests-subtab.active { color: #f4f7fb; border-color: rgba(125,211,252,0.45); background: rgba(125,211,252,0.10); }
+    .tests-history { display: flex; flex-direction: column; gap: 8px; min-height: 0; flex: 1; }
+    .tests-defs { display: flex; flex-direction: column; gap: 4px; max-height: 45%; overflow: auto; flex-shrink: 0; }
+    .tests-defs[hidden], .tests-history[hidden], .tests-timeline[hidden], .tests-steps[hidden] { display: none; }
+    .tests-def-card { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; font-size: 12px; flex-shrink: 0; cursor: pointer; }
+    .tests-def-card:hover { border-color: rgba(125,211,252,0.35); }
+    .tests-def-card.selected { border-color: #7dd3fc; background: rgba(125,211,252,0.08); }
+    .tests-def-head { display: flex; align-items: baseline; gap: 8px; }
+    .tests-steps { display: flex; flex-direction: column; gap: 3px; min-height: 0; flex: 1; overflow: auto; }
+    .tests-steps-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: rgba(244,247,251,0.5); padding: 4px 2px; }
+    .tests-step-state { flex: 0 0 16px; text-align: center; font-size: 12px; }
+    .tests-step-spinner { display: inline-block; width: 10px; height: 10px; border: 2px solid rgba(125,211,252,0.3); border-top-color: #7dd3fc; border-radius: 50%; animation: tests-spin 0.8s linear infinite; }
+    @keyframes tests-spin { to { transform: rotate(360deg); } }
+    .tests-def-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tests-def-desc { margin-top: 2px; font-size: 11px; color: rgba(244,247,251,0.5); white-space: normal; overflow-wrap: anywhere; }
+    .tests-def-meta { flex-shrink: 0; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; color: rgba(244,247,251,0.5); }
+    .tests-def-error { color: #f87171; }
+    .tests-def-run { flex-shrink: 0; cursor: pointer; border: 1px solid rgba(125,211,252,0.45); background: none; color: #7dd3fc; border-radius: 6px; padding: 2px 10px; font-size: 11px; }
+    .tests-def-run:hover:not(:disabled) { background: rgba(125,211,252,0.10); }
+    .tests-def-run:disabled { opacity: 0.4; cursor: default; }
     .tests-timeline { display: flex; flex-direction: column; gap: 3px; min-height: 0; flex: 1; overflow: auto; }
     .tests-timeline-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: rgba(244,247,251,0.5); padding: 4px 2px; }
     .tests-timeline-title { flex: 1; min-width: 0; overflow-wrap: anywhere; }
@@ -487,7 +506,11 @@ public enum WebViewer {
     const testsSessionsEl = $("testsSessions");
     const testsTimelineEl = $("testsTimeline");
     const testsCountEl = $("testsCount");
-    const testsFlowsEl = $("testsFlows");
+    const testsDefinitionsEl = $("testsDefinitions");
+    const testsStepsEl = $("testsSteps");
+    const testsHistoryEl = $("testsHistory");
+    const testsSubtabTestsEl = $("testsSubtabTests");
+    const testsSubtabHistoryEl = $("testsSubtabHistory");
     const testPlayback = $("testPlayback");
     const testVideo = $("testVideo");
     const testBackLive = $("testBackLive");
@@ -896,7 +919,7 @@ public enum WebViewer {
       else if (activeTab === "logs") renderLogsList();
       else if (activeTab === "state") renderState();
       else if (activeTab === "ax") renderAxTree();
-      else if (activeTab === "tests") renderTestsList();
+      else if (activeTab === "tests") { renderTestsList(); renderTestsDefinitions(); }
     }
 
     // Adding a chip replaces any chip with the same field+term (either kind),
@@ -2052,7 +2075,7 @@ public enum WebViewer {
     let selectedTestId = null;
     let testsLastPayload = "";
 
-    const TEST_STATUS_LABEL = { running: "● running", passed: "✓ passed", failed: "✗ failed", interrupted: "◌ interrupted" };
+    const TEST_STATUS_LABEL = { running: "●", passed: "✓", failed: "✗", interrupted: "◌" };
 
     async function loadTests() {
       try {
@@ -2072,6 +2095,7 @@ public enum WebViewer {
         maybeAutoSwitchPlayback(previous);
         renderTestsList();
         renderTestTimeline();
+        renderTestSteps();
       } catch (_) {}
     }
 
@@ -2164,118 +2188,210 @@ public enum WebViewer {
       testVideo.addEventListener(eventName, updateTestControls);
     }
 
-    let flowsList = [];
-    let flowRunStatus = null;
-    let flowsLastPayload = "";
+    let testsDefinitions = [];
+    let testRunStatus = null;
+    let testsDefinitionsLastPayload = "";
+    let testsSubtab = "tests";
+    let selectedDefinitionFile = null;
 
-    async function loadFlows() {
+    function setTestsSubtab(name) {
+      testsSubtab = name;
+      testsSubtabTestsEl.classList.toggle("active", name === "tests");
+      testsSubtabHistoryEl.classList.toggle("active", name === "history");
+      testsDefinitionsEl.hidden = name !== "tests";
+      testsStepsEl.hidden = name !== "tests";
+      testsHistoryEl.hidden = name !== "history";
+      if (name === "tests") {
+        renderTestsDefinitions();
+        renderTestSteps();
+      } else {
+        renderTestsList();
+        renderTestTimeline();
+      }
+    }
+    testsSubtabTestsEl.addEventListener("click", () => setTestsSubtab("tests"));
+    testsSubtabHistoryEl.addEventListener("click", () => setTestsSubtab("history"));
+
+    async function loadTestsDefinitions() {
       try {
-        const [flowsResponse, runResponse] = await Promise.all([
-          fetch("/api/v1/flows"),
-          fetch("/api/v1/flows/run"),
+        const [definitionsResponse, runResponse] = await Promise.all([
+          fetch("/api/v1/tests/definitions"),
+          fetch("/api/v1/tests/run"),
         ]);
-        if (!flowsResponse.ok || !runResponse.ok) return;
-        const flowsPayload = await flowsResponse.json();
+        if (!definitionsResponse.ok || !runResponse.ok) return;
+        const definitionsPayload = await definitionsResponse.json();
         const runPayload = await runResponse.json();
-        const serialized = JSON.stringify([flowsPayload.flows || [], runPayload]);
-        if (serialized === flowsLastPayload) return;
-        flowsLastPayload = serialized;
-        flowsList = flowsPayload.flows || [];
-        const previousRun = flowRunStatus;
-        flowRunStatus = runPayload;
-        // Follow the run: select its session so the timeline streams the steps
-        // live; when it finishes, the regular auto-switch plays the recording.
+        const serialized = JSON.stringify([definitionsPayload.tests || [], runPayload]);
+        if (serialized === testsDefinitionsLastPayload) return;
+        testsDefinitionsLastPayload = serialized;
+        testsDefinitions = definitionsPayload.tests || [];
+        if (!selectedDefinitionFile || !testsDefinitions.some((t) => t.file === selectedDefinitionFile)) {
+          selectedDefinitionFile = testsDefinitions.length ? testsDefinitions[0].file : null;
+        }
+        const previousRun = testRunStatus;
+        testRunStatus = runPayload;
+        // Follow the run: select its session so the timeline under the tests
+        // list streams the steps live; when it finishes, the regular
+        // auto-switch plays the recording.
         if (runPayload.active && runPayload.sessionId &&
             (!previousRun || previousRun.sessionId !== runPayload.sessionId)) {
           selectedTestId = runPayload.sessionId;
           showLiveStream();
+          if (testRunStatus.file) selectedDefinitionFile = testRunStatus.file;
+          if (testsSubtab !== "tests") setTestsSubtab("tests");
         }
-        renderFlowsList();
+        renderTestsDefinitions();
+        renderTestSteps();
       } catch (_) {}
     }
 
-    async function runFlow(file) {
+    async function runTest(file) {
       try {
-        const response = await fetch("/api/v1/flows/run", {
+        const response = await fetch("/api/v1/tests/run", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ file }),
         });
         const payload = await response.json().catch(() => null);
         if (response.ok && payload) {
-          flowRunStatus = payload;
-          flowsLastPayload = "";
-          renderFlowsList();
+          testRunStatus = payload;
+          testsDefinitionsLastPayload = "";
+          renderTestSteps();
           loadTests();
         } else if (payload && payload.error) {
-          flowRunStatus = { active: false, file, status: "failed", error: payload.error, completedSteps: 0, totalSteps: 0 };
-          renderFlowsList();
+          testRunStatus = { active: false, file, status: "failed", error: payload.error, completedSteps: 0, totalSteps: 0 };
+          renderTestSteps();
         }
       } catch (_) {}
     }
 
-    function renderFlowsList() {
-      if (activeTab !== "tests") return;
-      const prevScroll = captureScroll(testsFlowsEl);
-      testsFlowsEl.innerHTML = "";
+    function renderTestsDefinitions() {
+      if (activeTab !== "tests" || testsSubtab !== "tests") return;
+      const prevScroll = captureScroll(testsDefinitionsEl);
+      testsDefinitionsEl.innerHTML = "";
       const header = document.createElement("div");
       header.className = "tests-section-header";
-      header.textContent = "Flows · .simtool/flows";
-      testsFlowsEl.appendChild(header);
-      if (!flowsList.length) {
+      header.textContent = "Tests · .simtool/tests";
+      testsDefinitionsEl.appendChild(header);
+      const chips = filterChipsByTab.tests;
+      const query = (filterByTab.tests || "").trim().toLowerCase();
+      const visibleTests = testsDefinitions.filter((t) =>
+        matchesFilters([t.name, t.file, t.description].join(" ").toLowerCase(), chips, query, null, null));
+      if (!visibleTests.length) {
         const empty = document.createElement("div");
         empty.className = "tests-empty";
-        empty.textContent = "no flows yet — add a YAML flow to .simtool/flows";
-        testsFlowsEl.appendChild(empty);
+        empty.textContent = testsDefinitions.length
+          ? "no tests match the filter"
+          : "no tests yet — add a YAML test to .simtool/tests";
+        testsDefinitionsEl.appendChild(empty);
         return;
       }
-      const busy = Boolean(flowRunStatus && flowRunStatus.active);
-      for (const flow of flowsList) {
-        const row = document.createElement("div");
-        row.className = "flows-row";
+      for (const test of visibleTests) {
+        const card = document.createElement("div");
+        card.className = "tests-def-card" + (test.file === selectedDefinitionFile ? " selected" : "");
+        const head = document.createElement("div");
+        head.className = "tests-def-head";
         const title = document.createElement("span");
-        title.className = "flows-title";
-        title.textContent = flow.name || flow.file;
-        title.title = flow.file;
-        if (flow.description) {
-          const desc = document.createElement("div");
-          desc.className = "flows-desc";
-          desc.textContent = flow.description;
-          title.appendChild(desc);
-        }
+        title.className = "tests-def-title";
+        title.textContent = test.name || test.file;
+        title.title = test.file;
         const meta = document.createElement("span");
-        meta.className = "flows-meta";
-        const isCurrent = flowRunStatus && flowRunStatus.file === flow.file;
-        if (flow.parseError) {
+        meta.className = "tests-def-meta";
+        if (test.parseError) {
           meta.textContent = "parse error";
-          meta.classList.add("flows-error");
-          meta.title = flow.parseError;
-        } else if (isCurrent && flowRunStatus.active) {
-          meta.textContent = "● " + flowRunStatus.completedSteps + "/" + flowRunStatus.totalSteps;
-          meta.classList.add("tests-status-running");
-        } else if (isCurrent && flowRunStatus.status) {
-          meta.textContent = flowRunStatus.status === "passed" ? "✓ passed" : "✗ failed";
-          meta.classList.add(flowRunStatus.status === "passed" ? "tests-status-passed" : "tests-status-failed");
-          if (flowRunStatus.error) meta.title = flowRunStatus.error;
+          meta.classList.add("tests-def-error");
+          meta.title = test.parseError;
         } else {
-          meta.textContent = flow.stepCount + " steps";
+          meta.textContent = test.stepCount + " steps";
         }
-        const runButton = document.createElement("button");
-        runButton.className = "flows-run";
-        runButton.type = "button";
-        runButton.textContent = "Run";
-        runButton.disabled = busy || Boolean(flow.parseError);
-        runButton.addEventListener("click", () => runFlow(flow.file));
-        row.append(title, meta, runButton);
-        testsFlowsEl.appendChild(row);
+        head.append(title, meta);
+        card.appendChild(head);
+        if (test.description) {
+          const desc = document.createElement("div");
+          desc.className = "tests-def-desc";
+          desc.textContent = test.description;
+          card.appendChild(desc);
+        }
+        card.addEventListener("click", () => {
+          selectedDefinitionFile = test.file;
+          renderTestsDefinitions();
+          renderTestSteps();
+        });
+        testsDefinitionsEl.appendChild(card);
       }
-      restoreScroll(testsFlowsEl, "none", prevScroll);
+      restoreScroll(testsDefinitionsEl, "none", prevScroll);
+    }
+
+    // Steps of the selected YAML test with the state of its current/last
+    // viewer-triggered run: check + video offset for passed steps, a spinner
+    // for the one in flight, a cross where the run stopped.
+    function renderTestSteps() {
+      if (activeTab !== "tests" || testsSubtab !== "tests") return;
+      const prevScroll = captureScroll(testsStepsEl);
+      testsStepsEl.innerHTML = "";
+      const test = testsDefinitions.find((t) => t.file === selectedDefinitionFile);
+      if (!test) return;
+      const busy = Boolean(testRunStatus && testRunStatus.active);
+      const isCurrent = Boolean(testRunStatus && testRunStatus.file === test.file);
+
+      const header = document.createElement("div");
+      header.className = "tests-steps-header";
+      const label = document.createElement("span");
+      label.textContent = "Steps · " + (test.name || test.file);
+      const runButton = document.createElement("button");
+      runButton.className = "tests-def-run";
+      runButton.type = "button";
+      runButton.textContent = "Run";
+      runButton.disabled = busy || Boolean(test.parseError);
+      runButton.addEventListener("click", () => runTest(test.file));
+      header.append(label, runButton);
+      testsStepsEl.appendChild(header);
+
+      const session = isCurrent && testRunStatus.sessionId
+        ? testsSessions.find((s) => s.id === testRunStatus.sessionId)
+        : null;
+      const stepTimes = {};
+      if (session) {
+        for (const entry of session.entries || []) {
+          if (entry.kind !== "step") continue;
+          const match = (entry.text || "").match(/^✓ (\d+)\//);
+          if (match) stepTimes[Number(match[1]) - 1] = formatOffset(entryOffsetSeconds(session, entry));
+        }
+      }
+
+      (test.steps || []).forEach((stepText, index) => {
+        const row = document.createElement("div");
+        row.className = "tests-step";
+        const time = document.createElement("span");
+        time.className = "tests-step-t";
+        const state = document.createElement("span");
+        state.className = "tests-step-state";
+        if (isCurrent && index < testRunStatus.completedSteps) {
+          state.textContent = "✓";
+          state.classList.add("tests-status-passed");
+          time.textContent = stepTimes[index] || "";
+        } else if (isCurrent && index === testRunStatus.completedSteps && testRunStatus.active) {
+          const spinner = document.createElement("span");
+          spinner.className = "tests-step-spinner";
+          state.appendChild(spinner);
+        } else if (isCurrent && index === testRunStatus.completedSteps && testRunStatus.status === "failed") {
+          state.textContent = "✗";
+          state.classList.add("tests-status-failed");
+          if (testRunStatus.error) row.title = testRunStatus.error;
+        }
+        const text = document.createElement("span");
+        text.className = "tests-step-text";
+        text.textContent = (index + 1) + "/" + test.steps.length + " " + stepText;
+        row.append(time, state, text);
+        testsStepsEl.appendChild(row);
+      });
+      restoreScroll(testsStepsEl, "none", prevScroll);
     }
 
     function startTestsPolling() {
       loadTests();
-      loadFlows();
-      if (!testsTimer) testsTimer = setInterval(() => { loadTests(); loadFlows(); }, 1500);
+      loadTestsDefinitions();
+      if (!testsTimer) testsTimer = setInterval(() => { loadTests(); loadTestsDefinitions(); }, 1500);
     }
 
     function stopTestsPolling() {
@@ -2328,7 +2444,7 @@ public enum WebViewer {
 
     function renderTestsList() {
       testsCountEl.textContent = String(testsSessions.length);
-      if (activeTab !== "tests") return;
+      if (activeTab !== "tests" || testsSubtab !== "history") return;
       const sessions = filteredTestSessions();
       const prevScroll = captureScroll(testsSessionsEl);
       testsSessionsEl.innerHTML = "";
@@ -2337,7 +2453,7 @@ public enum WebViewer {
         empty.className = "tests-empty";
         empty.textContent = testsSessions.length
           ? "no sessions match the filter"
-          : "no test sessions yet — run a flow";
+          : "no test sessions yet — run a test";
         testsSessionsEl.appendChild(empty);
         return;
       }
@@ -2352,7 +2468,8 @@ public enum WebViewer {
         const duration = session.endedAt ? " · " + formatOffset(sessionDurationSeconds(session)) : "";
         const startedAt = new Date(session.startedAt);
         const startStamp = isNaN(startedAt.getTime()) ? "" :
-          " · " + String(startedAt.getHours()).padStart(2, "0") + ":" + String(startedAt.getMinutes()).padStart(2, "0");
+          " · " + String(startedAt.getDate()).padStart(2, "0") + "." + String(startedAt.getMonth() + 1).padStart(2, "0") +
+          " " + String(startedAt.getHours()).padStart(2, "0") + ":" + String(startedAt.getMinutes()).padStart(2, "0");
         meta.textContent = (TEST_STATUS_LABEL[session.status] || session.status) + duration + startStamp;
         row.append(title, meta);
         row.addEventListener("click", () => selectTestSession(session.id));
@@ -2396,7 +2513,7 @@ public enum WebViewer {
     }
 
     function renderTestTimeline() {
-      if (activeTab !== "tests") return;
+      if (activeTab !== "tests" || testsSubtab !== "history") return;
       const session = testsSessions.find((s) => s.id === selectedTestId);
       const prevScroll = captureScroll(testsTimelineEl);
       testsTimelineEl.innerHTML = "";
@@ -2416,13 +2533,7 @@ public enum WebViewer {
       (session.entries || []).forEach((entry, index) => {
         const offset = entryOffsetSeconds(session, entry);
         if (entry.kind === "step") {
-          const { head, tail } = splitStep(entry.text);
-          const logs = entry.logs || [];
-          const hasDetail = !!tail || logs.length > 0;
-          const stepKey = selectedTestId + ":" + index;
-          const expanded = expandedTestSteps.has(stepKey);
-          if (hasDetail) detailKeys.push(stepKey);
-
+          const { head } = splitStep(entry.text);
           const row = document.createElement("div");
           row.className = "tests-step";
           row.dataset.index = String(index);
@@ -2434,44 +2545,7 @@ public enum WebViewer {
           text.textContent = head;
           row.append(time, text);
           row.addEventListener("click", () => seekTestVideo(offset));
-
-          let detail;
-          if (hasDetail) {
-            const toggle = document.createElement("span");
-            toggle.className = "tests-step-toggle";
-            toggle.textContent = expanded ? "▾" : "▸";
-            toggle.title = expanded ? "Свернуть детали" : "Показать детали";
-            row.appendChild(toggle);
-
-            detail = document.createElement("div");
-            detail.className = "tests-detail";
-            detail.hidden = !expanded;
-            if (tail) {
-              const tailEl = document.createElement("div");
-              tailEl.className = "tests-detail-text";
-              tailEl.textContent = tail;
-              detail.appendChild(tailEl);
-            }
-            for (const line of logs) {
-              const log = document.createElement("div");
-              log.className = "tests-logline";
-              log.textContent = line;
-              detail.appendChild(log);
-            }
-
-            toggle.addEventListener("click", (domEvent) => {
-              domEvent.stopPropagation();
-              const open = expandedTestSteps.has(stepKey);
-              if (open) expandedTestSteps.delete(stepKey);
-              else expandedTestSteps.add(stepKey);
-              detail.hidden = open;
-              toggle.textContent = open ? "▸" : "▾";
-              toggle.title = open ? "Показать детали" : "Свернуть детали";
-            });
-          }
-
           testsTimelineEl.appendChild(row);
-          if (detail) testsTimelineEl.appendChild(detail);
         } else {
           const logs = entry.logs || [];
           if (!logs.length) return;
@@ -2633,7 +2707,7 @@ public enum WebViewer {
       else if (tab === "logs") { renderLogsList(); ensureLogs(); }
       else if (tab === "state") renderState();
       else if (tab === "ax") { renderAxTree(); renderAxSelected(); }
-      else if (tab === "tests") { renderFlowsList(); renderTestsList(); renderTestTimeline(); }
+      else if (tab === "tests") { renderTestsDefinitions(); renderTestSteps(); renderTestsList(); renderTestTimeline(); }
       if (tab === "state") startStatePolling(); else stopStatePolling();
       if (tab === "ax") startAxPolling(); else stopAxPolling();
       if (tab === "tests") startTestsPolling(); else { stopTestsPolling(); showLiveStream(); }
@@ -2680,7 +2754,7 @@ public enum WebViewer {
       else if (activeTab === "logs") renderLogsList();
       else if (activeTab === "state") renderState();
       else if (activeTab === "ax") { axFilter = inspectorFilter.value; renderAxTree(); }
-      else if (activeTab === "tests") renderTestsList();
+      else if (activeTab === "tests") { renderTestsList(); renderTestsDefinitions(); }
     });
     inspectorFilter.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {

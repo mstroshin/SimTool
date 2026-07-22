@@ -227,15 +227,15 @@ final class SimToolCommandSurfaceTests: XCTestCase {
         XCTAssertEqual(names, ["run", "list"])
     }
 
-    func testTestRunParsesFlowPathAndOptions() throws {
-        let command = try TestCommand.Run.parse(["flows/badges.yml", "--title", "Badges", "--no-session", "--json"])
-        XCTAssertEqual(command.flow, "flows/badges.yml")
+    func testTestRunParsesTestPathAndOptions() throws {
+        let command = try TestCommand.Run.parse(["tests/badges.yml", "--title", "Badges", "--no-session", "--json"])
+        XCTAssertEqual(command.test, "tests/badges.yml")
         XCTAssertEqual(command.title, "Badges")
         XCTAssertTrue(command.noSession)
         XCTAssertTrue(command.common.json)
     }
 
-    func testTestRunRequiresFlowPath() {
+    func testTestRunRequiresTestPath() {
         XCTAssertThrowsError(try TestCommand.Run.parse([]))
     }
 

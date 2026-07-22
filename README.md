@@ -97,22 +97,22 @@ swift run simtool logs tail --app com.example.MyApp --stdout --seconds 4 --json
 swift run simtool network snapshot --seconds 2 --limit 50 --json
 ```
 
-### Test flows and sessions
+### Tests and sessions
 
-Declarative YAML flows in `<project>/.simtool/flows/` drive the simulator
+Declarative YAML tests in `<project>/.simtool/tests/` drive the simulator
 through the served accessibility tree: every step polls until its target
-appears, so flows need no sleeps. Each run is recorded as a reviewable test
+appears, so tests need no sleeps. Each run is recorded as a reviewable test
 session — timestamped steps and a screen recording — shown in the web
-viewer's **Tests** tab, which also lists the flows with Run buttons and live
+viewer's **Tests** tab, which also lists the tests with Run buttons and live
 progress. Finished sessions play their recording in place of the live
 stream, and clicking a step seeks the video to that moment.
 
 ```bash
-swift run simtool test run .simtool/flows/my-flow.yml
+swift run simtool test run .simtool/tests/my-test.yml
 swift run simtool test list --json
 ```
 
-See `simtool test run --help` for the flow file format (steps, environment,
+See `simtool test run --help` for the test file format (steps, environment,
 setup commands, launch arguments). Sessions persist under
 `<project>/.simtool/test-sessions/<session-id>/` (`session.json` plus
 `video.mp4`) alongside the project the server was started for, and survive

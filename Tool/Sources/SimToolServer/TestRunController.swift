@@ -2,10 +2,10 @@ import Foundation
 import SimToolClient
 import SimToolCore
 
-/// Lists declarative flows from `<.simtool>/flows` and runs one at a time
+/// Lists declarative YAML tests from `<.simtool>/tests` and runs one at a time
 /// against the server's own HTTP API, so web-triggered runs share the exact
 /// execution path of `simtool test run` — test session recording included.
-final class FlowRunController: @unchecked Sendable {
+final class TestRunController: @unchecked Sendable {
     private struct ActiveRun {
         var file: String
         var name: String?
@@ -16,23 +16,23 @@ final class FlowRunController: @unchecked Sendable {
         var error: String?
     }
 
-    private let flowsRoot: URL
+    private let testsRoot: URL
     private let lock = NSLock()
     private var run: ActiveRun?
 
-    init(flowsRoot: URL) {
-        self.flowsRoot = flowsRoot
+    init(testsRoot: URL) {
+        self.testsRoot = testsRoot
     }
 
-    func list() -> FlowListPayload {
-        FlowListPayload(flows: TestFlowParser.summaries(in: flowsRoot))
+    func list() -> TestListPayload {
+        TestListPayload(tests: TestDefinitionParser.summaries(in: testsRoot))
     }
 
-    func status() -> FlowRunStatusPayload {
+    func status() -> TestRunStatusPayload {
         lock.lock()
         defer { lock.unlock() }
-        guard let run else { return FlowRunStatusPayload() }
-        return FlowRunStatusPayload(
+        guard let run else { return TestRunStatusPayload() }
+        return TestRunStatusPayload(
             active: run.status == "running",
             file: run.file,
             name: run.name,
@@ -44,45 +44,45 @@ final class FlowRunController: @unchecked Sendable {
         )
     }
 
-    func start(file: String, serverURL: URL) throws -> FlowRunStatusPayload {
+    func start(file: String, serverURL: URL) throws -> TestRunStatusPayload {
         guard !file.contains("/"), !file.contains(".."), !file.isEmpty else {
-            throw SimToolError("Invalid flow file name: \(file)")
+            throw SimToolError("Invalid test file name: \(file)")
         }
-        let flow = try TestFlowParser.load(contentsOf: flowsRoot.appendingPathComponent(file))
+        let test = try TestDefinitionParser.load(contentsOf: testsRoot.appendingPathComponent(file))
 
         lock.lock()
         if let current = run, current.status == "running" {
             lock.unlock()
-            throw SimToolError("Flow \(current.file) is already running.")
+            throw SimToolError("Test \(current.file) is already running.")
         }
         run = ActiveRun(
             file: file,
-            name: flow.name,
+            name: test.name,
             sessionId: nil,
             completedSteps: 0,
-            totalSteps: flow.steps.count,
+            totalSteps: test.steps.count,
             status: "running",
             error: nil
         )
         lock.unlock()
 
-        Task { await execute(flow, file: file, serverURL: serverURL) }
+        Task { await execute(test, file: file, serverURL: serverURL) }
         return status()
     }
 
-    private func execute(_ flow: TestFlow, file: String, serverURL: URL) async {
+    private func execute(_ test: TestDefinition, file: String, serverURL: URL) async {
         let client = SimToolClient(baseURL: serverURL)
         do {
             let config = try await client.config()
-            let session = try await client.startTestSession(title: flow.name ?? file)
+            let session = try await client.startTestSession(title: test.name ?? file)
             update { $0.sessionId = session.id }
 
-            let runner = FlowRunner(
+            let runner = TestRunner(
                 client: client,
                 udid: config.udid,
                 screenWidth: Double(config.width),
                 screenHeight: Double(config.height),
-                defaultTimeout: flow.stepTimeout,
+                defaultTimeout: test.stepTimeout,
                 record: { text in
                     _ = try? await client.appendTestSessionEntry(TestSessionEntryRequest(kind: .step, text: text))
                 },
@@ -92,7 +92,7 @@ final class FlowRunController: @unchecked Sendable {
             )
 
             do {
-                try await runner.run(flow)
+                try await runner.run(test)
                 _ = try? await client.stopTestSession(status: .passed)
                 update { $0.status = "passed" }
             } catch {

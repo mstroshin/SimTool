@@ -65,6 +65,54 @@ public enum SimulatorInputClient {
         return try await AxeClient.run(args)
     }
 
+    /// AXe's `touch` command only takes coordinates, so an `id`/`label` target
+    /// is resolved to its frame center through the accessibility tree first.
+    public static func longPress(
+        deviceUDID: String,
+        x: Double? = nil,
+        y: Double? = nil,
+        id: String? = nil,
+        label: String? = nil,
+        duration: Double = 1.0
+    ) async throws -> ProcessOutput {
+        let point: (x: Double, y: Double)
+        if let x, let y {
+            point = (x, y)
+        } else if id != nil || label != nil {
+            point = try await frameCenter(deviceUDID: deviceUDID, id: id, label: label)
+        } else {
+            throw SimToolError("Long press requires x/y coordinates or an id/label target")
+        }
+        return try await AxeClient.run([
+            "touch",
+            "-x", "\(point.x)",
+            "-y", "\(point.y)",
+            "--down", "--up",
+            "--delay", "\(max(0.1, duration))",
+            "--udid", deviceUDID,
+        ])
+    }
+
+    private static func frameCenter(deviceUDID: String, id: String?, label: String?) async throws -> (x: Double, y: Double) {
+        let tree = try await SimulatorAccessibilityClient.normalizedTree(deviceUDID: deviceUDID)
+        var queue = tree.roots
+        while !queue.isEmpty {
+            let node = queue.removeFirst()
+            queue.append(contentsOf: node.children)
+            let matches = if let id {
+                node.accessibilityIdentifier == id
+            } else {
+                node.label == label || node.title == label
+            }
+            guard matches,
+                  let frame = node.frame,
+                  let x = frame.x, let y = frame.y,
+                  let width = frame.width, let height = frame.height else { continue }
+            return (x + width / 2, y + height / 2)
+        }
+        throw SimToolError("No element matching \(id.map { "id \"\($0)\"" } ?? "label \"\(label ?? "")\"") with a frame to long-press")
+    }
+
     public static func typeText(_ text: String, deviceUDID: String) async throws -> ProcessOutput {
         try await AxeClient.run(["type", "--stdin", "--udid", deviceUDID], stdin: Data(text.utf8))
     }

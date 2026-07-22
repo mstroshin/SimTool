@@ -78,8 +78,8 @@ public enum SimToolDirectory {
         directory.appendingPathComponent("test-sessions", isDirectory: true)
     }
 
-    /// `<.simtool>/flows` — declarative UI test flows for `simtool test run`.
-    public static func flowsDirectory(in directory: URL) -> URL {
-        directory.appendingPathComponent("flows", isDirectory: true)
+    /// `<.simtool>/tests` — declarative YAML UI tests for `simtool test run`.
+    public static func testsDirectory(in directory: URL) -> URL {
+        directory.appendingPathComponent("tests", isDirectory: true)
     }
 }

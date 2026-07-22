@@ -18,8 +18,8 @@ public struct StreamServerConfig: Sendable {
     public var defaultLogApp: String?
     /// Where test sessions persist: the project's `.simtool/test-sessions`.
     public var testSessionsRoot: URL
-    /// Where declarative UI test flows live: the project's `.simtool/flows`.
-    public var flowsRoot: URL
+    /// Where declarative YAML UI tests live: the project’s `.simtool/tests`.
+    public var testsRoot: URL
 
     public init(
         host: String = "127.0.0.1",
@@ -28,7 +28,7 @@ public struct StreamServerConfig: Sendable {
         captureEnabled: Bool = true,
         defaultLogApp: String? = nil,
         testSessionsRoot: URL = SimToolDirectory.testSessionsDirectory(in: SimToolDirectory.resolve()),
-        flowsRoot: URL = SimToolDirectory.flowsDirectory(in: SimToolDirectory.resolve())
+        testsRoot: URL = SimToolDirectory.testsDirectory(in: SimToolDirectory.resolve())
     ) {
         self.host = host
         self.port = port
@@ -36,7 +36,7 @@ public struct StreamServerConfig: Sendable {
         self.captureEnabled = captureEnabled
         self.defaultLogApp = defaultLogApp
         self.testSessionsRoot = testSessionsRoot
-        self.flowsRoot = flowsRoot
+        self.testsRoot = testsRoot
     }
 }
 
@@ -58,7 +58,7 @@ public final class StreamServer: @unchecked Sendable {
     private let launches = AppLaunchRegistry()
     /// Agent test sessions: timeline + screen recording, persisted on disk.
     private let testSessions: TestSessionController
-    private let flowRuns: FlowRunController
+    private let testRuns: TestRunController
     /// OSLog category that, by convention, carries a crash summary of the previous run (apps can
     /// only write it after relaunching - crash handlers cannot safely log at crash time).
     private static let crashReportCategory = "Crash"
@@ -91,7 +91,7 @@ public final class StreamServer: @unchecked Sendable {
             device: config.device,
             makeRecorder: { SimctlVideoRecorder() }
         )
-        self.flowRuns = FlowRunController(flowsRoot: config.flowsRoot)
+        self.testRuns = TestRunController(testsRoot: config.testsRoot)
     }
 
     public func start() throws {
@@ -364,29 +364,29 @@ public final class StreamServer: @unchecked Sendable {
             }
         }
 
-        server.GET["/api/v1/flows"] = { _ in
+        server.GET["/api/v1/tests/definitions"] = { _ in
             do {
-                return try self.jsonEncodedResponse(self.flowRuns.list())
+                return try self.jsonEncodedResponse(self.testRuns.list())
             } catch {
                 return self.errorResponse(error)
             }
         }
 
-        server.GET["/api/v1/flows/run"] = { _ in
+        server.GET["/api/v1/tests/run"] = { _ in
             do {
-                return try self.jsonEncodedResponse(self.flowRuns.status())
+                return try self.jsonEncodedResponse(self.testRuns.status())
             } catch {
                 return self.errorResponse(error)
             }
         }
 
-        server.POST["/api/v1/flows/run"] = { request in
+        server.POST["/api/v1/tests/run"] = { request in
             do {
-                let body = try self.decodeJSON(FlowRunRequest.self, from: request)
+                let body = try self.decodeJSON(TestRunRequest.self, from: request)
                 guard let serverURL = URL(string: self.baseURL) else {
                     return self.errorResponse(SimToolError("Cannot resolve own base URL"))
                 }
-                let status = try self.flowRuns.start(file: body.file, serverURL: serverURL)
+                let status = try self.testRuns.start(file: body.file, serverURL: serverURL)
                 return try self.jsonEncodedResponse(status)
             } catch {
                 return self.errorResponse(error, statusCode: 409, reason: "Conflict")
@@ -719,6 +719,18 @@ public final class StreamServer: @unchecked Sendable {
                 y: input.y,
                 id: input.id,
                 label: input.label
+            )
+        case "longpress", "long-press":
+            if (input.x == nil) != (input.y == nil) {
+                throw SimToolError("Long press requires both x and y when using coordinates")
+            }
+            return try await SimulatorInputClient.longPress(
+                deviceUDID: config.device.udid,
+                x: input.x,
+                y: input.y,
+                id: input.id,
+                label: input.label,
+                duration: input.duration ?? 1.0
             )
         case "type", "typetext", "text":
             guard let text = input.text else { throw SimToolError("Type input requires text") }

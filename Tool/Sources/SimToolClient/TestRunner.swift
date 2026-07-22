@@ -1,10 +1,10 @@
 import Foundation
 import SimToolCore
 
-/// Executes a parsed `TestFlow` against the served simulator. Every step
-/// implicitly waits for its target by polling the accessibility tree, so flows
+/// Executes a parsed `TestDefinition` against the served simulator. Every step
+/// implicitly waits for its target by polling the accessibility tree, so tests
 /// need no explicit sleeps to survive animations and loading.
-public struct FlowRunner {
+public struct TestRunner {
     public let client: SimToolClient
     public let udid: String
     public let screenWidth: Double
@@ -34,25 +34,25 @@ public struct FlowRunner {
         self.onProgress = onProgress
     }
 
-    public func run(_ flow: TestFlow) async throws {
-        for (index, command) in flow.setup.enumerated() {
-            let status = await runSetupCommand(command, app: flow.app)
-            await record("Setup \(index + 1)/\(flow.setup.count) (\(status)): \(command.trimmingCharacters(in: .whitespacesAndNewlines))")
+    public func run(_ test: TestDefinition) async throws {
+        for (index, command) in test.setup.enumerated() {
+            let status = await runSetupCommand(command, app: test.app)
+            await record("Setup \(index + 1)/\(test.setup.count) (\(status)): \(command.trimmingCharacters(in: .whitespacesAndNewlines))")
         }
-        if let app = flow.app {
-            let arguments = flow.effectiveLaunchArguments
+        if let app = test.app {
+            let arguments = test.effectiveLaunchArguments
             try await launch(app: app, arguments: arguments)
             let rendered = arguments.isEmpty ? "" : " " + arguments.joined(separator: " ")
             await record("Launched \(app)\(rendered)")
         }
-        for (index, step) in flow.steps.enumerated() {
+        for (index, step) in test.steps.enumerated() {
             do {
                 try await execute(step)
             } catch let error as SimToolError {
-                throw SimToolError("Step \(index + 1) of \(flow.steps.count) — \(step): \(error.message)")
+                throw SimToolError("Step \(index + 1) of \(test.steps.count) — \(step): \(error.message)")
             }
-            await record("✓ \(index + 1)/\(flow.steps.count) \(step)")
-            await onProgress?(index + 1, flow.steps.count)
+            await record("✓ \(index + 1)/\(test.steps.count) \(step)")
+            await onProgress?(index + 1, test.steps.count)
         }
     }
 
@@ -76,11 +76,14 @@ public struct FlowRunner {
         return lines
     }
 
-    private func execute(_ step: TestFlowStep) async throws {
+    private func execute(_ step: TestStep) async throws {
         switch step {
         case .tap(let target, let timeout):
             let node = try await waitForMatch(target, timeout: timeout)
             try await tap(node: node, target: target)
+        case .longPress(let target, let duration, let timeout):
+            let node = try await waitForMatch(target, timeout: timeout)
+            try await longPress(node: node, target: target, duration: duration)
         case .type(let text):
             try check(await client.typeText(text), action: "type")
         case .swipe(let direction):
@@ -94,7 +97,7 @@ public struct FlowRunner {
         }
     }
 
-    private func waitForMatch(_ target: TestFlowTarget, timeout: Double?) async throws -> AccessibilityNode {
+    private func waitForMatch(_ target: TestTarget, timeout: Double?) async throws -> AccessibilityNode {
         let deadline = ContinuousClock.now + .milliseconds(Int((timeout ?? defaultTimeout) * 1000))
         while true {
             if let node = await firstMatch(target) { return node }
@@ -105,7 +108,7 @@ public struct FlowRunner {
         }
     }
 
-    private func waitForAbsence(_ target: TestFlowTarget, timeout: Double?) async throws {
+    private func waitForAbsence(_ target: TestTarget, timeout: Double?) async throws {
         let deadline = ContinuousClock.now + .milliseconds(Int((timeout ?? defaultTimeout) * 1000))
         while true {
             if await firstMatch(target) == nil { return }
@@ -116,7 +119,7 @@ public struct FlowRunner {
         }
     }
 
-    private func firstMatch(_ target: TestFlowTarget) async -> AccessibilityNode? {
+    private func firstMatch(_ target: TestTarget) async -> AccessibilityNode? {
         guard let tree = try? await client.accessibilityTree() else { return nil }
         var queue = tree.roots
         while !queue.isEmpty {
@@ -127,20 +130,36 @@ public struct FlowRunner {
         return nil
     }
 
-    private func tap(node: AccessibilityNode, target: TestFlowTarget) async throws {
-        if let id = node.accessibilityIdentifier, !id.isEmpty {
+    /// The runner has already picked the exact node, so its frame center is the
+    /// only tap target guaranteed to hit that node — resolving by id/label again
+    /// fails when several elements share the same identifier (e.g. list cells).
+    private func tap(node: AccessibilityNode, target: TestTarget) async throws {
+        if let frame = node.frame,
+           let x = frame.x, let y = frame.y, let width = frame.width, let height = frame.height {
+            try check(await client.tap(x: x + width / 2, y: y + height / 2), action: "tap")
+        } else if let id = node.accessibilityIdentifier, !id.isEmpty {
             try check(await client.tap(id: id), action: "tap")
         } else if let label = node.label, !label.isEmpty {
             try check(await client.tap(label: label), action: "tap")
-        } else if let frame = node.frame,
-                  let x = frame.x, let y = frame.y, let width = frame.width, let height = frame.height {
-            try check(await client.tap(x: x + width / 2, y: y + height / 2), action: "tap")
         } else {
-            throw SimToolError("matched \(target) but the node has no id, label or frame to tap")
+            throw SimToolError("matched \(target) but the node has no frame, id or label to tap")
         }
     }
 
-    private func swipe(_ direction: TestFlowSwipeDirection) async throws {
+    private func longPress(node: AccessibilityNode, target: TestTarget, duration: Double?) async throws {
+        if let frame = node.frame,
+           let x = frame.x, let y = frame.y, let width = frame.width, let height = frame.height {
+            try check(await client.longPress(x: x + width / 2, y: y + height / 2, duration: duration), action: "long press")
+        } else if let id = node.accessibilityIdentifier, !id.isEmpty {
+            try check(await client.longPress(id: id, duration: duration), action: "long press")
+        } else if let label = node.label, !label.isEmpty {
+            try check(await client.longPress(label: label, duration: duration), action: "long press")
+        } else {
+            throw SimToolError("matched \(target) but the node has no frame, id or label to long-press")
+        }
+    }
+
+    private func swipe(_ direction: TestSwipeDirection) async throws {
         let (start, end): ((Double, Double), (Double, Double)) = switch direction {
         case .up: ((0.5, 0.7), (0.5, 0.3))
         case .down: ((0.5, 0.3), (0.5, 0.7))
@@ -160,7 +179,7 @@ public struct FlowRunner {
 
     /// Setup commands reset persisted state before launch (delete a defaults
     /// key, clear a container), so a non-zero exit — the key not existing on a
-    /// first run — is reported but never fails the flow.
+    /// first run — is reported but never fails the test.
     private func runSetupCommand(_ command: String, app: String?) async -> String {
         let rendered = command
             .replacingOccurrences(of: "{udid}", with: udid)

@@ -1,7 +1,7 @@
 import Foundation
 import Yams
 
-/// A declarative UI test flow: launch configuration plus a list of steps
+/// A declarative UI test: launch configuration plus a list of steps
 /// executed sequentially against the served simulator. Parsed from YAML:
 ///
 /// ```yaml
@@ -21,31 +21,32 @@ import Yams
 /// steps:
 ///   - waitFor: { id: settingsButton, timeout: 20 }
 ///   - tap: { id: settingsButton }
+///   - longPress: { id: optionToggle, duration: 1.5 }
 ///   - type: "hello"
 ///   - swipe: up
 ///   - assertVisible: { text: "Welcome" }
 ///   - assertHidden: { label: "Badge" }
 ///   - wait: 2
 /// ```
-public struct TestFlow: Equatable, Sendable {
+public struct TestDefinition: Equatable, Sendable {
     public var name: String?
     public var description: String?
     public var app: String?
-    public var environment: TestFlowEnvironment?
+    public var environment: TestEnvironment?
     public var setup: [String]
     public var launchArguments: [String]
     public var stepTimeout: Double
-    public var steps: [TestFlowStep]
+    public var steps: [TestStep]
 
     public init(
         name: String? = nil,
         description: String? = nil,
         app: String? = nil,
-        environment: TestFlowEnvironment? = nil,
+        environment: TestEnvironment? = nil,
         setup: [String] = [],
         launchArguments: [String] = [],
         stepTimeout: Double = 10,
-        steps: [TestFlowStep]
+        steps: [TestStep]
     ) {
         self.name = name
         self.description = description
@@ -58,7 +59,7 @@ public struct TestFlow: Equatable, Sendable {
     }
 
     /// `launchArguments` plus the arguments rendered from `environment`,
-    /// without duplicating `-UITesting` when the flow already passes it.
+    /// without duplicating `-UITesting` when the test already passes it.
     public var effectiveLaunchArguments: [String] {
         var arguments = launchArguments
         for argument in environment?.launchArguments ?? [] {
@@ -72,7 +73,7 @@ public struct TestFlow: Equatable, Sendable {
 /// Account and backend selection for the app under test, rendered into the
 /// SampleApp debug launch arguments (`-SampleAccount`, `-SampleRegion`,
 /// `-UITesting -Environment`).
-public struct TestFlowEnvironment: Equatable, Sendable {
+public struct TestEnvironment: Equatable, Sendable {
     public var sampleAccount: String?
     public var env: String?
     public var country: String?
@@ -93,7 +94,7 @@ public struct TestFlowEnvironment: Equatable, Sendable {
     }
 }
 
-public struct TestFlowTarget: Equatable, Sendable, CustomStringConvertible {
+public struct TestTarget: Equatable, Sendable, CustomStringConvertible {
     public enum Kind: String, Equatable, Sendable {
         case id
         case label
@@ -129,21 +130,26 @@ public struct TestFlowTarget: Equatable, Sendable, CustomStringConvertible {
     }
 }
 
-public enum TestFlowSwipeDirection: String, Equatable, Sendable {
+public enum TestSwipeDirection: String, Equatable, Sendable {
     case up, down, left, right
 }
 
-public enum TestFlowStep: Equatable, Sendable, CustomStringConvertible {
-    case tap(TestFlowTarget, timeout: Double?)
+public enum TestStep: Equatable, Sendable, CustomStringConvertible {
+    case tap(TestTarget, timeout: Double?)
+    case longPress(TestTarget, duration: Double?, timeout: Double?)
     case type(String)
-    case swipe(TestFlowSwipeDirection)
-    case waitFor(TestFlowTarget, timeout: Double?)
-    case assertHidden(TestFlowTarget, timeout: Double?)
+    case swipe(TestSwipeDirection)
+    case waitFor(TestTarget, timeout: Double?)
+    case assertHidden(TestTarget, timeout: Double?)
     case pause(Double)
 
     public var description: String {
         switch self {
         case .tap(let target, _): "Tap \(target)"
+        // No parens: the viewer's step splitter treats " (" as the start of a
+        // collapsible detail block and would hide the duration.
+        case .longPress(let target, let duration, _):
+            "Long press \(target)" + (duration.map { " · \($0.formatted())s" } ?? "")
         case .type(let text): "Type \"\(text)\""
         case .swipe(let direction): "Swipe \(direction.rawValue)"
         case .waitFor(let target, _): "Wait for \(target)"
@@ -153,41 +159,44 @@ public enum TestFlowStep: Equatable, Sendable, CustomStringConvertible {
     }
 }
 
-public struct FlowSummary: Codable, Equatable, Sendable, Identifiable {
+public struct TestSummary: Codable, Equatable, Sendable, Identifiable {
     public var id: String { file }
     public var file: String
     public var name: String?
     public var description: String?
     public var stepCount: Int
+    /// Human-readable step descriptions, in execution order.
+    public var steps: [String]
     public var parseError: String?
 
-    public init(file: String, name: String? = nil, description: String? = nil, stepCount: Int = 0, parseError: String? = nil) {
+    public init(file: String, name: String? = nil, description: String? = nil, stepCount: Int = 0, steps: [String] = [], parseError: String? = nil) {
         self.file = file
         self.name = name
         self.description = description
         self.stepCount = stepCount
+        self.steps = steps
         self.parseError = parseError
     }
 }
 
-public struct FlowListPayload: Codable, Equatable, Sendable {
-    public var flows: [FlowSummary]
-    public init(flows: [FlowSummary]) { self.flows = flows }
+public struct TestListPayload: Codable, Equatable, Sendable {
+    public var tests: [TestSummary]
+    public init(tests: [TestSummary]) { self.tests = tests }
 }
 
-public struct FlowRunRequest: Codable, Equatable, Sendable {
+public struct TestRunRequest: Codable, Equatable, Sendable {
     public var file: String
     public init(file: String) { self.file = file }
 }
 
-public struct FlowRunStatusPayload: Codable, Equatable, Sendable {
+public struct TestRunStatusPayload: Codable, Equatable, Sendable {
     public var active: Bool
     public var file: String?
     public var name: String?
     public var sessionId: String?
     public var completedSteps: Int
     public var totalSteps: Int
-    /// running | passed | failed; nil when no flow has run yet.
+    /// running | passed | failed; nil when no test has run yet.
     public var status: String?
     public var error: String?
 
@@ -212,36 +221,42 @@ public struct FlowRunStatusPayload: Codable, Equatable, Sendable {
     }
 }
 
-public enum TestFlowParser {
-    /// Summaries of every YAML flow in a directory, sorted by file name;
-    /// unparseable flows are reported through `parseError` instead of thrown.
-    public static func summaries(in root: URL) -> [FlowSummary] {
+public enum TestDefinitionParser {
+    /// Summaries of every YAML test in a directory, sorted by file name;
+    /// unparseable tests are reported through `parseError` instead of thrown.
+    public static func summaries(in root: URL) -> [TestSummary] {
         let files = (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
         return files
             .filter { ["yml", "yaml"].contains($0.pathExtension.lowercased()) }
             .sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
             .map { url in
                 do {
-                    let flow = try load(contentsOf: url)
-                    return FlowSummary(file: url.lastPathComponent, name: flow.name, description: flow.description, stepCount: flow.steps.count)
+                    let test = try load(contentsOf: url)
+                    return TestSummary(
+                        file: url.lastPathComponent,
+                        name: test.name,
+                        description: test.description,
+                        stepCount: test.steps.count,
+                        steps: test.steps.map(\.description)
+                    )
                 } catch {
                     let message = (error as? SimToolError)?.message ?? error.localizedDescription
-                    return FlowSummary(file: url.lastPathComponent, parseError: message)
+                    return TestSummary(file: url.lastPathComponent, parseError: message)
                 }
             }
     }
 
-    public static func load(contentsOf url: URL) throws -> TestFlow {
+    public static func load(contentsOf url: URL) throws -> TestDefinition {
         let yaml: String
         do {
             yaml = try String(contentsOf: url, encoding: .utf8)
         } catch {
-            throw SimToolError("Cannot read flow file \(url.path): \(error.localizedDescription)")
+            throw SimToolError("Cannot read test file \(url.path): \(error.localizedDescription)")
         }
         return try parse(yaml)
     }
 
-    public static func parse(_ yaml: String) throws -> TestFlow {
+    public static func parse(_ yaml: String) throws -> TestDefinition {
         let root: Any?
         do {
             root = try Yams.load(yaml: yaml)
@@ -249,16 +264,16 @@ public enum TestFlowParser {
             throw SimToolError("Invalid YAML: \(error.localizedDescription)")
         }
         guard let dictionary = root as? [String: Any] else {
-            throw SimToolError("Flow must be a YAML mapping with a `steps` list.")
+            throw SimToolError("Test must be a YAML mapping with a `steps` list.")
         }
 
         let knownKeys: Set<String> = ["name", "description", "app", "environment", "setup", "launchArguments", "timeout", "steps"]
         if let unknown = dictionary.keys.first(where: { !knownKeys.contains($0) }) {
-            throw SimToolError("Unknown flow key `\(unknown)`. Known keys: \(knownKeys.sorted().joined(separator: ", ")).")
+            throw SimToolError("Unknown test key `\(unknown)`. Known keys: \(knownKeys.sorted().joined(separator: ", ")).")
         }
 
         guard let rawSteps = dictionary["steps"] as? [Any], !rawSteps.isEmpty else {
-            throw SimToolError("Flow must contain a non-empty `steps` list.")
+            throw SimToolError("Test must contain a non-empty `steps` list.")
         }
 
         let launchArguments: [String]
@@ -281,7 +296,7 @@ public enum TestFlowParser {
             setup = []
         }
 
-        return TestFlow(
+        return TestDefinition(
             name: dictionary["name"].map(scalarString),
             description: dictionary["description"].map { scalarString($0).trimmingCharacters(in: .whitespacesAndNewlines) },
             app: dictionary["app"].map(scalarString),
@@ -293,7 +308,7 @@ public enum TestFlowParser {
         )
     }
 
-    private static func parseEnvironment(_ value: Any) throws -> TestFlowEnvironment {
+    private static func parseEnvironment(_ value: Any) throws -> TestEnvironment {
         guard let dictionary = value as? [String: Any] else {
             throw SimToolError("`environment` must be a mapping with `sampleAccount`, `env` and/or `country`.")
         }
@@ -304,14 +319,14 @@ public enum TestFlowParser {
         guard !dictionary.isEmpty else {
             throw SimToolError("`environment` must set at least one of `sampleAccount`, `env`, `country`.")
         }
-        return TestFlowEnvironment(
+        return TestEnvironment(
             sampleAccount: dictionary["sampleAccount"].map(scalarString),
             env: dictionary["env"].map(scalarString),
             country: dictionary["country"].map(scalarString)
         )
     }
 
-    private static func parseStep(_ raw: Any, index: Int) throws -> TestFlowStep {
+    private static func parseStep(_ raw: Any, index: Int) throws -> TestStep {
         guard let dictionary = raw as? [String: Any], dictionary.count == 1,
               let (keyword, value) = dictionary.first else {
             throw SimToolError("Step \(index + 1) must be a single-key mapping like `- tap: {id: someId}`.")
@@ -321,11 +336,14 @@ public enum TestFlowParser {
         case "tap":
             let (target, timeout) = try targetAndTimeout(value, context: context)
             return .tap(target, timeout: timeout)
+        case "longPress":
+            let (target, timeout, duration) = try targetTimeoutAndDuration(value, context: context)
+            return .longPress(target, duration: duration, timeout: timeout)
         case "type":
             return .type(scalarString(value))
         case "swipe":
             let raw = scalarString(value)
-            guard let direction = TestFlowSwipeDirection(rawValue: raw) else {
+            guard let direction = TestSwipeDirection(rawValue: raw) else {
                 throw SimToolError("\(context): unknown direction `\(raw)`. Use up, down, left or right.")
             }
             return .swipe(direction)
@@ -338,28 +356,43 @@ public enum TestFlowParser {
         case "wait":
             return .pause(try seconds(value, context: context))
         default:
-            throw SimToolError("Step \(index + 1): unknown step `\(keyword)`. Known steps: tap, type, swipe, waitFor, assertVisible, assertHidden, wait.")
+            throw SimToolError("Step \(index + 1): unknown step `\(keyword)`. Known steps: tap, longPress, type, swipe, waitFor, assertVisible, assertHidden, wait.")
         }
     }
 
     /// A target is either a bare string (matched as `text`) or a mapping with
     /// exactly one of `id` / `label` / `text`, plus an optional `timeout`.
-    private static func targetAndTimeout(_ value: Any, context: String) throws -> (TestFlowTarget, Double?) {
+    private static func targetAndTimeout(_ value: Any, context: String) throws -> (TestTarget, Double?) {
+        let (target, timeout, _) = try parseTarget(value, context: context, allowDuration: false)
+        return (target, timeout)
+    }
+
+    private static func targetTimeoutAndDuration(_ value: Any, context: String) throws -> (TestTarget, Double?, Double?) {
+        try parseTarget(value, context: context, allowDuration: true)
+    }
+
+    private static func parseTarget(
+        _ value: Any,
+        context: String,
+        allowDuration: Bool
+    ) throws -> (TestTarget, Double?, Double?) {
         if let dictionary = value as? [String: Any] {
-            let kinds: [TestFlowTarget.Kind] = [.id, .label, .text]
+            let kinds: [TestTarget.Kind] = [.id, .label, .text]
             let present = kinds.filter { dictionary[$0.rawValue] != nil }
             guard present.count == 1 else {
                 throw SimToolError("\(context): provide exactly one of `id`, `label` or `text`.")
             }
-            if let unknown = dictionary.keys.first(where: { $0 != present[0].rawValue && $0 != "timeout" }) {
+            let extras = allowDuration ? ["timeout", "duration"] : ["timeout"]
+            if let unknown = dictionary.keys.first(where: { $0 != present[0].rawValue && !extras.contains($0) }) {
                 throw SimToolError("\(context): unknown key `\(unknown)`.")
             }
             return (
-                TestFlowTarget(kind: present[0], query: scalarString(dictionary[present[0].rawValue]!)),
-                try dictionary["timeout"].map { try seconds($0, context: context) }
+                TestTarget(kind: present[0], query: scalarString(dictionary[present[0].rawValue]!)),
+                try dictionary["timeout"].map { try seconds($0, context: context) },
+                try dictionary["duration"].map { try seconds($0, context: context) }
             )
         }
-        return (TestFlowTarget(kind: .text, query: scalarString(value)), nil)
+        return (TestTarget(kind: .text, query: scalarString(value)), nil, nil)
     }
 
     private static func seconds(_ value: Any, context: String) throws -> Double {

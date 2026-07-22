@@ -25,7 +25,7 @@ public enum TestSessionError: Error, LocalizedError, Equatable {
         case let .alreadyActive(id):
             "A test session is already active: \(id). Stop it first."
         case .noActiveSession:
-            "No active test session. Run a flow or start one via POST /api/v1/tests/start."
+            "No active test session. Run a test or start one via POST /api/v1/tests/start."
         case .emptyEntry:
             "A step entry requires text; a log entry requires at least one log line."
         case let .entryTooLarge(limitBytes):

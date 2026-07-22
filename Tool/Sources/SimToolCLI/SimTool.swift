@@ -199,7 +199,7 @@ struct ToolCheck: Codable {
 struct Input: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Send input to a simulator.",
-        subcommands: [Tap.self, TypeText.self, Swipe.self, Button.self]
+        subcommands: [Tap.self, LongPress.self, TypeText.self, Swipe.self, Button.self]
     )
 }
 
@@ -217,6 +217,34 @@ extension Input {
         func run() async throws {
             let device = try await SimulatorDeviceClient.resolve(device)
             let output = try await SimulatorInputClient.tap(deviceUDID: device.udid, x: x, y: y, id: id, label: label)
+            try emitCommandResult(output, json: common.json)
+        }
+    }
+
+    struct LongPress: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "long-press",
+            abstract: "Touch down, hold, and release on screen coordinates or an accessibility target."
+        )
+
+        @Option var device: String?
+        @Option(help: "X coordinate in screen pixels.") var x: Double?
+        @Option(help: "Y coordinate in screen pixels.") var y: Double?
+        @Option(help: "Accessibility identifier.") var id: String?
+        @Option(help: "Accessibility label.") var label: String?
+        @Option(help: "Hold duration in seconds.") var duration: Double = 1.0
+        @OptionGroup var common: CommonJSON
+
+        func run() async throws {
+            let device = try await SimulatorDeviceClient.resolve(device)
+            let output = try await SimulatorInputClient.longPress(
+                deviceUDID: device.udid,
+                x: x,
+                y: y,
+                id: id,
+                label: label,
+                duration: duration
+            )
             try emitCommandResult(output, json: common.json)
         }
     }
@@ -961,7 +989,7 @@ extension AppCommand {
 struct TestCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "test",
-        abstract: "Run declarative YAML UI test flows on the served simulator, recorded as test sessions.",
+        abstract: "Run declarative YAML UI tests on the served simulator, recorded as test sessions.",
         subcommands: [Run.self, List.self]
     )
 
@@ -984,9 +1012,9 @@ struct TestCommand: AsyncParsableCommand {
     struct Run: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
             commandName: "run",
-            abstract: "Run a declarative YAML UI test flow on the served simulator, recorded as a test session.",
+            abstract: "Run a declarative YAML UI test on the served simulator, recorded as a test session.",
             discussion: """
-            Flow file format:
+            Test file format:
 
               name: Tab bar badge
               description: >                  # optional; what is tested and the expected result
@@ -1004,6 +1032,7 @@ struct TestCommand: AsyncParsableCommand {
               steps:
                 - waitFor: { id: settingsButton, timeout: 20 }
                 - tap: { id: settingsButton }
+                - longPress: { id: optionToggle, duration: 1.5 }
                 - type: "hello"
                 - swipe: up
                 - assertVisible: { text: "Welcome" }
@@ -1011,27 +1040,27 @@ struct TestCommand: AsyncParsableCommand {
                 - wait: 2
 
             Every step polls the accessibility tree until its target appears (or
-            disappears for assertHidden), so flows need no explicit sleeps.
+            disappears for assertHidden), so tests need no explicit sleeps.
             Setup commands reset persisted state; their exit codes are recorded
-            in the session but never fail the flow.
+            in the session but never fail the test.
             """
         )
 
-        @Argument(help: "Path to a YAML flow file.")
-        var flow: String
+        @Argument(help: "Path to a YAML test file.")
+        var test: String
 
-        @Option(help: "Test session title. Defaults to the flow's `name`, then the file name.")
+        @Option(help: "Test session title. Defaults to the test's `name`, then the file name.")
         var title: String?
 
-        @Flag(help: "Run the flow without recording a test session.")
+        @Flag(help: "Run the test without recording a session.")
         var noSession = false
 
         @OptionGroup var serverOptions: ServerOptions
         @OptionGroup var common: CommonJSON
 
         func run() async throws {
-            let flowURL = URL(fileURLWithPath: flow)
-            let parsed = try TestFlowParser.load(contentsOf: flowURL)
+            let testURL = URL(fileURLWithPath: test)
+            let parsed = try TestDefinitionParser.load(contentsOf: testURL)
             if !common.json, let description = parsed.description {
                 print(description)
             }
@@ -1041,13 +1070,13 @@ struct TestCommand: AsyncParsableCommand {
             var session: TestSession?
             if !noSession {
                 session = try await client.startTestSession(
-                    title: title ?? parsed.name ?? flowURL.deletingPathExtension().lastPathComponent
+                    title: title ?? parsed.name ?? testURL.deletingPathExtension().lastPathComponent
                 )
             }
             let recording = session != nil
             let echo = !common.json
 
-            let runner = FlowRunner(
+            let runner = TestRunner(
                 client: client,
                 udid: config.udid,
                 screenWidth: Double(config.width),
@@ -1066,7 +1095,7 @@ struct TestCommand: AsyncParsableCommand {
             } catch {
                 let failure = (error as? SimToolError)?.message ?? error.localizedDescription
                 var artifacts: [String] = []
-                if let path = await saveScreenshot(client: client, flowURL: flowURL) {
+                if let path = await saveScreenshot(client: client, testURL: testURL) {
                     artifacts.append("Screenshot: \(path)")
                 }
                 if recording {
@@ -1086,7 +1115,7 @@ struct TestCommand: AsyncParsableCommand {
                 } else {
                     let takeaways = artifacts + (session.map { ["Session: \($0.id)"] } ?? [])
                     makeNoora().error(.alert(
-                        "Flow failed: \(failure)",
+                        "Test failed: \(failure)",
                         takeaways: takeaways.map { TerminalText("\($0)") }
                     ))
                 }
@@ -1104,18 +1133,18 @@ struct TestCommand: AsyncParsableCommand {
                 }
             } else {
                 makeNoora().success(.alert(
-                    "Flow passed",
+                    "Test passed",
                     takeaways: (session.map { ["Session: \($0.id)", "Steps and video recorded"] } ?? [])
                         .map { TerminalText("\($0)") }
                 ))
             }
         }
 
-        private func saveScreenshot(client: SimToolClient, flowURL: URL) async -> String? {
+        private func saveScreenshot(client: SimToolClient, testURL: URL) async -> String? {
             guard let data = try? await client.screenshot() else { return nil }
-            let name = flowURL.deletingPathExtension().lastPathComponent
+            let name = testURL.deletingPathExtension().lastPathComponent
             let path = FileManager.default.temporaryDirectory
-                .appendingPathComponent("simtool-flow-\(name)-\(Int(Date().timeIntervalSince1970)).png")
+                .appendingPathComponent("simtool-test-\(name)-\(Int(Date().timeIntervalSince1970)).png")
             do {
                 try data.write(to: path)
                 return path.path
@@ -1208,7 +1237,7 @@ struct Serve: AsyncParsableCommand {
             port: parameters.port,
             defaultLogApp: app.flatMap { $0.isEmpty ? nil : $0 },
             testSessionsRoot: SimToolDirectory.testSessionsDirectory(in: SimToolDirectory.resolve()),
-            flowsRoot: SimToolDirectory.flowsDirectory(in: SimToolDirectory.resolve()),
+            testsRoot: SimToolDirectory.testsDirectory(in: SimToolDirectory.resolve()),
             printSessionJSON: common.json || detachedChild,
             openBrowser: shouldOpenBrowser(webRequested: web, json: common.json, detachedChild: detachedChild),
             sessionId: sessionId
@@ -1302,7 +1331,7 @@ func runViewer(
     port: UInt16,
     defaultLogApp: String?,
     testSessionsRoot: URL,
-    flowsRoot: URL,
+    testsRoot: URL,
     printSessionJSON: Bool,
     openBrowser: Bool,
     sessionId: String?
@@ -1318,7 +1347,7 @@ func runViewer(
         captureEnabled: true,
         defaultLogApp: defaultLogApp,
         testSessionsRoot: testSessionsRoot,
-        flowsRoot: flowsRoot
+        testsRoot: testsRoot
     )
     let server = try await startStreamServer(config: config)
     let session = SessionInfo(
@@ -1549,7 +1578,7 @@ struct Run: AsyncParsableCommand {
             port: projectConfig.server.port,
             defaultLogApp: projectConfig.bundleId,
             testSessionsRoot: SimToolDirectory.testSessionsDirectory(in: projectConfig.simtoolDirectory),
-            flowsRoot: SimToolDirectory.flowsDirectory(in: projectConfig.simtoolDirectory),
+            testsRoot: SimToolDirectory.testsDirectory(in: projectConfig.simtoolDirectory),
             printSessionJSON: common.json,
             openBrowser: shouldOpenBrowser(webRequested: web, json: common.json, detachedChild: false),
             sessionId: nil

@@ -41,6 +41,16 @@ public struct SimToolClient: Sendable {
         try await input(SimulatorInputPayload(action: "tap", x: x, y: y, id: id, label: label))
     }
 
+    public func longPress(
+        x: Double? = nil,
+        y: Double? = nil,
+        id: String? = nil,
+        label: String? = nil,
+        duration: Double? = nil
+    ) async throws -> CommandResultPayload {
+        try await input(SimulatorInputPayload(action: "longPress", x: x, y: y, id: id, label: label, duration: duration))
+    }
+
     public func typeText(_ text: String) async throws -> CommandResultPayload {
         try await input(SimulatorInputPayload(action: "type", text: text))
     }
