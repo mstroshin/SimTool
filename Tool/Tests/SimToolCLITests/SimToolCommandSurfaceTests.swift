@@ -107,8 +107,8 @@ final class SimToolCommandSurfaceTests: XCTestCase {
     }
 
     func testOpenParserAcceptsOptionalNameAndConfig() throws {
-        let withName = try Open.parse(["profile", "--config", "custom.yml"])
-        XCTAssertEqual(withName.name, "profile")
+        let withName = try Open.parse(["details", "--config", "custom.yml"])
+        XCTAssertEqual(withName.name, "details")
         XCTAssertEqual(withName.config, "custom.yml")
 
         let withoutName = try Open.parse([])

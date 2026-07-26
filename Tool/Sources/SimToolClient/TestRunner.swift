@@ -40,7 +40,7 @@ public struct TestRunner {
             await record("Setup \(index + 1)/\(test.setup.count) (\(status)): \(command.trimmingCharacters(in: .whitespacesAndNewlines))")
         }
         if let app = test.app {
-            let arguments = test.effectiveLaunchArguments
+            let arguments = test.launchArguments
             try await launch(app: app, arguments: arguments)
             let rendered = arguments.isEmpty ? "" : " " + arguments.joined(separator: " ")
             await record("Launched \(app)\(rendered)")

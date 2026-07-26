@@ -1016,18 +1016,14 @@ struct TestCommand: AsyncParsableCommand {
             discussion: """
             Test file format:
 
-              name: Tab bar badge
+              name: Settings flow
               description: >                  # optional; what is tested and the expected result
-                Settings state: Settings shows the current value and
-                selecting Settings updates it.
-              app: com.example.demo        # optional; relaunches the app before steps
-              environment:                    # optional; rendered into launch arguments
-                sampleAccount: "sample-user"   #   -SampleAccount (Debug/Beta builds)
-                country: sample-region               #   -SampleRegion
-                env: stable                   #   -UITesting -Environment stable
+                Opening Settings displays the preferences screen and
+                lets the user enable an option.
+              app: com.example.demo           # optional; relaunches the app before steps
               setup:                          # optional; shell commands run before launch,
                 - xcrun simctl spawn {udid} … #   {udid}/{app} substituted, failures recorded
-              launchArguments: [-SampleMode, "1"]
+              launchArguments: [-UITesting, "1"]
               timeout: 10                     # default per-step wait, seconds
               steps:
                 - waitFor: { id: settingsButton, timeout: 20 }
@@ -1036,7 +1032,7 @@ struct TestCommand: AsyncParsableCommand {
                 - type: "hello"
                 - swipe: up
                 - assertVisible: { text: "Welcome" }
-                - assertHidden: { label: "Badge" }
+                - assertHidden: { label: "Loading" }
                 - wait: 2
 
             Every step polls the accessibility tree until its target appears (or

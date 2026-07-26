@@ -5,18 +5,14 @@ import Yams
 /// executed sequentially against the served simulator. Parsed from YAML:
 ///
 /// ```yaml
-/// name: Tab bar badge
+/// name: Settings flow
 /// description: >                  # what is tested and the expected result
-///   Settings state: Settings shows the current value, Settings shows the
-///   red dot, and selecting Settings updates it.
-/// app: com.example.demo        # when present, the app is relaunched before steps
-/// environment:                    # rendered into app launch arguments
-///   sampleAccount: "sample-user"   # -SampleAccount (Debug/Beta builds)
-///   country: sample-region               # -SampleRegion
-///   env: stable                   # -UITesting -Environment stable
+///   Opening Settings displays the preferences screen and lets the user
+///   enable an option.
+/// app: com.example.demo           # when present, the app is relaunched before steps
 /// setup:                          # shell commands run before launch; {udid} and
 ///   - xcrun simctl spawn {udid} … # {app} are substituted; failures are recorded
-/// launchArguments: [-SampleMode, "1"]
+/// launchArguments: [-UITesting, "1"]
 /// timeout: 10                     # default per-step wait, seconds
 /// steps:
 ///   - waitFor: { id: settingsButton, timeout: 20 }
@@ -25,14 +21,13 @@ import Yams
 ///   - type: "hello"
 ///   - swipe: up
 ///   - assertVisible: { text: "Welcome" }
-///   - assertHidden: { label: "Badge" }
+///   - assertHidden: { label: "Loading" }
 ///   - wait: 2
 /// ```
 public struct TestDefinition: Equatable, Sendable {
     public var name: String?
     public var description: String?
     public var app: String?
-    public var environment: TestEnvironment?
     public var setup: [String]
     public var launchArguments: [String]
     public var stepTimeout: Double
@@ -42,7 +37,6 @@ public struct TestDefinition: Equatable, Sendable {
         name: String? = nil,
         description: String? = nil,
         app: String? = nil,
-        environment: TestEnvironment? = nil,
         setup: [String] = [],
         launchArguments: [String] = [],
         stepTimeout: Double = 10,
@@ -51,46 +45,10 @@ public struct TestDefinition: Equatable, Sendable {
         self.name = name
         self.description = description
         self.app = app
-        self.environment = environment
         self.setup = setup
         self.launchArguments = launchArguments
         self.stepTimeout = stepTimeout
         self.steps = steps
-    }
-
-    /// `launchArguments` plus the arguments rendered from `environment`,
-    /// without duplicating `-UITesting` when the test already passes it.
-    public var effectiveLaunchArguments: [String] {
-        var arguments = launchArguments
-        for argument in environment?.launchArguments ?? [] {
-            if argument == "-UITesting", arguments.contains("-UITesting") { continue }
-            arguments.append(argument)
-        }
-        return arguments
-    }
-}
-
-/// Account and backend selection for the app under test, rendered into the
-/// SampleApp debug launch arguments (`-SampleAccount`, `-SampleRegion`,
-/// `-UITesting -Environment`).
-public struct TestEnvironment: Equatable, Sendable {
-    public var sampleAccount: String?
-    public var env: String?
-    public var country: String?
-
-    public init(sampleAccount: String? = nil, env: String? = nil, country: String? = nil) {
-        self.sampleAccount = sampleAccount
-        self.env = env
-        self.country = country
-    }
-
-    public var launchArguments: [String] {
-        var arguments: [String] = []
-        if let sampleAccount { arguments += ["-SampleAccount", sampleAccount] }
-        if let country { arguments += ["-SampleRegion", country] }
-        // -Environment is only parsed by the app when -UITesting is present.
-        if let env { arguments += ["-UITesting", "-Environment", env] }
-        return arguments
     }
 }
 
@@ -273,7 +231,7 @@ public enum TestDefinitionParser {
             throw SimToolError("Test must be a YAML mapping with a `steps` list.")
         }
 
-        let knownKeys: Set<String> = ["name", "description", "app", "environment", "setup", "launchArguments", "timeout", "steps"]
+        let knownKeys: Set<String> = ["name", "description", "app", "setup", "launchArguments", "timeout", "steps"]
         if let unknown = dictionary.keys.first(where: { !knownKeys.contains($0) }) {
             throw SimToolError("Unknown test key `\(unknown)`. Known keys: \(knownKeys.sorted().joined(separator: ", ")).")
         }
@@ -306,29 +264,10 @@ public enum TestDefinitionParser {
             name: dictionary["name"].map(scalarString),
             description: dictionary["description"].map { scalarString($0).trimmingCharacters(in: .whitespacesAndNewlines) },
             app: dictionary["app"].map(scalarString),
-            environment: try dictionary["environment"].map(parseEnvironment),
             setup: setup,
             launchArguments: launchArguments,
             stepTimeout: try dictionary["timeout"].map { try seconds($0, context: "timeout") } ?? 10,
             steps: try rawSteps.enumerated().map { try parseStep($1, index: $0) }
-        )
-    }
-
-    private static func parseEnvironment(_ value: Any) throws -> TestEnvironment {
-        guard let dictionary = value as? [String: Any] else {
-            throw SimToolError("`environment` must be a mapping with `sampleAccount`, `env` and/or `country`.")
-        }
-        let knownKeys: Set<String> = ["sampleAccount", "env", "country"]
-        if let unknown = dictionary.keys.first(where: { !knownKeys.contains($0) }) {
-            throw SimToolError("environment: unknown key `\(unknown)`. Known keys: \(knownKeys.sorted().joined(separator: ", ")).")
-        }
-        guard !dictionary.isEmpty else {
-            throw SimToolError("`environment` must set at least one of `sampleAccount`, `env`, `country`.")
-        }
-        return TestEnvironment(
-            sampleAccount: dictionary["sampleAccount"].map(scalarString),
-            env: dictionary["env"].map(scalarString),
-            country: dictionary["country"].map(scalarString)
         )
     }
 

@@ -4,9 +4,9 @@ import XCTest
 final class TestDefinitionParserTests: XCTestCase {
     func testParsesFullTest() throws {
         let test = try TestDefinitionParser.parse("""
-        name: Tab bar badge
+        name: Settings flow
         app: com.example.demo
-        launchArguments: [-SampleMode, "1"]
+        launchArguments: [-UITesting, "1"]
         timeout: 15
         steps:
           - waitFor: { id: settingsButton, timeout: 20 }
@@ -15,13 +15,13 @@ final class TestDefinitionParserTests: XCTestCase {
           - type: "hello"
           - swipe: up
           - assertVisible: { text: "Welcome" }
-          - assertHidden: { label: "Badge" }
+          - assertHidden: { label: "Loading" }
           - wait: 2
         """)
 
-        XCTAssertEqual(test.name, "Tab bar badge")
+        XCTAssertEqual(test.name, "Settings flow")
         XCTAssertEqual(test.app, "com.example.demo")
-        XCTAssertEqual(test.launchArguments, ["-SampleMode", "1"])
+        XCTAssertEqual(test.launchArguments, ["-UITesting", "1"])
         XCTAssertEqual(test.stepTimeout, 15)
         XCTAssertEqual(test.steps, [
             .waitFor(TestTarget(kind: .id, query: "settingsButton"), timeout: 20),
@@ -30,7 +30,7 @@ final class TestDefinitionParserTests: XCTestCase {
             .type("hello"),
             .swipe(.up),
             .waitFor(TestTarget(kind: .text, query: "Welcome"), timeout: nil),
-            .assertHidden(TestTarget(kind: .label, query: "Badge"), timeout: nil),
+            .assertHidden(TestTarget(kind: .label, query: "Loading"), timeout: nil),
             .pause(2),
         ])
     }
@@ -63,75 +63,39 @@ final class TestDefinitionParserTests: XCTestCase {
 
     func testNumericLaunchArgumentsBecomeStrings() throws {
         let test = try TestDefinitionParser.parse("""
-        launchArguments: [-SampleCode, 111111]
+        launchArguments: [-SampleCode, 123456]
         steps:
           - wait: 1
         """)
-        XCTAssertEqual(test.launchArguments, ["-SampleCode", "111111"])
+        XCTAssertEqual(test.launchArguments, ["-SampleCode", "123456"])
     }
 
     func testParsesDescription() throws {
         let test = try TestDefinitionParser.parse("""
-        name: Badges
+        name: Preferences
         description: >
-          Settings state: Settings shows the current value,
-          selecting Settings updates it.
+          Opening Settings displays the preferences screen,
+          and selecting an option updates its value.
         steps:
           - wait: 1
         """)
         XCTAssertEqual(
             test.description,
-            "Settings state: Settings shows the current value, selecting Settings updates it."
+            "Opening Settings displays the preferences screen, and selecting an option updates its value."
         )
     }
 
-    func testParsesSetupAndEnvironment() throws {
+    func testParsesSetupAndLaunchArguments() throws {
         let test = try TestDefinitionParser.parse("""
         app: com.example.demo
-        environment:
-          sampleAccount: "sample-user"
-          country: sample-region
-          env: stable
         setup:
           - xcrun simctl spawn {udid} defaults delete some.domain some.key
+        launchArguments: [-UITesting, -SampleMode, preview]
         steps:
           - wait: 1
         """)
         XCTAssertEqual(test.setup, ["xcrun simctl spawn {udid} defaults delete some.domain some.key"])
-        XCTAssertEqual(test.environment, TestEnvironment(sampleAccount: "sample-user", env: "stable", country: "sample-region"))
-        XCTAssertEqual(test.effectiveLaunchArguments, [
-            "-SampleAccount", "sample-user",
-            "-SampleRegion", "sample-region",
-            "-UITesting", "-Environment", "stable",
-        ])
-    }
-
-    func testEffectiveLaunchArgumentsDoNotDuplicateUITesting() throws {
-        let test = try TestDefinitionParser.parse("""
-        environment:
-          env: mock
-        launchArguments: [-UITesting, -SampleConfig, some_flag, "true"]
-        steps:
-          - wait: 1
-        """)
-        XCTAssertEqual(test.effectiveLaunchArguments, [
-            "-UITesting", "-SampleConfig", "some_flag", "true",
-            "-Environment", "mock",
-        ])
-    }
-
-    func testRejectsUnknownEnvironmentKey() {
-        XCTAssertThrowsError(try TestDefinitionParser.parse("""
-        environment:
-          locale: mx
-        steps:
-          - wait: 1
-        """))
-        XCTAssertThrowsError(try TestDefinitionParser.parse("""
-        environment: {}
-        steps:
-          - wait: 1
-        """))
+        XCTAssertEqual(test.launchArguments, ["-UITesting", "-SampleMode", "preview"])
     }
 
     func testRejectsNonListSetup() {
@@ -181,15 +145,15 @@ final class TestDefinitionParserTests: XCTestCase {
     func testTargetMatching() {
         let node = AccessibilityNode(
             id: "1",
-            accessibilityIdentifier: "settingsButton",
-            label: "Chat",
-            value: "3 unread",
+            accessibilityIdentifier: "actionButton",
+            label: "Action",
+            value: "3 items",
             children: []
         )
-        XCTAssertTrue(TestTarget(kind: .id, query: "settingsButton").matches(node))
-        XCTAssertFalse(TestTarget(kind: .id, query: "chat").matches(node))
-        XCTAssertTrue(TestTarget(kind: .label, query: "Chat").matches(node))
-        XCTAssertTrue(TestTarget(kind: .text, query: "unread").matches(node))
-        XCTAssertFalse(TestTarget(kind: .text, query: "items").matches(node))
+        XCTAssertTrue(TestTarget(kind: .id, query: "actionButton").matches(node))
+        XCTAssertFalse(TestTarget(kind: .id, query: "action").matches(node))
+        XCTAssertTrue(TestTarget(kind: .label, query: "Action").matches(node))
+        XCTAssertTrue(TestTarget(kind: .text, query: "items").matches(node))
+        XCTAssertFalse(TestTarget(kind: .text, query: "missing").matches(node))
     }
 }
