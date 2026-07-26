@@ -328,6 +328,29 @@ it detects the `.xcworkspace`/`.xcodeproj` and scheme where it can, defaults
 fields (such as `bundleId`) for you to fill in. It refuses to clobber an existing
 config unless you pass `--force`.
 
+`init` also offers to install the **agent skill** — a Markdown brief that teaches a
+coding agent how to build, launch, drive, mock, and UI-test your app through this
+CLI. Run interactively it asks where to put it; pass `--skill` to choose up front:
+
+| Scope | Destination | Applies to |
+|---|---|---|
+| `--skill local` | `<project>/.claude/skills/simtool/SKILL.md` | this checkout (commit it to share with the team) |
+| `--skill global` | `~/.claude/skills/simtool/SKILL.md` | every project on this machine |
+| `--skill none` | — | nothing installed |
+
+Non-interactive runs (`--json`, or no TTY) default to `none`, so scripted `init`
+never writes outside the project. Re-running `init` leaves an installed skill
+alone once you have edited it — `--force` replaces it with the bundled version.
+The skill ships app-agnostic and has two placeholder sections, *Project options*
+and *Launch argument catalog*, to fill in with your workspace/scheme and with the
+debug launch arguments your own app reads.
+
+```sh
+simtool init --skill local           # config + skill for this project
+simtool init --skill global          # …and make the skill available everywhere
+simtool init --skill local --force   # refresh both from the bundled versions
+```
+
 ```yaml
 # .simtool/config.yml
 simulator: "iPhone 16 Pro"          # UDID, name, or `booted` for the first booted simulator

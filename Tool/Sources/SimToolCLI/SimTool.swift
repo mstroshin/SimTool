@@ -1585,11 +1585,17 @@ struct Run: AsyncParsableCommand {
 struct Init: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "init",
-        abstract: "Scaffold a starter .simtool/config.yml in the current directory, detecting the workspace/scheme where possible."
+        abstract: "Scaffold a starter .simtool/config.yml in the current directory, detecting the workspace/scheme where possible, and optionally install the simtool agent skill."
     )
 
-    @Flag(name: .long, help: "Overwrite an existing .simtool/config.yml.")
+    @Flag(name: .long, help: "Overwrite an existing .simtool/config.yml (and a modified installed skill).")
     var force = false
+
+    @Option(
+        name: .long,
+        help: "Install the agent skill: `local` (this project, .claude/skills/simtool), `global` (all projects, ~/.claude/skills/simtool), or `none`. Omit to be asked interactively; non-interactive runs default to `none`."
+    )
+    var skill: AgentSkill.Scope?
 
     @OptionGroup var common: CommonJSON
 
@@ -1599,6 +1605,7 @@ struct Init: ParsableCommand {
         var project: String?
         var scheme: String?
         var created: Bool
+        var skill: AgentSkill.Installation
     }
 
     func run() throws {
@@ -1606,40 +1613,107 @@ struct Init: ParsableCommand {
         let simtoolDir = cwd.appendingPathComponent(SimToolDirectory.directoryName, isDirectory: true)
         let configURL = simtoolDir.appendingPathComponent(SimToolDirectory.configFileName)
         let alreadyExists = FileManager.default.fileExists(atPath: configURL.path)
-        if alreadyExists, !force {
-            throw SimToolError("\(ProjectConfigLoader.displayPath) already exists. Edit it, or pass --force to overwrite.")
+        // Re-running `init` purely to install the skill is legitimate, so an
+        // existing config only aborts when there is nothing else to do.
+        let writesConfig = !alreadyExists || force
+        if !writesConfig, skill == nil || skill == AgentSkill.Scope.none {
+            throw SimToolError("\(ProjectConfigLoader.displayPath) already exists. Edit it, pass --force to overwrite, or pass --skill <local|global> to just install the agent skill.")
         }
 
         let detected = ProjectConfigTemplate.detect(in: cwd)
-        // Creates `.simtool/` and its self-ignoring `.gitignore` (never clobbered).
-        try SimToolDirectory.ensure(simtoolDir)
-        try Data(ProjectConfigTemplate.render(detected).utf8).write(to: configURL, options: [.atomic])
+        if writesConfig {
+            // Creates `.simtool/` and its self-ignoring `.gitignore` (never clobbered).
+            try SimToolDirectory.ensure(simtoolDir)
+            try Data(ProjectConfigTemplate.render(detected).utf8).write(to: configURL, options: [.atomic])
+        }
+
+        let installation = try AgentSkill.install(scope: resolveSkillScope(), projectDirectory: cwd, force: force)
 
         let result = InitResult(
             configPath: configURL.standardizedFileURL.path,
             workspace: detected.workspace,
             project: detected.project,
             scheme: detected.scheme,
-            created: !alreadyExists
+            created: writesConfig && !alreadyExists,
+            skill: installation
         )
         if common.json {
             try printJSON(result)
             return
         }
 
-        var todos: [TerminalText] = ["Set `bundleId` to the app's bundle identifier."]
-        if detected.scheme == nil { todos.append("Set `build.scheme` to the app scheme.") }
-        if detected.workspace == nil && detected.project == nil {
-            todos.append("Set `build.workspace` or `build.project`.")
+        var todos: [TerminalText] = []
+        if writesConfig {
+            todos.append("Set `bundleId` to the app's bundle identifier.")
+            if detected.scheme == nil { todos.append("Set `build.scheme` to the app scheme.") }
+            if detected.workspace == nil && detected.project == nil {
+                todos.append("Set `build.workspace` or `build.project`.")
+            }
+        }
+        if installation.outcome == .created || installation.outcome == .updated {
+            todos.append("Fill in the skill's project options and launch-argument catalog for this app.")
         }
         let detail = [detected.workspace.map { "Workspace: \($0)" }, detected.project.map { "Project: \($0)" }, detected.scheme.map { "Scheme: \($0)" }]
             .compactMap { $0 }
+        let headline = writesConfig
+            ? "\(alreadyExists ? "Overwrote" : "Created") \(ProjectConfigLoader.displayPath)"
+            : "Installed the simtool agent skill"
+        let configLine = writesConfig ? ["Config: \(result.configPath)"] : []
         makeNoora().success(.alert(
-            TerminalText(stringLiteral: "\(alreadyExists ? "Overwrote" : "Created") \(ProjectConfigLoader.displayPath)"),
-            takeaways: [TerminalText(stringLiteral: "Config: \(result.configPath)")] + detail.map { TerminalText(stringLiteral: $0) } + todos
+            TerminalText(stringLiteral: headline),
+            takeaways: (configLine + (writesConfig ? detail : []) + skillTakeaway(installation)).map { TerminalText(stringLiteral: $0) } + todos
         ))
     }
+
+    /// The explicit `--skill`, else an interactive pick. Non-interactive runs
+    /// install nothing: `init` is scriptable, and `global` writes outside the
+    /// project, which must never happen without the user saying so.
+    private func resolveSkillScope() -> AgentSkill.Scope {
+        if let skill { return skill }
+        guard !common.json, isatty(STDIN_FILENO) != 0 else { return .none }
+        return makeNoora().singleChoicePrompt(
+            title: "Agent skill",
+            question: "Install the simtool agent skill?",
+            options: SkillChoice.allCases,
+            description: "Teaches a coding agent to build, launch, drive, mock, and UI-test your app with simtool."
+        ).scope
+    }
+
+    private func skillTakeaway(_ installation: AgentSkill.Installation) -> [String] {
+        guard let path = installation.path else { return ["Skill: not installed"] }
+        switch installation.outcome {
+        case .created: return ["Skill: installed at \(path)"]
+        case .updated: return ["Skill: updated at \(path)"]
+        case .upToDate: return ["Skill: already up to date at \(path)"]
+        case .conflict: return ["Skill: kept your edited \(path) (pass --force to replace it)"]
+        case .skipped: return ["Skill: not installed"]
+        }
+    }
+
+    /// Prompt-facing wrapper: Noora renders `description`, and the raw scope
+    /// names alone ("local"/"global") don't say where the file lands.
+    private enum SkillChoice: CaseIterable, CustomStringConvertible, Equatable {
+        case local, global, skip
+
+        var scope: AgentSkill.Scope {
+            switch self {
+            case .local: return .local
+            case .global: return .global
+            case .skip: return .none
+            }
+        }
+
+        var description: String {
+            switch self {
+            case .local: return "This project only (.claude/skills/simtool)"
+            case .global: return "All projects (~/.claude/skills/simtool)"
+            case .skip: return "Don't install"
+            }
+        }
+    }
 }
+
+extension AgentSkill.Scope: ExpressibleByArgument {}
 
 struct Checksum: AsyncParsableCommand {
     static let configuration = CommandConfiguration(

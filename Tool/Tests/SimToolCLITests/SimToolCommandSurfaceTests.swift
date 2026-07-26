@@ -68,6 +68,21 @@ final class SimToolCommandSurfaceTests: XCTestCase {
         XCTAssertFalse(bare.common.json)
     }
 
+    func testInitParserAcceptsSkillScopes() throws {
+        XCTAssertEqual(try Init.parse(["--skill", "local"]).skill, .local)
+        XCTAssertEqual(try Init.parse(["--skill", "global"]).skill, .global)
+        XCTAssertEqual(try Init.parse(["--skill", "none"]).skill, AgentSkill.Scope.none)
+        XCTAssertThrowsError(try Init.parse(["--skill", "everywhere"]))
+    }
+
+    // Nil, not `.none`: an omitted flag means "ask", which is a different
+    // outcome from an explicit `--skill none`.
+    func testInitDefaultsToNoSkillChoice() throws {
+        let command = try Init.parse([])
+        XCTAssertNil(command.skill)
+        XCTAssertFalse(command.force)
+    }
+
     func testRunParserAcceptsViewerFlagsAndConfig() throws {
         let command = try Run.parse(["--no-network", "--no-state", "--config", ".simtool/config.yml", "--json"])
         XCTAssertFalse(command.web)
