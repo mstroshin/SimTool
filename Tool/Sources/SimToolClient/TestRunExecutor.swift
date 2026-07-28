@@ -126,6 +126,12 @@ public final class TestRunExecutor: @unchecked Sendable {
     private var collectedLogs: [LogEntry] = []
     private var collectedState: [StateLoggerEvent] = []
     private var runStartedAt = NetworkLoggerTimestamp.now()
+    /// When the run launched the app, for the staleness check below.
+    private var launchedAt: Date?
+    /// How many log lines had been collected when the capture was re-armed
+    /// after that launch. Nothing arriving afterwards means the capture is dead
+    /// and `logs.jsonl` documents only the pre-launch window.
+    private var logsCapturedBeforeLaunch: Int?
 
     public init(client: SimToolClient, options: TestRunOptions) {
         self.client = client
@@ -230,20 +236,41 @@ public final class TestRunExecutor: @unchecked Sendable {
             }
         }
 
-        // 2 — setup shell. Kept non-fatal on purpose: these commands mostly
+        // 2 — clear leftover mock rules before anything else runs. A rule left
+        // over from a manual session would answer calls this test never
+        // accounted for — including calls made by `setup:`, which often warms
+        // state up against the real backend precisely so the run can then change
+        // one answer. Only tests that declare mocks touch the store, so a manual
+        // exploration session running an unrelated test keeps its rules.
+        if !test.mocks.isEmpty {
+            do {
+                _ = try await client.clearMocks()
+            } catch {
+                return await finish(
+                    verdict: .infra,
+                    test: test,
+                    criteria: criteria,
+                    failures: failures,
+                    mocks: [],
+                    completedSteps: 0,
+                    session: session,
+                    infraReason: "Cannot clear existing mock rules: \(message(of: error))"
+                )
+            }
+        }
+
+        // 3 — setup shell. Kept non-fatal on purpose: these commands mostly
         // delete state that may not exist yet.
         for (index, command) in test.setup.enumerated() {
             let status = await runSetupCommand(command, udid: config.udid, app: app)
             await narrate("Setup \(index + 1)/\(test.setup.count) (\(status)): \(command.trimmingCharacters(in: .whitespacesAndNewlines))")
         }
 
-        // 3 — mocks, before launch so the app's very first poll already has
-        // them. Existing rules are cleared: a rule left over from a manual
-        // session would answer calls this test never accounted for.
+        // 4 — install the test's mock rules, after setup and before launch, so
+        // the app's very first poll already has them.
         var mockGeneration: Int?
         if !test.mocks.isEmpty {
             do {
-                _ = try await client.clearMocks()
                 for mock in test.mocks {
                     let created = try await client.setMock(mock.draft)
                     declaredMocks.append((id: created.id, method: mock.draft.match.method, strict: mock.strict))
@@ -264,10 +291,12 @@ public final class TestRunExecutor: @unchecked Sendable {
             }
         }
 
-        // 4 — launch.
+        // 5 — launch.
         if let app {
             do {
                 try await launchApp(app, launch: launch, udid: config.udid)
+                launchedAt = Date()
+                await rearmLogCapture(app: app, udid: config.udid)
                 let rendered = launch.arguments.isEmpty ? "" : " " + launch.arguments.joined(separator: " ")
                 await narrate("Launched \(app)\(rendered)")
                 if let deeplink = launch.deeplink, !deeplink.isEmpty {
@@ -288,7 +317,7 @@ public final class TestRunExecutor: @unchecked Sendable {
             }
         }
 
-        // 5 — wait until the app confirms it holds the rules. Without this the
+        // 6 — wait until the app confirms it holds the rules. Without this the
         // first call of the run can still reach the real backend, and the test
         // would be measuring something nobody declared.
         if let mockGeneration {
@@ -306,7 +335,7 @@ public final class TestRunExecutor: @unchecked Sendable {
             }
         }
 
-        // 6 — steps.
+        // 7 — steps.
         let runner = TestRunner(
             client: client,
             udid: config.udid,
@@ -390,7 +419,7 @@ public final class TestRunExecutor: @unchecked Sendable {
             )
         }
 
-        // 7 — evidence and mock outcomes decide whether the run can be trusted
+        // 8 — evidence and mock outcomes decide whether the run can be trusted
         // at all, so they are gathered before the verdict.
         let evidence = await collectEvidence(test: test, app: app, declaredMocks: declaredMocks)
         var infraReason: String?
@@ -555,6 +584,27 @@ public final class TestRunExecutor: @unchecked Sendable {
         var sawNetworkEvents = false
     }
 
+    /// Re-arms the log capture after the run launched the app, and resets the
+    /// cursor because arming starts a fresh buffer.
+    ///
+    /// Cold-launching the app kills the running capture — measured, not
+    /// theorised: a run's `logs.jsonl` otherwise ends one second before the
+    /// launch it is supposed to document, and the per-step cursors then never
+    /// advance. Whatever was captured before the launch (a `setup:` that warmed
+    /// state up, an earlier launch) is drained first, so re-arming adds the
+    /// run's own window instead of replacing the story with it.
+    private func rearmLogCapture(app: String, udid: String) async {
+        guard options.evidence != .none else { return }
+        await drainStreams()
+        do {
+            _ = try await client.startLogCapture(device: udid, app: app, captureStdout: false)
+            logCursor = nil
+            logsCapturedBeforeLaunch = collectedLogs.count
+        } catch {
+            await narrate("Log capture not re-armed after launch: \(message(of: error))")
+        }
+    }
+
     /// Drains the cursor-based streams into the run's own buffers. Called at
     /// every step boundary rather than once at the end: the capture buffer is
     /// bounded, so a long run would lose its early lines — the ones that
@@ -595,6 +645,10 @@ public final class TestRunExecutor: @unchecked Sendable {
 
         guard options.evidence != .none, let directory = evidenceDirectory else { return outcome }
         await drainStreams()
+        // Stale evidence is worse than none: it reads like the run's own logs.
+        if let before = logsCapturedBeforeLaunch, collectedLogs.count == before, launchedAt != nil {
+            await note(["No log lines arrived after the app was launched — the capture died, so logs.jsonl covers only the window before the launch."])
+        }
         write(jsonLines: collectedLogs, to: directory, named: "logs.jsonl")
         write(jsonLines: events, to: directory, named: "network.jsonl")
         write(jsonLines: collectedState, to: directory, named: "state.jsonl")
