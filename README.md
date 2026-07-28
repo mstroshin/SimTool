@@ -161,6 +161,37 @@ the commit.
 One session is active at a time; sessions can also be driven directly over HTTP
 via `POST /api/v1/tests/start|entries|stop`.
 
+#### Handing a test on
+
+`test export` packs a test, the verdict a run of it reached and the evidence
+behind that verdict into one `*.simflow.zip` — for the agent that will fix the
+bug, for a reviewer, or for whoever tests the fix:
+
+```bash
+swift run simtool test export .simtool/tests/my-test.yml        # newest run of it
+swift run simtool test export --session 2026-07-28-1955-vy1cu3 -o PROJ-42.simflow.zip
+swift run simtool test export --no-video --no-evidence          # lean: KBs, not MBs
+swift run simtool test show PROJ-42.simflow.zip                 # what it claims and carries
+swift run simtool test show PROJ-42.simflow.zip --report        # the report written for a person
+swift run simtool test show PROJ-42.simflow.zip --import        # replay it in this project's viewer
+swift run simtool test run PROJ-42.simflow.zip                  # run it here
+```
+
+The archive holds `manifest.json` (claim, verdict, criteria, provenance and
+what the receiver must supply), `test.yml` with `${VAR}` left unexpanded,
+`report.md`, and `runs/<session>/` with the session and its evidence. Two things
+deliberately stay out: the values behind `${VAR}` — `requires.env` names them,
+so an account never travels with a test — and the app binary, since the
+receiver installs the build they want to verify. `test run` on an archive checks
+those variables before it touches the simulator, falls back to the launch the
+sender recorded when this project's config has no such profile, and prints the
+installed build next to the recorded one, because a repro re-run against
+different code and pronounced fixed is the failure worth preventing.
+
+Evidence does carry the account's real traffic and log output — that is what
+makes it worth reading inside the team, and why `--no-evidence` exists for
+anywhere else. `report.md` says so too.
+
 `ax tree` and `ax find` omit the bulky raw AXe payload by default; pass `--raw`
 (or `?raw=1` on `/api/v1/ax/tree` and `/api/v1/ax/find`) to include it. For the
 cheapest screen summary use `ax tree --flat` (`?format=flat`) — a depth-annotated

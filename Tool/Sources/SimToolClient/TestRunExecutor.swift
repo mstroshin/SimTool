@@ -297,11 +297,14 @@ public final class TestRunExecutor: @unchecked Sendable {
                 try await launchApp(app, launch: launch, udid: config.udid)
                 launchedAt = Date()
                 await rearmLogCapture(app: app, udid: config.udid)
-                let rendered = launch.arguments.isEmpty ? "" : " " + launch.arguments.joined(separator: " ")
+                // The recorded launch, not the one used: the timeline is part of
+                // the artifact, and an artifact that quotes the expanded argv
+                // carries the account it logged in with to whoever it is sent to.
+                let rendered = recordedLaunch.arguments.isEmpty ? "" : " " + recordedLaunch.arguments.joined(separator: " ")
                 await narrate("Launched \(app)\(rendered)")
                 if let deeplink = launch.deeplink, !deeplink.isEmpty {
                     try await openDeeplink(deeplink, udid: config.udid)
-                    await narrate("Opened \(deeplink)")
+                    await narrate("Opened \(recordedLaunch.deeplink ?? deeplink)")
                 }
             } catch {
                 return await finish(
@@ -748,27 +751,12 @@ public final class TestRunExecutor: @unchecked Sendable {
         if let file = options.testFile {
             provenance.testYAML = try? String(contentsOf: file, encoding: .utf8)
         }
-        if let app {
-            let versions = await appVersions(app: app, udid: config.udid)
-            provenance.appVersion = versions.version
-            provenance.appBuild = versions.build
+        if let app, let bundle = await InstalledAppBundle.read(app: app, udid: config.udid) {
+            provenance.appVersion = bundle.version
+            provenance.appBuild = bundle.build
         }
         provenance.commit = await gitCommit()
         return provenance
-    }
-
-    /// Reads the installed bundle's Info.plist. A run does not build, so this is
-    /// the only honest source for "which build did this session exercise".
-    private func appVersions(app: String, udid: String) async -> (version: String?, build: String?) {
-        guard let output = try? await ProcessRunner.runXcrun(["simctl", "get_app_container", udid, app, "app"]),
-              output.status == 0 else { return (nil, nil) }
-        let path = output.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !path.isEmpty else { return (nil, nil) }
-        let plist = URL(fileURLWithPath: path).appendingPathComponent("Info.plist")
-        guard let data = try? Data(contentsOf: plist),
-              let object = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
-        else { return (nil, nil) }
-        return (object["CFBundleShortVersionString"] as? String, object["CFBundleVersion"] as? String)
     }
 
     private func gitCommit() async -> String? {

@@ -27,6 +27,7 @@ public enum ProcessRunner {
         arguments: [String],
         stdin: Data? = nil,
         environment: [String: String]? = nil,
+        currentDirectory: URL? = nil,
         timeoutSeconds: TimeInterval? = nil,
         onStdoutLine: (@Sendable (String) -> Void)? = nil
     ) async throws -> ProcessOutput {
@@ -34,6 +35,9 @@ public enum ProcessRunner {
         process.executableURL = executable
         process.arguments = arguments
         if let environment { process.environment = environment }
+        // Tools whose output depends on where they run from — `zip` stores paths
+        // relative to the working directory — need it set rather than inherited.
+        if let currentDirectory { process.currentDirectoryURL = currentDirectory }
 
         let stdout = Pipe()
         let stderr = Pipe()

@@ -237,9 +237,42 @@ final class SimToolCommandSurfaceTests: XCTestCase {
         XCTAssertTrue(names.contains("test"))
     }
 
-    func testTestSubcommandsAreRunAndList() {
+    func testTestSubcommandsCoverRunningListingAndHandingOn() {
         let names = TestCommand.configuration.subcommands.map { commandName(for: $0) }
-        XCTAssertEqual(names, ["run", "list"])
+        XCTAssertEqual(names, ["run", "list", "export", "show"])
+    }
+
+    func testTestExportParsesTheRunToPackageAndWhatToLeaveOut() throws {
+        let command = try TestCommand.Export.parse([
+            "tests/badges.yml",
+            "--session", "2026-07-28-1955-vy1cu3",
+            "--output", "PROJ-42.simflow.zip",
+            "--no-video",
+            "--force",
+        ])
+        XCTAssertEqual(command.test, "tests/badges.yml")
+        XCTAssertEqual(command.session, "2026-07-28-1955-vy1cu3")
+        XCTAssertEqual(command.output, "PROJ-42.simflow.zip")
+        XCTAssertTrue(command.noVideo)
+        XCTAssertFalse(command.noEvidence)
+        XCTAssertTrue(command.force)
+    }
+
+    func testTestExportNeedsNoArgumentsAtAll() throws {
+        let command = try TestCommand.Export.parse([])
+        XCTAssertNil(command.test)
+        XCTAssertNil(command.session)
+    }
+
+    func testTestShowParsesTheArchiveAndItsModes() throws {
+        let command = try TestCommand.Show.parse(["PROJ-42.simflow.zip", "--report", "--import"])
+        XCTAssertEqual(command.archive, "PROJ-42.simflow.zip")
+        XCTAssertTrue(command.report)
+        XCTAssertTrue(command.importRuns)
+    }
+
+    func testTestShowRequiresAnArchive() {
+        XCTAssertThrowsError(try TestCommand.Show.parse([]))
     }
 
     func testTestRunParsesTestPathAndOptions() throws {

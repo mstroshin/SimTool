@@ -252,6 +252,14 @@ public enum WebViewer {
     .tests-status-stopped { color: #9ca3af; }
     .tests-status-running { color: #fbbf24; }
     .tests-status-interrupted { color: rgba(244,247,251,0.45); }
+    .tests-verdict-satisfied { color: #4ade80; }
+    .tests-verdict-unsatisfied { color: #f87171; }
+    .tests-verdict-inconclusive { color: #fbbf24; }
+    .tests-verdict-infra { color: #c084fc; }
+    .tests-claim { display: flex; flex-direction: column; gap: 2px; padding: 2px 10px 6px; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; color: rgba(244,247,251,0.7); }
+    .tests-claim-met { color: #4ade80; }
+    .tests-claim-unmet { color: #f87171; }
+    .tests-claim-unchecked { color: rgba(244,247,251,0.45); }
     .tests-empty { color: rgba(244,247,251,0.45); font-size: 12px; padding: 10px; }
     .tests-section-header { flex-shrink: 0; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: rgba(244,247,251,0.5); padding: 4px 2px 0; }
     .tests-subtabs { display: flex; gap: 4px; flex-shrink: 0; }
@@ -2082,6 +2090,13 @@ public enum WebViewer {
     let testsLastPayload = "";
 
     const TEST_STATUS_LABEL = { running: "●", passed: "✓", failed: "✗", interrupted: "◌" };
+    // Kind-neutral wording: the session carries `kind`, and the row shows it.
+    const TEST_VERDICT_HEADLINE = {
+      satisfied: "the claim holds",
+      unsatisfied: "the claim does not hold",
+      inconclusive: "inconclusive — the run never reached the claim",
+      infra: "infra — the run cannot be trusted",
+    };
 
     async function loadTests() {
       try {
@@ -2502,13 +2517,19 @@ public enum WebViewer {
         title.className = "tests-title";
         title.textContent = session.title;
         const meta = document.createElement("span");
-        meta.className = "tests-meta tests-status-" + session.status;
+        // The verdict colours the row when there is one: a `passed` session and a
+        // reproduced bug are both "finished", and only the verdict says which.
+        meta.className = "tests-meta " + (session.verdict
+          ? "tests-verdict-" + session.verdict
+          : "tests-status-" + session.status);
         const duration = session.endedAt ? " · " + formatOffset(sessionDurationSeconds(session)) : "";
         const startedAt = new Date(session.startedAt);
         const startStamp = isNaN(startedAt.getTime()) ? "" :
           " · " + String(startedAt.getDate()).padStart(2, "0") + "." + String(startedAt.getMonth() + 1).padStart(2, "0") +
           " " + String(startedAt.getHours()).padStart(2, "0") + ":" + String(startedAt.getMinutes()).padStart(2, "0");
-        meta.textContent = (TEST_STATUS_LABEL[session.status] || session.status) + duration + startStamp;
+        const badge = (TEST_STATUS_LABEL[session.status] || session.status) +
+          (session.verdict ? " " + session.verdict : "");
+        meta.textContent = badge + duration + startStamp;
         row.append(title, meta);
         row.addEventListener("click", () => selectTestSession(session.id));
         row.addEventListener("contextmenu", (event) => {
@@ -2550,6 +2571,44 @@ public enum WebViewer {
       return { head: head || t, tail: t.slice(tailStart).trim() };
     }
 
+    // What the run was verifying, above its timeline: the verdict in words, each
+    // criterion with whether it held, and what the declared mocks answered. A
+    // recorded session is read to answer "did the claim hold" — that answer
+    // should not require opening session.json.
+    function renderTestClaim(session) {
+      const verdict = session.verdict;
+      const criteria = session.criteria || [];
+      const mocks = session.mocks || [];
+      if (!verdict && !criteria.length && !mocks.length) return;
+      const box = document.createElement("div");
+      box.className = "tests-claim";
+      if (verdict) {
+        const line = document.createElement("span");
+        line.className = "tests-verdict-" + verdict;
+        const kind = session.kind ? " · " + session.kind : "";
+        const reference = session.reference ? " · " + session.reference : "";
+        line.textContent = (TEST_VERDICT_HEADLINE[verdict] || verdict) + kind + reference;
+        box.appendChild(line);
+      }
+      for (const criterion of criteria) {
+        const line = document.createElement("span");
+        const state = criterion.status === "met" ? "met" : criterion.status === "unmet" ? "unmet" : "unchecked";
+        line.className = "tests-claim-" + state;
+        const mark = state === "met" ? "✓" : state === "unmet" ? "✗" : "–";
+        const step = criterion.step ? " (step " + criterion.step + ")" : "";
+        line.textContent = mark + " " + criterion.label + step + (criterion.detail ? ": " + criterion.detail : "");
+        box.appendChild(line);
+      }
+      for (const mock of mocks) {
+        const line = document.createElement("span");
+        line.className = mock.strict && !mock.hits ? "tests-claim-unmet" : "tests-claim-unchecked";
+        line.textContent = "mock " + mock.method + " — " + mock.hits + (mock.hits === 1 ? " call" : " calls") +
+          (mock.strict ? ", strict" : "");
+        box.appendChild(line);
+      }
+      testsTimelineEl.appendChild(box);
+    }
+
     function renderTestTimeline() {
       if (activeTab !== "tests" || testsSubtab !== "history") return;
       const session = testsSessions.find((s) => s.id === selectedTestId);
@@ -2565,6 +2624,7 @@ public enum WebViewer {
       headerToggle.className = "tests-timeline-toggle";
       header.append(headerTitle, headerToggle);
       testsTimelineEl.appendChild(header);
+      renderTestClaim(session);
 
       // Keys of all steps that have a collapsible detail — backs the expand/collapse-all control.
       const detailKeys = [];

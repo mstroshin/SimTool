@@ -52,6 +52,24 @@ public enum LaunchVariables {
         }
         return result + rest
     }
+
+    /// Names referenced as `${VAR}` in `text`, first occurrence first. Lets a
+    /// packaged test say what its receiver has to export without carrying the
+    /// values — and, unlike `expand`, it never fails: an unterminated `${` is
+    /// something the run itself will complain about.
+    public static func names(in text: String) -> [String] {
+        guard text.contains("${") else { return [] }
+        var names: [String] = []
+        var rest = Substring(text)
+        while let open = rest.range(of: "${") {
+            let afterOpen = rest[open.upperBound...]
+            guard let close = afterOpen.firstIndex(of: "}") else { break }
+            let name = String(afterOpen[afterOpen.startIndex..<close])
+            if !name.isEmpty, !names.contains(name) { names.append(name) }
+            rest = afterOpen[afterOpen.index(after: close)...]
+        }
+        return names
+    }
 }
 
 /// A named launch recipe from `.simtool/config.yml`: the app-specific launch
