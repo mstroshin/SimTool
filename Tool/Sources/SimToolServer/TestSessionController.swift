@@ -71,7 +71,14 @@ public final class TestSessionController: @unchecked Sendable {
         self.makeRecorder = makeRecorder
     }
 
-    public func start(title: String, video: Bool = true) throws -> TestSession {
+    public func start(
+        title: String,
+        video: Bool = true,
+        kind: TestKind? = nil,
+        reference: String? = nil,
+        criteria: [String] = [],
+        provenance: TestRunProvenance? = nil
+    ) throws -> TestSession {
         lock.lock()
         defer { lock.unlock() }
         sweepLocked()
@@ -83,7 +90,13 @@ public final class TestSessionController: @unchecked Sendable {
             deviceUdid: device.udid,
             deviceName: device.name,
             startedAt: Date(),
-            status: .running
+            status: .running,
+            kind: kind,
+            reference: reference,
+            // Seeded unchecked: the claim is worth showing while the run is
+            // still in flight, not only once it has an answer.
+            criteria: criteria.map { TestCriterionResult(label: $0, status: .unchecked) },
+            provenance: provenance
         )
         try store.ensureDirectory(for: session.id)
         if video {
@@ -152,15 +165,27 @@ public final class TestSessionController: @unchecked Sendable {
         session.entries.append(TestSessionEntry(
             kind: request.kind,
             at: at,
+            // A step entry is appended the moment the step finished, so now is
+            // its end; `at` may be earlier (the first input it performed).
+            endedAt: request.kind == .step ? Date() : nil,
             text: request.kind == .step ? text : nil,
-            logs: logs.isEmpty ? nil : logs
+            logs: logs.isEmpty ? nil : logs,
+            logCursorFrom: request.logCursorFrom,
+            logCursorTo: request.logCursorTo,
+            criterion: request.criterion
         ))
         try store.write(session)
         active = session
         return session
     }
 
-    public func stop(status: TestSessionStatus) async throws -> TestSession {
+    public func stop(
+        status: TestSessionStatus,
+        verdict: TestVerdict? = nil,
+        criteria: [TestCriterionResult]? = nil,
+        mocks: [TestMockOutcome]? = nil,
+        evidence: [String]? = nil
+    ) async throws -> TestSession {
         guard status != .running else {
             throw TestSessionError.badStatus(status)
         }
@@ -169,6 +194,10 @@ public final class TestSessionController: @unchecked Sendable {
             lock.unlock()
             throw TestSessionError.noActiveSession
         }
+        if let verdict { session.verdict = verdict }
+        if let criteria { session.criteria = criteria }
+        if let mocks { session.mocks = mocks }
+        if let evidence { session.evidence = evidence }
         let recorder = self.recorder
         self.recorder = nil
         self.active = nil

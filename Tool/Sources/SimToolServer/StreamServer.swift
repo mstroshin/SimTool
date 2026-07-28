@@ -20,6 +20,14 @@ public struct StreamServerConfig: Sendable {
     public var testSessionsRoot: URL
     /// Where declarative YAML UI tests live: the project’s `.simtool/tests`.
     public var testsRoot: URL
+    /// Launch profiles from the project config, so a web-triggered run can
+    /// resolve a test's `launch.profile` exactly like the CLI does.
+    public var profiles: [LaunchProfile]
+    /// The server's own URL as the simulator sees it, used to arm the app-side
+    /// loggers for runs the server starts.
+    public var appFacingServerURL: String?
+    /// The project checkout, for a run's provenance commit.
+    public var projectRoot: URL?
 
     public init(
         host: String = "127.0.0.1",
@@ -28,7 +36,10 @@ public struct StreamServerConfig: Sendable {
         captureEnabled: Bool = true,
         defaultLogApp: String? = nil,
         testSessionsRoot: URL = SimToolDirectory.testSessionsDirectory(in: SimToolDirectory.resolve()),
-        testsRoot: URL = SimToolDirectory.testsDirectory(in: SimToolDirectory.resolve())
+        testsRoot: URL = SimToolDirectory.testsDirectory(in: SimToolDirectory.resolve()),
+        profiles: [LaunchProfile] = [],
+        appFacingServerURL: String? = nil,
+        projectRoot: URL? = nil
     ) {
         self.host = host
         self.port = port
@@ -37,6 +48,9 @@ public struct StreamServerConfig: Sendable {
         self.defaultLogApp = defaultLogApp
         self.testSessionsRoot = testSessionsRoot
         self.testsRoot = testsRoot
+        self.profiles = profiles
+        self.appFacingServerURL = appFacingServerURL
+        self.projectRoot = projectRoot
     }
 }
 
@@ -91,7 +105,13 @@ public final class StreamServer: @unchecked Sendable {
             device: config.device,
             makeRecorder: { SimctlVideoRecorder() }
         )
-        self.testRuns = TestRunController(testsRoot: config.testsRoot)
+        self.testRuns = TestRunController(
+            testsRoot: config.testsRoot,
+            profiles: config.profiles,
+            defaultApp: config.defaultLogApp,
+            appFacingServerURL: config.appFacingServerURL,
+            projectRoot: config.projectRoot
+        )
     }
 
     public func start() throws {
@@ -250,6 +270,19 @@ public final class StreamServer: @unchecked Sendable {
             }
         }
 
+        server.GET["/api/v1/mocks/ack"] = { _ in
+            do {
+                let ack = self.mockRules.acknowledgement()
+                return try self.jsonEncodedResponse(MockAcknowledgementPayload(
+                    generation: ack.generation,
+                    acknowledged: ack.acknowledged,
+                    lastPollAt: ack.lastPollAt
+                ))
+            } catch {
+                return self.errorResponse(error)
+            }
+        }
+
         server.DELETE["/api/v1/mocks/:id"] = { request in
             guard let id = request.params[":id"], !id.isEmpty else {
                 return self.errorResponse(SimToolError("Missing mock id"), statusCode: 400, reason: "Bad Request")
@@ -331,7 +364,14 @@ public final class StreamServer: @unchecked Sendable {
         server.POST["/api/v1/tests/start"] = { request in
             do {
                 let start = try self.decodeJSON(TestSessionStartRequest.self, from: request)
-                return try self.jsonEncodedResponse(self.testSessions.start(title: start.title, video: start.video ?? true))
+                return try self.jsonEncodedResponse(self.testSessions.start(
+                    title: start.title,
+                    video: start.video ?? true,
+                    kind: start.kind,
+                    reference: start.reference,
+                    criteria: start.criteria ?? [],
+                    provenance: start.provenance
+                ))
             } catch {
                 return self.testSessionErrorResponse(error)
             }
@@ -349,7 +389,15 @@ public final class StreamServer: @unchecked Sendable {
         server.POST["/api/v1/tests/stop"] = { request in
             do {
                 let stop = try self.decodeJSON(TestSessionStopRequest.self, from: request)
-                let session = try self.waitForAsync { try await self.testSessions.stop(status: stop.status) }
+                let session = try self.waitForAsync {
+                    try await self.testSessions.stop(
+                        status: stop.status,
+                        verdict: stop.verdict,
+                        criteria: stop.criteria,
+                        mocks: stop.mocks,
+                        evidence: stop.evidence
+                    )
+                }
                 return try self.jsonEncodedResponse(session)
             } catch {
                 return self.testSessionErrorResponse(error)
@@ -473,7 +521,8 @@ public final class StreamServer: @unchecked Sendable {
             height: screenHeight,
             stream: StreamPaths(),
             metrics: metricsPayload(),
-            logApp: config.defaultLogApp
+            logApp: config.defaultLogApp,
+            testSessionsPath: config.testSessionsRoot.path
         )
     }
 

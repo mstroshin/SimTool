@@ -93,7 +93,7 @@ public enum AgentSkill {
     public static let markdown = #"""
         ---
         name: simtool
-        description: Build an iOS app and install + launch it on an iOS Simulator via the simtool CLI, then drive/inspect it (input, accessibility tree, logs, network, browser viewer), mock backend gRPC responses (simtool mock — return errors/custom bodies/delays for corner-case testing), and run declarative YAML UI tests (simtool test run — implicit-wait steps over the accessibility tree, setup/environment sections, every run recorded as a session with video; also runnable from the viewer's Tests tab). Optionally launch with the app's own debug/test arguments — environment switch, jump to a screen, clean state, locale, deeplink, config overrides. Use when asked to "build and run", "запусти app", "rebuild", "build-only", "build & run", "compile and run", to run/launch with specific arguments, switch environment, open a specific screen on launch, reset app state, rebuild after code changes, tap/type/swipe on the simulator, read the accessibility tree, tail app logs (OSLog/stdout), inspect network traffic, mock/stub a backend response ("замокай ответ", "верни ошибку на этот запрос", "подмени ответ"), open the live simulator viewer, run or write a YAML UI test ("запусти ui тест", "прогони тест", "напиши тест для экрана"), or review recorded test sessions.
+        description: Build an iOS app and install + launch it on an iOS Simulator via the simtool CLI, then drive/inspect it (input, accessibility tree, logs, network, browser viewer), mock backend gRPC responses (simtool mock — return errors/custom bodies/delays for corner-case testing), and write or run declarative YAML UI tests (simtool test run — implicit-wait steps over the accessibility tree, launch profiles, state reset, in-test mocks, and a verdict that says whether a bug reproduces or a feature is confirmed; every run recorded as a session with video and evidence, also runnable from the viewer's Tests tab). Optionally launch with the app's own debug/test arguments — environment switch, jump to a screen, clean state, locale, deeplink, config overrides. Use when asked to "build and run", "запусти app", "rebuild", "build-only", "build & run", "compile and run", to run/launch with specific arguments, switch environment, open a specific screen on launch, reset app state, rebuild after code changes, tap/type/swipe on the simulator, read the accessibility tree, tail app logs (OSLog/stdout), inspect network traffic, mock/stub a backend response ("замокай ответ", "верни ошибку на этот запрос", "подмени ответ"), open the live simulator viewer, run or write a YAML UI test ("запусти ui тест", "прогони тест", "напиши тест для экрана"), or review recorded test sessions.
         argument-hint: [simtool args like app build / app launch --configuration Debug -- -MyAppFlag …]
         allowed-tools: [Bash, Read, AskUserQuestion]
         ---
@@ -166,10 +166,26 @@ public enum AgentSkill {
           staging build against a real test backend (`com.example.myapp.beta`). Note
           which configurations compile the debug arguments in at all: they are usually
           gated out of Release, so a Release build silently ignores the whole catalog.
-        - **Device**: defaults to the first **booted** simulator; target one explicitly
-          with the device flag (UDID or name substring). simtool boots nothing itself —
+        - **Device**: every command resolves `--device` first, then `simulator:` from
+          `.simtool/config.yml`, then whatever is booted — and **refuses to guess when
+          several simulators are booted and neither was given**. That refusal is
+          deliberate: on a machine running parallel checkouts, guessing means driving
+          another one's simulator, where the taps land elsewhere and the accessibility
+          tree merely looks stale. `simtool app build/launch` boots nothing itself —
           boot first (`xcrun simctl boot <udid>` / open Simulator.app). List devices:
           `simtool devices --json`.
+        - **Launch profiles**: name the argv recipes your tests and runs need in
+          `profiles:` in `.simtool/config.yml`, and refer to them by name from a test's
+          `launch.profile`. Values may interpolate `${VAR}` from the shell, so accounts
+          and passcodes stay out of every file:
+
+          ```yaml
+          # .simtool/config.yml
+          profiles:
+            staging-account1:
+              arguments: [-UITesting, -Environment, staging, -AutoLogin, "${ACCOUNT1}"]
+              env: { SOME_FLAG: "1" }
+          ```
         - **Lifecycle**: a launch is build (cached by source checksum → reuses the `.app`
           when nothing changed, else `xcodebuild`) → install if needed → **cold** launch
           (so launch args/env always take effect). Use the force-rebuild flag to bypass a
@@ -360,36 +376,53 @@ public enum AgentSkill {
         - **Unary only** — streaming RPCs and plain HTTP are not mocked yet.
         - Needs an app linked against a SimTool version that exposes the mock store.
         - Mocked calls show a 🎭 badge in the viewer's Network tab.
+        - **For a test, declare the rules in the test's `mocks:` block instead.** Rules
+          set from the CLI live outside the test, so a scenario that needs a specific
+          backend answer only reproduces on the machine where someone typed them. Use
+          `simtool mock set` while exploring, then move what worked into the test —
+          where `strict: true` also makes a rule that never fired fail the run.
 
         ### UI tests (`simtool test run`)
         Declarative YAML tests drive the app through the accessibility tree: every step
         polls until its target appears (or disappears), so tests need no sleeps. Needs a
         running SimTool server (the `serve`/`run` one, or pass `--server`). Every run is
-        recorded as a test session — timestamped steps + screen recording — persisted
-        under `.simtool/test-sessions/<id>/` and shown in the viewer's Tests tab
-        (History subtab) with the timeline synced to the video. Exit code is non-zero on
-        failure; failures attach a screenshot path and a dump of visible elements to the
-        session.
+        recorded as a test session — timestamped steps, screen recording and the run's
+        evidence — persisted under `.simtool/test-sessions/<id>/` and shown in the
+        viewer's Tests tab (History subtab) with the timeline synced to the video.
 
         Tests live in `.simtool/tests/*.yml`. Schema (full reference:
         `simtool test run --help`):
 
         ```yaml
         name: tab bar badges
+        kind: feature                # optional; bug | feature — see "Verifying tests"
+        reference: "PROJ-42"         # optional; free-form origin, stored, never parsed
         description: >               # what is tested and the expected result
           Home shows the summed count badge; opening the second tab clears the red dot.
         app: com.example.myapp.debug # relaunched before steps
-        environment:                 # rendered into launch arguments
-          env: staging                      # -UITesting -Environment staging
-        setup:                       # shell before launch; {udid}/{app} substituted;
-          - xcrun simctl spawn {udid} defaults delete …   # failures logged, not fatal
-        launchArguments: [-UITesting, -RemoteConfig, some_flag, "true"]
+        launch:                      # how to launch it
+          profile: staging-account1  #   a `profiles:` entry from .simtool/config.yml
+          arguments: [-RemoteConfig, some_flag, "true"]   # appended after the profile's
+          env: { SOME_FLAG: "1" }    #   exported to the app as SIMCTL_CHILD_*
+          deeplink: myapp://home     #   opened once the app is running
+        reset:                       # simulator state, before launch
+          defaults: true             #   clear the app's UserDefaults
+          container: false           #   wipe the app's data container (keeps it installed)
+          permissions: { att: deny, location: grant }     # grant | deny | reset
+          locale: es_ES              #   applied as -AppleLocale / -AppleLanguages
+          language: es
+        mocks:                       # backend answers, applied before launch
+          - method: "*/GetBadges"    #   gRPC full-method or HTTP path, `*` globs
+            body: { count: 3 }       #   YAML or a JSON string (or `error: unavailable`)
+            strict: true             #   must fire, or the run is reported as `infra`
+        setup:                       # escape hatch: shell before launch, {udid}/{app}
+          - xcrun simctl spawn {udid} defaults delete …   # substituted; failures logged
         timeout: 10                  # default per-step wait, seconds
         steps:
           - waitFor: { id: MainScreenView, timeout: 45 }
           - tap: { id: tabbar_second }
           - longPress: { id: tabbar_main, duration: 1 }
-          - assertVisible: { text: "Welcome" }     # id / label / text targets
+          - assertVisible: { text: "Welcome", criterion: AC-1 }   # id / label / text
           - assertHidden: { id: some-badge, timeout: 15 }
           - swipe: up
           - type: "hello"
@@ -400,20 +433,80 @@ public enum AgentSkill {
         - **Targets**: `id` matches accessibilityIdentifier exactly, `label` matches
           label/title exactly, `text` is a case-insensitive substring across fields;
           a bare string target means `text`.
-        - **`environment` keys are rendered into argv** by the runner. If your app parses
-          `-Environment` / `-RemoteConfig` only under a master switch, `environment.env`
-          implies that switch; it is not duplicated if the test already passes it.
-        - **`setup` is for resetting persisted state** (e.g. app-group defaults) so
-          runs are repeatable; non-zero exits are recorded but never fail the test.
+        - **Launch profiles keep app-specific argv out of the test.** A test names a
+          profile; the accounts, environment switches and master switch live in
+          `profiles:` in `.simtool/config.yml` (see [Project options](#project-options)),
+          where `${VAR}` reads from your shell — so no test file carries a credential.
+          An unset `${VAR}` fails the run rather than expanding to nothing.
+        - **`reset:` replaces hand-written state-clearing shell** and travels with the
+          test. `permissions:` pre-answers the system alerts that would otherwise block
+          the drive — `simtool input` cannot reach a system alert, and while one is up
+          the a11y tree is unreadable, which reads exactly like a broken app. The
+          notification prompt has no simctl backdoor: answer it once by hand.
+        - **`mocks:` belongs in the test, not in `simtool mock set`.** Rules declared
+          here are applied before launch, the run waits until the app confirms it has
+          them, and they are cleared afterwards — so the scenario reproduces on another
+          machine. Existing rules are cleared first, so a leftover manual rule cannot
+          answer a call this test never accounted for.
+        - **`setup` is for what `reset:` cannot express**; non-zero exits are recorded
+          but never fail the test.
         - Discover ids for steps with `simtool ax find <needle>` / `ax tree` while
           driving the app manually.
 
-        Commands: `simtool test run <test.yml>` (add `--json` for machine output,
-        `--no-session` to skip recording), `simtool test list` (recorded sessions).
-        The viewer's Tests tab has two subtabs: **Tests** lists the YAML tests with
-        Run buttons, live progress and results (`GET /api/v1/tests/definitions`,
-        `GET/POST /api/v1/tests/run`); **History** shows recorded sessions with the
-        video-synced timeline. One test runs at a time.
+        #### Verifying tests: `kind`, `criterion` and the verdict
+
+        Add `kind:` and mark the assertions that check the claim with `criterion:`, and
+        the run answers *whether the claim holds* instead of merely pass/fail:
+
+        | Verdict | Exit | `kind: bug` | `kind: feature` |
+        |---|---|---|---|
+        | `satisfied` | 0 | not reproduced / fixed | feature confirmed |
+        | `unsatisfied` | 1 | **bug reproduced** | feature not confirmed |
+        | `inconclusive` | 2 | the run never reached a criterion — fix the test | same |
+        | `infra` | 3 | the run cannot be trusted — see below | same |
+
+        - **Assert the expected behaviour, not the current one.** A bug repro fails
+          today — that failure *is* the reproduction — and the same file starts passing
+          when the bug is fixed, so it becomes the regression guard. A test that asserts
+          the broken state has to be inverted after the fix, and inverted tests get
+          deleted.
+        - Steps without a `criterion:` merely stage the scenario. A failure there is
+          `inconclusive`, never a reproduction: it means the run never got to what it
+          checks. Fix the test, not the report.
+        - `kind: bug` stops at the first unmet criterion; `kind: feature` reports every
+          criterion from one run, so "AC-1 ok, AC-3 unmet" does not cost three runs.
+        - `infra` means the run proves nothing in either direction: a `strict:` mock
+          never fired, the app never picked up its mock rules (its network logger is not
+          running), or `reset:` could not be applied. An `infra` run is never reported as
+          a pass — that is the direction that would tell a fixing agent the bug is gone.
+        - `criterion:` labels are free-form: an id like `AC-2` when the work came with
+          acceptance criteria, a short sentence when it came as prose. SimTool assumes no
+          issue tracker; `reference:` is stored and displayed but never parsed.
+
+        #### Evidence
+
+        Unless `--evidence none`, the run arms the log capture itself, scopes it to its
+        own launches, and writes into the session directory next to `video.mp4`:
+
+        - `logs.jsonl` — the app's OSLog for the run (stdout is not captured: attaching a
+          console would mean relaunching the app the run just launched)
+        - `network.jsonl` — the app-emitted HTTP/gRPC events, each with `mocked` and the
+          rule id that answered it
+        - `state.jsonl` — `@SimToolDebugState` snapshots, when the state logger is linked
+        - `mocks.json` — what each declared rule actually did, including `hits: 0`
+        - `failure-step-<n>.png` / `-ax.txt` — screen and visible elements at the failure
+
+        Step entries carry the log-cursor range and the start/end timestamps of their
+        step, so the logs and requests belonging to one step can be sliced out of those
+        files. `--evidence full` also captures a screenshot after every step.
+
+        Commands: `simtool test run <test.yml>` (`--json` for the machine-readable
+        report, `--repeat N` to check an intermittent claim, `--evidence
+        none|failure|full`, `--no-session` to skip recording), `simtool test list`
+        (recorded sessions with their verdicts). The viewer's Tests tab has two subtabs:
+        **Tests** lists the YAML tests with Run buttons, live progress and results
+        (`GET /api/v1/tests/definitions`, `GET/POST /api/v1/tests/run`); **History**
+        shows recorded sessions with the video-synced timeline. One test runs at a time.
 
         #### Reading live model state (`@SimToolDebugState`)
         To observe view-model state while driving the app, use the state logger:
@@ -478,10 +571,13 @@ public enum AgentSkill {
           device to have network access to it; failures are typically logged and leave
           the regular screen for manual entry.
         - simtool keeps per-project state in `.simtool/` at the repo root (self-gitignored
-          via an auto-created `.gitignore`): the optional config `.simtool/config.yml`
-          (used by `simtool run`/`open`), build checksum metadata in `.simtool/build/`,
-          and test sessions in `.simtool/test-sessions/`. Discovered by walking up from
-          the working directory, so run simtool from inside the repo.
+          via an auto-created `.gitignore`): the config `.simtool/config.yml` (simulator,
+          app, build, launch profiles), build checksum metadata in `.simtool/build/`,
+          YAML tests in `.simtool/tests/`, and recorded sessions with their evidence in
+          `.simtool/test-sessions/`. Discovered by walking up from the working directory,
+          so run simtool from inside the repo. Because the directory is gitignored, a
+          test and its session are machine-local: to hand one to someone else, hand over
+          the files.
         - With a generated project (Tuist, XcodeGen, …), switching git branches can
           desync it; if a build fails with a missing input file, regenerate the project
           before rebuilding.

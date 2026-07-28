@@ -42,6 +42,52 @@ final class SimulatorDeviceTests: XCTestCase {
         XCTAssertThrowsError(try SimulatorDeviceClient.selectDevice("booted", from: devices))
     }
 
+    // MARK: - resolution with a project config
+
+    private var twoBooted: [SimulatorDevice] {
+        [
+            SimulatorDevice(udid: "A", name: "iPhone 16", runtime: "iOS 18.0", state: "Booted", isAvailable: true),
+            SimulatorDevice(udid: "B", name: "iPhone 16 Pro", runtime: "iOS 18.0", state: "Booted", isAvailable: true),
+        ]
+    }
+
+    func testConfiguredSimulatorIsUsedWhenNoDevicePassed() throws {
+        let device = try SimulatorDeviceClient.selectDevice(nil, configured: "iPhone 16 Pro", from: twoBooted)
+        XCTAssertEqual(device.udid, "B")
+    }
+
+    func testExplicitDeviceWinsOverConfiguredOne() throws {
+        let device = try SimulatorDeviceClient.selectDevice("iPhone 16", configured: "iPhone 16 Pro", from: twoBooted)
+        XCTAssertEqual(device.udid, "A")
+    }
+
+    /// Guessing between booted simulators is how a command ends up driving
+    /// another checkout's session, where the taps land elsewhere and the tree
+    /// merely looks stale. Refusing is the cheaper failure.
+    func testSeveralBootedAndNothingSelectedIsAnError() {
+        XCTAssertThrowsError(try SimulatorDeviceClient.selectDevice(nil, configured: nil, from: twoBooted)) { error in
+            let message = "\(error)"
+            XCTAssertTrue(message.contains("iPhone 16"))
+            XCTAssertTrue(message.contains("--device"))
+        }
+        XCTAssertThrowsError(try SimulatorDeviceClient.selectDevice("", configured: "  ", from: twoBooted))
+    }
+
+    /// `--device booted` is an explicit "whichever is running", so it keeps
+    /// picking the first one.
+    func testExplicitBootedKeywordStillPicksFirst() throws {
+        let device = try SimulatorDeviceClient.selectDevice("booted", configured: nil, from: twoBooted)
+        XCTAssertEqual(device.udid, "A")
+    }
+
+    func testSingleBootedNeedsNoSelection() throws {
+        let devices = [
+            SimulatorDevice(udid: "A", name: "iPhone 16", runtime: "iOS 18.0", state: "Shutdown", isAvailable: true),
+            SimulatorDevice(udid: "B", name: "iPhone 16 Pro", runtime: "iOS 18.0", state: "Booted", isAvailable: true),
+        ]
+        XCTAssertEqual(try SimulatorDeviceClient.selectDevice(nil, configured: nil, from: devices).udid, "B")
+    }
+
     func testSelectDeviceMatchesByUDIDAndName() throws {
         let devices = [
             SimulatorDevice(udid: "AAA-111", name: "iPhone 15", runtime: "iOS-18-0", state: "Shutdown", isAvailable: true),

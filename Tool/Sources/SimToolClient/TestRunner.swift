@@ -1,18 +1,20 @@
 import Foundation
 import SimToolCore
 
-/// Executes a parsed `TestDefinition` against the served simulator. Every step
-/// implicitly waits for its target by polling the accessibility tree, so tests
-/// need no explicit sleeps to survive animations and loading.
+/// Executes the steps of a parsed `TestDefinition` against the served
+/// simulator. Every step implicitly waits for its target by polling the
+/// accessibility tree, so tests need no explicit sleeps to survive animations
+/// and loading.
+///
+/// Staging the scenario (reset, mocks, launch), collecting evidence and
+/// deciding the verdict belong to `TestRunExecutor`; this type only performs
+/// actions and reports whether each one did what it said.
 public struct TestRunner {
     public let client: SimToolClient
     public let udid: String
     public let screenWidth: Double
     public let screenHeight: Double
     public let defaultTimeout: Double
-    public let record: (String) async -> Void
-    /// Called after each completed step with (completedSteps, totalSteps).
-    public var onProgress: ((Int, Int) async -> Void)?
 
     private static let pollInterval: Duration = .milliseconds(500)
 
@@ -21,42 +23,17 @@ public struct TestRunner {
         udid: String,
         screenWidth: Double,
         screenHeight: Double,
-        defaultTimeout: Double,
-        record: @escaping (String) async -> Void,
-        onProgress: ((Int, Int) async -> Void)? = nil
+        defaultTimeout: Double
     ) {
         self.client = client
         self.udid = udid
         self.screenWidth = screenWidth
         self.screenHeight = screenHeight
         self.defaultTimeout = defaultTimeout
-        self.record = record
-        self.onProgress = onProgress
     }
 
-    public func run(_ test: TestDefinition) async throws {
-        for (index, command) in test.setup.enumerated() {
-            let status = await runSetupCommand(command, app: test.app)
-            await record("Setup \(index + 1)/\(test.setup.count) (\(status)): \(command.trimmingCharacters(in: .whitespacesAndNewlines))")
-        }
-        if let app = test.app {
-            let arguments = test.launchArguments
-            try await launch(app: app, arguments: arguments)
-            let rendered = arguments.isEmpty ? "" : " " + arguments.joined(separator: " ")
-            await record("Launched \(app)\(rendered)")
-        }
-        for (index, step) in test.steps.enumerated() {
-            do {
-                try await execute(step)
-            } catch let error as SimToolError {
-                throw SimToolError("Step \(index + 1) of \(test.steps.count) — \(step): \(error.message)")
-            }
-            await record("✓ \(index + 1)/\(test.steps.count) \(step)")
-            await onProgress?(index + 1, test.steps.count)
-        }
-    }
-
-    /// Flat "type id label" lines of what is currently on screen, for failure logs.
+    /// Flat "type id label" lines of what is currently on screen, for failure
+    /// logs.
     public func visibleSummary(limit: Int = 40) async -> [String] {
         guard let tree = try? await client.accessibilityTree() else { return [] }
         var lines: [String] = []
@@ -76,8 +53,43 @@ public struct TestRunner {
         return lines
     }
 
-    private func execute(_ step: TestStep) async throws {
-        switch step {
+    /// The elements on screen whose text is closest to a missed target — the
+    /// fastest way to see that a step names `loginBtn` while the screen has
+    /// `loginButton`.
+    public func nearestTargets(to target: TestTarget, limit: Int = 3) async -> [String] {
+        guard let tree = try? await client.accessibilityTree() else { return [] }
+        var candidates: [(score: Int, text: String)] = []
+        var queue = tree.roots
+        let needle = target.query.lowercased()
+        while !queue.isEmpty {
+            let node = queue.removeFirst()
+            queue.append(contentsOf: node.children)
+            for (field, value) in [("id", node.accessibilityIdentifier), ("label", node.label), ("title", node.title)] {
+                guard let value, !value.isEmpty, !value.hasPrefix("_") else { continue }
+                let score = similarity(value.lowercased(), needle)
+                guard score > 0 else { continue }
+                candidates.append((score, "\(field)=\(value)"))
+            }
+        }
+        var seen = Set<String>()
+        return candidates
+            .sorted { $0.score > $1.score }
+            .filter { seen.insert($0.text).inserted }
+            .prefix(limit)
+            .map(\.text)
+    }
+
+    /// Length of the longest shared prefix or containment overlap. Deliberately
+    /// crude: it only has to rank "nearly the identifier you meant" above
+    /// unrelated elements.
+    private func similarity(_ candidate: String, _ needle: String) -> Int {
+        if candidate == needle { return Int.max }
+        if candidate.contains(needle) || needle.contains(candidate) { return min(candidate.count, needle.count) + 100 }
+        return zip(candidate, needle).prefix { $0.0 == $0.1 }.count
+    }
+
+    public func execute(_ action: TestStepAction) async throws {
+        switch action {
         case .tap(let target, let timeout):
             let node = try await waitForMatch(target, timeout: timeout)
             try await tap(node: node, target: target)
@@ -175,33 +187,6 @@ public struct TestRunner {
             ),
             action: "swipe"
         )
-    }
-
-    /// Setup commands reset persisted state before launch (delete a defaults
-    /// key, clear a container), so a non-zero exit — the key not existing on a
-    /// first run — is reported but never fails the test.
-    private func runSetupCommand(_ command: String, app: String?) async -> String {
-        let rendered = command
-            .replacingOccurrences(of: "{udid}", with: udid)
-            .replacingOccurrences(of: "{app}", with: app ?? "")
-        do {
-            let output = try await ProcessRunner.run(
-                executable: URL(fileURLWithPath: "/bin/sh"),
-                arguments: ["-c", rendered],
-                timeoutSeconds: 60
-            )
-            return output.status == 0 ? "ok" : "exit \(output.status)"
-        } catch {
-            return "error: \((error as? SimToolError)?.message ?? error.localizedDescription)"
-        }
-    }
-
-    private func launch(app: String, arguments: [String]) async throws {
-        _ = try? await ProcessRunner.runXcrun(["simctl", "terminate", udid, app])
-        let output = try await ProcessRunner.runXcrun(["simctl", "launch", udid, app] + arguments)
-        guard output.status == 0 else {
-            throw SimToolError("simctl launch \(app) failed: \(output.stderrString.trimmingCharacters(in: .whitespacesAndNewlines))")
-        }
     }
 
     private func check(_ result: CommandResultPayload, action: String) throws {

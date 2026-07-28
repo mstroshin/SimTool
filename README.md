@@ -102,22 +102,64 @@ swift run simtool network snapshot --seconds 2 --limit 50 --json
 Declarative YAML tests in `<project>/.simtool/tests/` drive the simulator
 through the served accessibility tree: every step polls until its target
 appears, so tests need no sleeps. Each run is recorded as a reviewable test
-session — timestamped steps and a screen recording — shown in the web
-viewer's **Tests** tab, which also lists the tests with Run buttons and live
-progress. Finished sessions play their recording in place of the live
+session — timestamped steps, a screen recording and the run's evidence — shown
+in the web viewer's **Tests** tab, which also lists the tests with Run buttons
+and live progress. Finished sessions play their recording in place of the live
 stream, and clicking a step seeks the video to that moment.
 
 ```bash
 swift run simtool test run .simtool/tests/my-test.yml
+swift run simtool test run .simtool/tests/my-test.yml --json --repeat 5
 swift run simtool test list --json
 ```
 
-See `simtool test run --help` for the test file format (steps, environment,
-setup commands, launch arguments). Sessions persist under
-`<project>/.simtool/test-sessions/<session-id>/` (`session.json` plus
-`video.mp4`) alongside the project the server was started for, and survive
-server restarts. One session is active at a time; sessions can also be
-driven directly over HTTP via `POST /api/v1/tests/start|entries|stop`.
+A test carries everything needed to stage its scenario, so it reproduces on
+another machine: `launch:` (a named profile from `.simtool/config.yml` plus
+inline argv/env), `reset:` (UserDefaults, data container, permission alerts,
+locale) and `mocks:` (backend answers, applied before launch). See
+`simtool test run --help` for the full file format.
+
+#### Verdicts
+
+A test that declares `kind: bug` or `kind: feature` and marks the assertions
+that check its claim with `criterion:` gets a verdict instead of a bare
+pass/fail — and a distinct exit code, so an agent can branch without parsing
+output:
+
+| Verdict | Exit | `kind: bug` | `kind: feature` |
+|---|---|---|---|
+| `satisfied` | 0 | not reproduced / fixed | feature confirmed |
+| `unsatisfied` | 1 | bug reproduced | feature not confirmed |
+| `inconclusive` | 2 | the run never reached a criterion | same |
+| `infra` | 3 | the run cannot be trusted | same |
+
+The point of the split is that a run which fell over while staging the scenario
+proves nothing: reporting it as "the bug reproduces" sends someone to fix the
+wrong thing. `infra` covers a run whose staging silently did not happen — a
+`strict:` mock that never intercepted a call, an app that never picked up its
+mock rules, a `reset:` that failed — and is never reported as a pass.
+
+A `bug` run stops at the first unmet criterion; a `feature` run reports every
+criterion from one run. Tests with no `kind:` keep the old behaviour (0 or 1).
+`--repeat N` runs the test N times and reports how many runs held the claim,
+because an intermittent defect that passes once looks fixed.
+
+#### Evidence
+
+Sessions persist under `<project>/.simtool/test-sessions/<session-id>/`
+alongside the project the server was started for, and survive server restarts.
+Besides `session.json` and `video.mp4`, a run writes what explains it — the
+runner arms the log capture itself and scopes it to its own launches:
+`logs.jsonl`, `network.jsonl` (with `mocked` and the rule id per event),
+`state.jsonl`, `mocks.json` (what each declared rule actually did) and a
+screenshot plus visible-element dump at the point of failure. `--evidence
+none|failure|full` controls how much; `full` also captures every step.
+`session.json` additionally records provenance: an inline copy of the test, the
+app's bundle id and version, the device and runtime, the simtool version, and
+the commit.
+
+One session is active at a time; sessions can also be driven directly over HTTP
+via `POST /api/v1/tests/start|entries|stop`.
 
 `ax tree` and `ax find` omit the bulky raw AXe payload by default; pass `--raw`
 (or `?raw=1` on `/api/v1/ax/tree` and `/api/v1/ax/find`) to include it. For the
@@ -368,7 +410,24 @@ deeplinks:
     url: myapp://items/42
   - name: Settings
     url: myapp://settings?section=general
+profiles:                           # optional named launch recipes for tests
+  staging-account1:
+    arguments: [-UITesting, -Environment, staging, -AutoLogin, "${ACCOUNT1}"]
+    env: { SOME_FLAG: "1" }         # exported to the app as SIMCTL_CHILD_*
+    # deeplink: myapp://home        # opened once the app is running
 ```
+
+A test refers to a profile by name (`launch: { profile: staging-account1 }`), so
+the app-specific arguments — accounts, environment switches, a UI-testing master
+switch — stay in the project config and out of every test file. `${VAR}` is read
+from the environment when the test runs, which keeps credentials out of both
+files; an unset variable fails the run rather than expanding to nothing.
+
+`simulator:` is also the default device for **every** command, not just
+`run`/`serve`/`open`. With several simulators booted and neither `--device` nor a
+config to go by, commands fail instead of picking one: on a machine running
+parallel checkouts, guessing means driving another one's simulator, where taps
+land elsewhere and the accessibility tree merely looks stale.
 
 Relative `workspace`/`project`/`derivedDataPath` paths resolve against the config
 file's directory.
@@ -460,8 +519,15 @@ POST /api/v1/logs/capture
 GET /api/v1/logs/capture?since=<cursor>&limit=500
 POST /api/v1/logs/capture/stop
 GET /api/v1/network?seconds=2&limit=200
+GET /api/v1/mocks
+GET /api/v1/mocks/ack
 GET /api/v1/screenshot?maxDim=800
 ```
+
+`mocks/ack` reports the server's mock-rule generation and the newest one an app
+has confirmed applying (learned from its poll). A run that declares `mocks:`
+waits for the two to meet before its first step — otherwise the app can still be
+answering from the real backend while the test believes it is mocked.
 
 `screenshot` returns the full-resolution PNG by default; `maxDim` scales it so
 the longest edge fits the given pixel size — agents reading the screen pay for

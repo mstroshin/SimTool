@@ -1016,7 +1016,9 @@ public enum SimulatorAppLifecycleClient {
         return SimulatorAppProcessStepSummary(name: "simctl launch", output: output)
     }
 
-    private static func isValidEnvironmentKey(_ key: String) -> Bool {
+    /// Internal rather than private: the project-config loader validates
+    /// `profiles[].env` keys against the same rule the CLI's `--env` uses.
+    static func isValidEnvironmentKey(_ key: String) -> Bool {
         guard !key.isEmpty else { return false }
         for scalar in key.unicodeScalars {
             let value = scalar.value

@@ -123,8 +123,22 @@ public struct ServerConfigPayload: Codable, Equatable, Sendable {
     public var metrics: StreamMetricsPayload
     /// Default app bundle identifier for log capture, when the server was started with one.
     public var logApp: String?
+    /// Absolute path of the project's `test-sessions` directory. A run writes
+    /// its evidence files straight into the session directory, and both sides
+    /// are always on the same machine, so the path is the cheapest contract —
+    /// no evidence upload endpoint, no absolute path baked into the artifact.
+    public var testSessionsPath: String?
 
-    public init(device: String, udid: String, width: Int, height: Int, stream: StreamPaths, metrics: StreamMetricsPayload, logApp: String? = nil) {
+    public init(
+        device: String,
+        udid: String,
+        width: Int,
+        height: Int,
+        stream: StreamPaths,
+        metrics: StreamMetricsPayload,
+        logApp: String? = nil,
+        testSessionsPath: String? = nil
+    ) {
         self.device = device
         self.udid = udid
         self.width = width
@@ -132,7 +146,26 @@ public struct ServerConfigPayload: Codable, Equatable, Sendable {
         self.stream = stream
         self.metrics = metrics
         self.logApp = logApp
+        self.testSessionsPath = testSessionsPath
     }
+}
+
+/// Where the mock-rule handshake stands: the server's current generation, and
+/// the newest one an app has confirmed applying. A run that declares mocks waits
+/// for the two to meet before its first step — otherwise the app can still
+/// answer from the real backend while the test believes it is mocked.
+public struct MockAcknowledgementPayload: Codable, Equatable, Sendable {
+    public var generation: Int
+    public var acknowledged: Int?
+    public var lastPollAt: Date?
+
+    public init(generation: Int, acknowledged: Int? = nil, lastPollAt: Date? = nil) {
+        self.generation = generation
+        self.acknowledged = acknowledged
+        self.lastPollAt = lastPollAt
+    }
+
+    public var isApplied: Bool { (acknowledged ?? -1) >= generation }
 }
 
 public struct ServerStatusPayload: Codable, Equatable, Sendable {

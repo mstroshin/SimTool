@@ -137,6 +137,84 @@ final class ProjectConfigLoaderTests: XCTestCase {
         XCTAssertEqual(config.appFacingServerURL, "http://127.0.0.1:4500")
     }
 
+    func testLaunchProfilesParse() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let yaml = """
+        simulator: iPhone 16 Pro
+        bundleId: com.example.MyApp
+        build:
+          workspace: App.xcworkspace
+          scheme: App
+        profiles:
+          staging-account1:
+            arguments: [-UITesting, -Environment, staging, -AutoLogin, "${ACCOUNT1}", -Code, 1234]
+            env: { SOME_FLAG: 1, OTHER: "yes" }
+            deeplink: myapp://home
+          empty-profile: {}
+        """
+        try writeConfig(yaml, in: root)
+
+        let config = try ProjectConfigLoader.load(startDirectory: root)
+        // Sorted by name so listings and error hints are stable.
+        XCTAssertEqual(config.profiles.map(\.name), ["empty-profile", "staging-account1"])
+
+        let profile = try config.profile(named: "staging-account1")
+        // Numbers and booleans keep their literal text: argv is text.
+        XCTAssertEqual(
+            profile.arguments,
+            ["-UITesting", "-Environment", "staging", "-AutoLogin", "${ACCOUNT1}", "-Code", "1234"]
+        )
+        XCTAssertEqual(profile.environment, ["SOME_FLAG": "1", "OTHER": "yes"])
+        XCTAssertEqual(profile.deeplink, "myapp://home")
+        XCTAssertTrue(config.profiles.first { $0.name == "empty-profile" }?.arguments.isEmpty == true)
+    }
+
+    /// A test naming a profile that does not exist must say so — launching with
+    /// no arguments at all would silently test the wrong thing.
+    func testUnknownProfileListsAvailableOnes() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try writeConfig("""
+        simulator: iPhone 16 Pro
+        bundleId: com.example.MyApp
+        build:
+          workspace: App.xcworkspace
+          scheme: App
+        profiles:
+          staging:
+            arguments: [-UITesting]
+        """, in: root)
+
+        let config = try ProjectConfigLoader.load(startDirectory: root)
+        XCTAssertThrowsError(try config.profile(named: "production")) { error in
+            // Read `message` rather than interpolating: reflecting a struct
+            // escapes the quotes around the profile name.
+            let message = (error as? SimToolError)?.message ?? "\(error)"
+            XCTAssertTrue(message.contains("Unknown launch profile 'production'"), message)
+            XCTAssertTrue(message.contains("Available: staging"), message)
+        }
+    }
+
+    func testInvalidProfileEnvironmentKeyThrows() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try writeConfig("""
+        simulator: iPhone 16 Pro
+        bundleId: com.example.MyApp
+        build:
+          workspace: App.xcworkspace
+          scheme: App
+        profiles:
+          staging:
+            env: { "BAD-KEY": 1 }
+        """, in: root)
+
+        XCTAssertThrowsError(try ProjectConfigLoader.load(startDirectory: root)) { error in
+            XCTAssertTrue("\(error)".contains("invalid `env` key"))
+        }
+    }
+
     func testMissingRequiredFieldThrows() throws {
         try assertLoadThrows("""
         bundleId: com.example.MyApp

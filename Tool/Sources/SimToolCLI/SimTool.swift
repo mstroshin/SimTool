@@ -7,11 +7,16 @@ import SimToolCore
 import SimToolNetworkLogger
 import SimToolServer
 
+/// Core owns the model; the CLI-only ability to parse one from a flag is added
+/// here so SimToolCore stays free of an ArgumentParser dependency.
+extension TestEvidenceLevel: ExpressibleByArgument {}
+
 @main
 struct SimTool: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "simtool",
         abstract: "Stream and automate Apple Simulators.",
+        version: SimToolVersion.current,
         subcommands: [
             Serve.self,
             Devices.self,
@@ -215,7 +220,7 @@ extension Input {
         @OptionGroup var common: CommonJSON
 
         func run() async throws {
-            let device = try await SimulatorDeviceClient.resolve(device)
+            let device = try await resolveConfiguredDevice(device)
             let output = try await SimulatorInputClient.tap(deviceUDID: device.udid, x: x, y: y, id: id, label: label)
             try emitCommandResult(output, json: common.json)
         }
@@ -236,7 +241,7 @@ extension Input {
         @OptionGroup var common: CommonJSON
 
         func run() async throws {
-            let device = try await SimulatorDeviceClient.resolve(device)
+            let device = try await resolveConfiguredDevice(device)
             let output = try await SimulatorInputClient.longPress(
                 deviceUDID: device.udid,
                 x: x,
@@ -257,7 +262,7 @@ extension Input {
         @OptionGroup var common: CommonJSON
 
         func run() async throws {
-            let device = try await SimulatorDeviceClient.resolve(device)
+            let device = try await resolveConfiguredDevice(device)
             let output = try await SimulatorInputClient.typeText(text, deviceUDID: device.udid)
             try emitCommandResult(output, json: common.json)
         }
@@ -275,7 +280,7 @@ extension Input {
         @OptionGroup var common: CommonJSON
 
         func run() async throws {
-            let device = try await SimulatorDeviceClient.resolve(device)
+            let device = try await resolveConfiguredDevice(device)
             let output = try await SimulatorInputClient.swipe(
                 deviceUDID: device.udid,
                 startX: startX,
@@ -296,7 +301,7 @@ extension Input {
         @OptionGroup var common: CommonJSON
 
         func run() async throws {
-            let device = try await SimulatorDeviceClient.resolve(device)
+            let device = try await resolveConfiguredDevice(device)
             let output = if name.lowercased() == "home" {
                 try await ProcessRunner.runXcrun(["simctl", "launch", device.udid, "com.apple.springboard"])
             } else {
@@ -336,7 +341,7 @@ extension AX {
         @OptionGroup var common: CommonJSON
 
         func run() async throws {
-            let device = try await SimulatorDeviceClient.resolve(device)
+            let device = try await resolveConfiguredDevice(device)
             if flat {
                 let tree = try await SimulatorAccessibilityClient.normalizedTree(deviceUDID: device.udid)
                 try printJSON(SimulatorAccessibilityClient.flatten(tree, labeledOnly: labeled))
@@ -359,7 +364,7 @@ extension AX {
         @OptionGroup var common: CommonJSON
 
         func run() async throws {
-            let device = try await SimulatorDeviceClient.resolve(device)
+            let device = try await resolveConfiguredDevice(device)
             let payload = try await SimulatorAccessibilityClient.findNodes(needle: needle, deviceUDID: device.udid, includeRaw: raw)
             if common.json {
                 try printJSON(payload)
@@ -395,7 +400,7 @@ extension Network {
         @OptionGroup var common: CommonJSON
 
         func run() async throws {
-            let device = try await SimulatorDeviceClient.resolve(device)
+            let device = try await resolveConfiguredDevice(device)
             let payload = try await SimulatorNetworkClient.snapshot(deviceUDID: device.udid, seconds: seconds, limit: limit)
             if common.json {
                 try printJSON(payload)
@@ -437,7 +442,7 @@ extension Network {
                 guard let app, !app.isEmpty else {
                     throw SimToolError("App-container mode requires --app <bundle-id>; pass --server, --host, or --port for live server mode.")
                 }
-                let device = try await SimulatorDeviceClient.resolve(device)
+                let device = try await resolveConfiguredDevice(device)
                 payload = try await SimulatorNetworkLoggerClient.events(
                     deviceUDID: device.udid,
                     appBundleID: app,
@@ -646,7 +651,7 @@ extension Logs {
         }
 
         func run() async throws {
-            let device = try await SimulatorDeviceClient.resolve(device)
+            let device = try await resolveConfiguredDevice(device)
             if captureStdout {
                 try await runCapture(deviceUDID: device.udid)
             } else {
@@ -773,6 +778,19 @@ private func liveStatusForwarder(
     return { relay.send($0) }
 }
 
+/// Resolves the simulator a command should drive, defaulting to the project's
+/// configured one. Every command that takes `--device` goes through here, so a
+/// checkout with a `simulator:` never has to repeat it — and a machine with
+/// several booted simulators gets an error instead of a coin flip.
+///
+/// A config that exists but does not parse is an error worth surfacing: silently
+/// falling back to "first booted" is how a command ends up driving the wrong
+/// simulator.
+func resolveConfiguredDevice(_ value: String?) async throws -> SimulatorDevice {
+    let configured = try ProjectConfigLoader.loadIfPresent()?.simulator
+    return try await SimulatorDeviceClient.resolve(value, configuredSimulator: configured)
+}
+
 func resolveSimulatorWithProgress(_ nameOrUDID: String?) async throws -> SimulatorDevice {
     let (noora, _) = interactiveProgressTerminal()
     return try await noora.progressStep(
@@ -781,7 +799,7 @@ func resolveSimulatorWithProgress(_ nameOrUDID: String?) async throws -> Simulat
         errorMessage: "Failed to resolve simulator",
         showSpinner: true
     ) { _ in
-        try await SimulatorDeviceClient.resolve(nameOrUDID)
+        try await resolveConfiguredDevice(nameOrUDID)
     }
 }
 
@@ -920,7 +938,7 @@ extension AppCommand {
             let selection = try buildOptions.selection()
             let buildCache = SimulatorAppBuildCache(simtoolDirectory: SimToolDirectory.resolve())
             if common.json {
-                let resolved = try await SimulatorDeviceClient.resolve(device)
+                let resolved = try await resolveConfiguredDevice(device)
                 let payload = try await SimulatorAppLifecycleClient.launch(
                     selection: selection,
                     device: resolved,
@@ -967,7 +985,7 @@ extension AppCommand {
         @OptionGroup var common: CommonJSON
 
         func run() async throws {
-            let resolved = try await SimulatorDeviceClient.resolve(device)
+            let resolved = try await resolveConfiguredDevice(device)
             let payload = try await SimulatorAppLifecycleClient.test(
                 selection: try testOptions.selection(),
                 device: resolved
@@ -1017,13 +1035,29 @@ struct TestCommand: AsyncParsableCommand {
             Test file format:
 
               name: Settings flow
+              kind: feature                   # optional; bug | feature — makes this a verifying test
+              reference: "PROJ-42"            # optional; free-form, stored but never parsed
               description: >                  # optional; what is tested and the expected result
                 Opening Settings displays the preferences screen and
                 lets the user enable an option.
-              app: com.example.demo           # optional; relaunches the app before steps
+              app: com.example.demo           # optional; relaunched before steps
+              launch:                         # optional; how to launch it
+                profile: staging-account1     #   a `profiles:` entry from .simtool/config.yml
+                arguments: [-UITesting]       #   appended after the profile's arguments
+                env: { SOME_FLAG: "1" }       #   exported to the app as SIMCTL_CHILD_*
+                deeplink: myapp://settings    #   opened once the app is running
+              reset:                          # optional; simulator state, before launch
+                defaults: true                #   clear the app's UserDefaults
+                container: false              #   wipe the app's data container
+                permissions: { att: deny, location: grant }
+                locale: es_ES                 #   as -AppleLocale / -AppleLanguages
+                language: es
+              mocks:                          # optional; backend answers, before launch
+                - method: "*/GetSettings"     #   gRPC full-method or HTTP path, `*` globs
+                  body: { items: [] }         #   YAML or a JSON string (or `error: unavailable`)
+                  strict: true                #   must fire, or the run is reported as infra
               setup:                          # optional; shell commands run before launch,
                 - xcrun simctl spawn {udid} … #   {udid}/{app} substituted, failures recorded
-              launchArguments: [-UITesting, "1"]
               timeout: 10                     # default per-step wait, seconds
               steps:
                 - waitFor: { id: settingsButton, timeout: 20 }
@@ -1031,7 +1065,7 @@ struct TestCommand: AsyncParsableCommand {
                 - longPress: { id: optionToggle, duration: 1.5 }
                 - type: "hello"
                 - swipe: up
-                - assertVisible: { text: "Welcome" }
+                - assertVisible: { text: "Welcome", criterion: AC-1 }
                 - assertHidden: { label: "Loading" }
                 - wait: 2
 
@@ -1039,6 +1073,24 @@ struct TestCommand: AsyncParsableCommand {
             disappears for assertHidden), so tests need no explicit sleeps.
             Setup commands reset persisted state; their exit codes are recorded
             in the session but never fail the test.
+
+            An assertion carrying `criterion:` is part of the claim the test
+            verifies; every other step merely stages it. That is what lets a run
+            report a verdict instead of a bare pass/fail:
+
+              satisfied    (exit 0)  every criterion held — the bug does not
+                                     reproduce, or the feature is confirmed
+              unsatisfied  (exit 1)  a criterion did not hold — the bug
+                                     reproduces, or the feature is not done
+              inconclusive (exit 2)  the run never reached a criterion, so the
+                                     claim was not tested; fix the test
+              infra        (exit 3)  the run cannot be trusted: a strict mock
+                                     never fired, the app never picked up its
+                                     mock rules, `reset:` failed
+
+            A `kind: bug` run stops at the first unmet criterion; a
+            `kind: feature` run reports all of them. Tests with no `kind:` keep
+            the old behaviour: pass (0) or fail (1).
             """
         )
 
@@ -1051,101 +1103,118 @@ struct TestCommand: AsyncParsableCommand {
         @Flag(help: "Run the test without recording a session.")
         var noSession = false
 
+        @Option(help: "Evidence to collect alongside the run: none, failure or full.")
+        var evidence: TestEvidenceLevel = .failure
+
+        @Option(name: .customLong("repeat"), help: "Run the test this many times; the report says how many runs held the claim.")
+        var repeatCount: Int = 1
+
+        @Option(help: "Path to .simtool/config.yml, for launch profiles and the default app.")
+        var config: String?
+
         @OptionGroup var serverOptions: ServerOptions
         @OptionGroup var common: CommonJSON
 
         func run() async throws {
+            guard repeatCount >= 1 else { throw SimToolError("--repeat must be at least 1.") }
             let testURL = URL(fileURLWithPath: test)
             let parsed = try TestDefinitionParser.load(contentsOf: testURL)
             if !common.json, let description = parsed.description {
                 print(description)
             }
             let client = try serverOptions.client()
-            let config = try await client.config()
+            let projectConfig = try ProjectConfigLoader.loadIfPresent(explicitPath: config)
 
-            var session: TestSession?
-            if !noSession {
-                session = try await client.startTestSession(
-                    title: title ?? parsed.name ?? testURL.deletingPathExtension().lastPathComponent
+            var results: [TestRunResult] = []
+            for attempt in 1...repeatCount {
+                if repeatCount > 1, !common.json {
+                    print("Run \(attempt)/\(repeatCount)")
+                }
+                let executor = TestRunExecutor(
+                    client: client,
+                    options: TestRunOptions(
+                        title: title,
+                        testFile: testURL,
+                        recordSession: !noSession,
+                        evidence: evidence,
+                        profiles: projectConfig?.profiles ?? [],
+                        defaultApp: projectConfig?.bundleId,
+                        appFacingServerURL: projectConfig?.appFacingServerURL,
+                        projectRoot: projectConfig?.simtoolDirectory.deletingLastPathComponent()
+                    )
                 )
-            }
-            let recording = session != nil
-            let echo = !common.json
-
-            let runner = TestRunner(
-                client: client,
-                udid: config.udid,
-                screenWidth: Double(config.width),
-                screenHeight: Double(config.height),
-                defaultTimeout: parsed.stepTimeout,
-                record: { text in
-                    if echo { print(text) }
-                    if recording {
-                        _ = try? await client.appendTestSessionEntry(TestSessionEntryRequest(kind: .step, text: text))
-                    }
+                if !common.json {
+                    executor.onNarration = { print($0) }
                 }
-            )
-
-            do {
-                try await runner.run(parsed)
-            } catch {
-                let failure = (error as? SimToolError)?.message ?? error.localizedDescription
-                var artifacts: [String] = []
-                if let path = await saveScreenshot(client: client, testURL: testURL) {
-                    artifacts.append("Screenshot: \(path)")
-                }
-                if recording {
-                    let screen = await runner.visibleSummary()
-                    _ = try? await client.appendTestSessionEntry(TestSessionEntryRequest(
-                        kind: .log,
-                        logs: [failure] + artifacts + (screen.isEmpty ? [] : ["On screen:"] + screen)
-                    ))
-                    session = try? await client.stopTestSession(status: .failed)
-                }
-                if common.json {
-                    if let session {
-                        try printJSON(session)
-                    } else {
-                        try printJSON(["status": "failed", "error": failure])
-                    }
-                } else {
-                    let takeaways = artifacts + (session.map { ["Session: \($0.id)"] } ?? [])
-                    makeNoora().error(.alert(
-                        "Test failed: \(failure)",
-                        takeaways: takeaways.map { TerminalText("\($0)") }
-                    ))
-                }
-                throw ExitCode(1)
+                results.append(await executor.run(parsed))
+                // A run that cannot be trusted will not become trustworthy by
+                // being repeated, and repeating a reproduction that already
+                // succeeded only costs minutes.
+                if let last = results.last, last.verdict == .infra || last.cancelled { break }
             }
 
-            if recording {
-                session = try await client.stopTestSession(status: .passed)
-            }
+            let report = Self.report(for: results, test: parsed, file: testURL)
             if common.json {
-                if let session {
-                    try printJSON(session)
-                } else {
-                    try printJSON(["status": "passed"])
-                }
+                try printJSON(report)
             } else {
-                makeNoora().success(.alert(
-                    "Test passed",
-                    takeaways: (session.map { ["Session: \($0.id)", "Steps and video recorded"] } ?? [])
-                        .map { TerminalText("\($0)") }
-                ))
+                Self.printReport(report)
             }
+            let code = report.verdict.exitCode
+            if code != 0 { throw ExitCode(code) }
         }
 
-        private func saveScreenshot(client: SimToolClient, testURL: URL) async -> String? {
-            guard let data = try? await client.screenshot() else { return nil }
-            let name = testURL.deletingPathExtension().lastPathComponent
-            let path = FileManager.default.temporaryDirectory
-                .appendingPathComponent("simtool-test-\(name)-\(Int(Date().timeIntervalSince1970)).png")
-            do {
-                try data.write(to: path)
-                return path.path
-            } catch {
-                return nil
+        /// Aggregates one or more runs. The worst answer wins, in the order
+        /// infra → unsatisfied → inconclusive → satisfied: a run that saw the
+        /// claim fail outranks one that learned nothing, and an untrustworthy
+        /// run outranks both.
+        static func report(for results: [TestRunResult], test: TestDefinition, file: URL) -> TestRunReport {
+            let ranking: [TestVerdict] = [.infra, .unsatisfied, .inconclusive, .satisfied]
+            let verdict = ranking.first { verdict in results.contains { $0.verdict == verdict } } ?? .inconclusive
+            let last = results.last
+            let satisfiedRuns = results.filter { $0.verdict == .satisfied }.count
+            return TestRunReport(
+                verdict: verdict,
+                headline: verdict.headline(for: test.kind),
+                kind: test.kind,
+                reference: test.reference,
+                name: test.name,
+                file: file.lastPathComponent,
+                criteria: last?.criteria ?? [],
+                failures: results.flatMap(\.failures),
+                mocks: last?.mocks ?? [],
+                completedSteps: last?.completedSteps ?? 0,
+                totalSteps: test.steps.count,
+                runs: results.count > 1 ? TestRunReport.Runs(total: results.count, satisfied: satisfiedRuns) : nil,
+                sessions: results.compactMap { $0.session?.id },
+                evidence: last?.evidence ?? [],
+                infraReason: results.compactMap(\.infraReason).first
+            )
+        }
+
+        static func printReport(_ report: TestRunReport) {
+            var takeaways: [String] = []
+            if let runs = report.runs {
+                takeaways.append("Claim held in \(runs.satisfied)/\(runs.total) runs" + (runs.isFlaky ? " — intermittent" : ""))
+            }
+            for criterion in report.criteria {
+                let mark = switch criterion.status {
+                case .met: "✓"
+                case .unmet: "✗"
+                case .unchecked: "–"
+                }
+                let detail = criterion.detail.map { ": \($0)" } ?? ""
+                takeaways.append("\(mark) \(criterion.label)\(detail)")
+            }
+            if let reason = report.infraReason { takeaways.append(reason) }
+            for mock in report.mocks where mock.hits == 0 {
+                takeaways.append("Mock \(mock.method) never fired")
+            }
+            takeaways += report.sessions.map { "Session: \($0)" }
+            let rendered = takeaways.map { TerminalText("\($0)") }
+            if report.verdict == .satisfied {
+                makeNoora().success(.alert(TerminalText("\(report.headline)"), takeaways: rendered))
+            } else {
+                makeNoora().error(.alert(TerminalText("\(report.headline)"), takeaways: rendered))
             }
         }
     }
@@ -1164,8 +1233,10 @@ struct TestCommand: AsyncParsableCommand {
                 makeNoora().info("No test sessions recorded.")
             } else {
                 makeNoora().table(
-                    headers: ["Session", "Title", "Status", "Entries"],
-                    rows: payload.sessions.map { [$0.id, $0.title, $0.status.rawValue, "\($0.entries.count)"] }
+                    headers: ["Session", "Title", "Status", "Verdict", "Entries"],
+                    rows: payload.sessions.map {
+                        [$0.id, $0.title, $0.status.rawValue, $0.verdict?.rawValue ?? "—", "\($0.entries.count)"]
+                    }
                 )
             }
         }
@@ -1236,7 +1307,10 @@ struct Serve: AsyncParsableCommand {
             testsRoot: SimToolDirectory.testsDirectory(in: SimToolDirectory.resolve()),
             printSessionJSON: common.json || detachedChild,
             openBrowser: shouldOpenBrowser(webRequested: web, json: common.json, detachedChild: detachedChild),
-            sessionId: sessionId
+            sessionId: sessionId,
+            // Re-read rather than thread through ServeParameters: the viewer
+            // needs the launch profiles, which are not part of the serve target.
+            projectConfig: try? ProjectConfigLoader.loadIfPresent(explicitPath: config)
         )
     }
 
@@ -1330,7 +1404,8 @@ func runViewer(
     testsRoot: URL,
     printSessionJSON: Bool,
     openBrowser: Bool,
-    sessionId: String?
+    sessionId: String?,
+    projectConfig: ProjectConfig? = nil
 ) async throws {
     let id = sessionId ?? UUID().uuidString
     // Power down simulators left booted by earlier SimTool runs that were
@@ -1343,7 +1418,12 @@ func runViewer(
         captureEnabled: true,
         defaultLogApp: defaultLogApp,
         testSessionsRoot: testSessionsRoot,
-        testsRoot: testsRoot
+        testsRoot: testsRoot,
+        // Web-triggered runs stage a scenario exactly like the CLI does, so the
+        // server needs the same launch profiles and logger wiring.
+        profiles: projectConfig?.profiles ?? [],
+        appFacingServerURL: projectConfig?.appFacingServerURL,
+        projectRoot: projectConfig?.simtoolDirectory.deletingLastPathComponent()
     )
     let server = try await startStreamServer(config: config)
     let session = SessionInfo(
@@ -1577,7 +1657,8 @@ struct Run: AsyncParsableCommand {
             testsRoot: SimToolDirectory.testsDirectory(in: projectConfig.simtoolDirectory),
             printSessionJSON: common.json,
             openBrowser: shouldOpenBrowser(webRequested: web, json: common.json, detachedChild: false),
-            sessionId: nil
+            sessionId: nil,
+            projectConfig: projectConfig
         )
     }
 }

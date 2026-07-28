@@ -112,7 +112,11 @@ public struct SimToolClient: Sendable {
     }
 
     public func startTestSession(title: String, video: Bool = true) async throws -> TestSession {
-        try await sendJSON(TestSession.self, path: "tests/start", payload: TestSessionStartRequest(title: title, video: video), method: "POST")
+        try await startTestSession(TestSessionStartRequest(title: title, video: video))
+    }
+
+    public func startTestSession(_ request: TestSessionStartRequest) async throws -> TestSession {
+        try await sendJSON(TestSession.self, path: "tests/start", payload: request, method: "POST")
     }
 
     public func appendTestSessionEntry(_ entry: TestSessionEntryRequest) async throws -> TestSession {
@@ -120,7 +124,11 @@ public struct SimToolClient: Sendable {
     }
 
     public func stopTestSession(status: TestSessionStatus) async throws -> TestSession {
-        try await sendJSON(TestSession.self, path: "tests/stop", payload: TestSessionStopRequest(status: status), method: "POST")
+        try await stopTestSession(TestSessionStopRequest(status: status))
+    }
+
+    public func stopTestSession(_ request: TestSessionStopRequest) async throws -> TestSession {
+        try await sendJSON(TestSession.self, path: "tests/stop", payload: request, method: "POST")
     }
 
     public func testSessions() async throws -> TestSessionListPayload {
@@ -176,6 +184,10 @@ public struct SimToolClient: Sendable {
             return try await getJSON(MockRuleListPayload.self, url: components.url!)
         }
         return try await getJSON(MockRuleListPayload.self, path: "mocks")
+    }
+
+    public func mockAcknowledgement() async throws -> MockAcknowledgementPayload {
+        try await getJSON(MockAcknowledgementPayload.self, path: "mocks/ack")
     }
 
     @discardableResult

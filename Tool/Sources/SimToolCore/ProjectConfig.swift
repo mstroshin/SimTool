@@ -67,6 +67,10 @@ public struct ProjectConfig: Codable, Equatable, Sendable {
     public var build: Build
     public var server: Server
     public var deeplinks: [Deeplink]
+    /// Named launch recipes (`profiles:`) a test refers to by name, sorted by
+    /// name. They keep app-specific argv — accounts, environment switches, an
+    /// app's UI-testing master switch — out of the tests themselves.
+    public var profiles: [LaunchProfile]
     /// Whether `simtool run` enables the SimTool network logger for the launched
     /// app (`SIMTOOL_NETWORK_LOGGER` + `SIMTOOL_SERVER_URL`). Defaults to true;
     /// inert for apps that do not link SimToolNetworkLogger.
@@ -80,7 +84,7 @@ public struct ProjectConfig: Codable, Equatable, Sendable {
     public var sourcePath: String
 
     private enum CodingKeys: String, CodingKey {
-        case simulator, bundleId, build, server, deeplinks, networkLogger, stateLogger
+        case simulator, bundleId, build, server, deeplinks, profiles, networkLogger, stateLogger
     }
 
     public init(
@@ -89,6 +93,7 @@ public struct ProjectConfig: Codable, Equatable, Sendable {
         build: Build,
         server: Server = Server(),
         deeplinks: [Deeplink] = [],
+        profiles: [LaunchProfile] = [],
         networkLogger: Bool = true,
         stateLogger: Bool = true,
         sourcePath: String = ""
@@ -98,6 +103,7 @@ public struct ProjectConfig: Codable, Equatable, Sendable {
         self.build = build
         self.server = server
         self.deeplinks = deeplinks
+        self.profiles = profiles
         self.networkLogger = networkLogger
         self.stateLogger = stateLogger
         self.sourcePath = sourcePath
@@ -110,6 +116,7 @@ public struct ProjectConfig: Codable, Equatable, Sendable {
         build = try container.decode(Build.self, forKey: .build)
         server = try container.decodeIfPresent(Server.self, forKey: .server) ?? Server()
         deeplinks = try container.decodeIfPresent([Deeplink].self, forKey: .deeplinks) ?? []
+        profiles = try container.decodeIfPresent([LaunchProfile].self, forKey: .profiles) ?? []
         networkLogger = try container.decodeIfPresent(Bool.self, forKey: .networkLogger) ?? true
         stateLogger = try container.decodeIfPresent(Bool.self, forKey: .stateLogger) ?? true
         sourcePath = ""
@@ -132,6 +139,20 @@ public struct ProjectConfig: Codable, Equatable, Sendable {
 
     public func buildSelection() throws -> SimulatorAppBuildSelection {
         try build.selection()
+    }
+
+    /// Looks up a configured launch profile by name, throwing a clear error that
+    /// lists the available names on a miss — a test naming a profile that does
+    /// not exist must say so, not launch with no arguments at all.
+    public func profile(named name: String) throws -> LaunchProfile {
+        guard let match = profiles.first(where: { $0.name == name }) else {
+            let available = profiles.map(\.name).joined(separator: ", ")
+            let hint = available.isEmpty
+                ? " No `profiles:` are defined in \(ProjectConfigLoader.displayPath)."
+                : " Available: \(available)."
+            throw SimToolError("Unknown launch profile '\(name)'.\(hint)")
+        }
+        return match
     }
 
     /// Looks up a configured deeplink by name, throwing a clear error that lists
@@ -214,6 +235,14 @@ public enum ProjectConfigTemplate {
         # deeplinks:                      # optional; open by name with `simtool open <name>`
         #   - name: Home
         #     url: myapp://home
+
+        # profiles:                       # optional; named launch recipes a test refers to
+        #   staging-account1:             #   by name (`launch: {profile: staging-account1}`)
+        #     arguments: [-UITesting, -Environment, staging, -AutoLogin, "${ACCOUNT1}"]
+        #     env: { SOME_FLAG: "1" }     #   exported to the app as SIMCTL_CHILD_*
+        #     # deeplink: myapp://home    #   opened once the app is running
+        #                                 # ${VAR} is read from your shell, so accounts and
+        #                                 # secrets stay out of the file.
 
         """
     }
@@ -337,6 +366,27 @@ public enum ProjectConfigLoader {
             deeplinks.append(ProjectConfig.Deeplink(name: name, url: url))
         }
 
+        // Profiles arrive as a YAML mapping, whose order is not preserved by
+        // decoding; sort by name so listings and error hints are stable.
+        var profiles: [LaunchProfile] = []
+        for (name, rawProfile) in (raw.profiles ?? [:]).sorted(by: { $0.key < $1.key }) {
+            let trimmedName = name.trimmed
+            guard !trimmedName.isEmpty else {
+                throw SimToolError("A launch profile in \(fileName) has an empty name.")
+            }
+            let deeplink = rawProfile.deeplink?.trimmed
+            let profile = LaunchProfile(
+                name: trimmedName,
+                arguments: (rawProfile.arguments ?? []).map(\.text),
+                environment: (rawProfile.env ?? [:]).reduce(into: [:]) { $0[$1.key] = $1.value.text },
+                deeplink: deeplink?.isEmpty == false ? deeplink : nil
+            )
+            for key in profile.environment.keys where !SimulatorAppLifecycleClient.isValidEnvironmentKey(key) {
+                throw SimToolError("Launch profile '\(trimmedName)' in \(fileName) has an invalid `env` key '\(key)'. Keys may contain only letters, numbers and underscores.")
+            }
+            profiles.append(profile)
+        }
+
         let host = raw.server?.host?.trimmed
         let server = ProjectConfig.Server(
             host: (host?.isEmpty == false ? host! : "127.0.0.1"),
@@ -349,6 +399,7 @@ public enum ProjectConfigLoader {
             build: build,
             server: server,
             deeplinks: deeplinks,
+            profiles: profiles,
             networkLogger: raw.networkLogger ?? true,
             stateLogger: raw.stateLogger ?? true,
             sourcePath: sourceURL.path
@@ -371,6 +422,7 @@ struct RawProjectConfig: Decodable {
     var build: RawBuild?
     var server: RawServer?
     var deeplinks: [RawDeeplink]?
+    var profiles: [String: RawLaunchProfile]?
     var networkLogger: Bool?
     var stateLogger: Bool?
 
@@ -390,6 +442,15 @@ struct RawProjectConfig: Decodable {
     struct RawDeeplink: Decodable {
         var name: String?
         var url: String?
+    }
+
+    /// `arguments` and `env` values decode through `YAMLScalarText` because argv
+    /// is text: `-RemoteConfig some_flag true` must not lose `true` to YAML's
+    /// Bool typing.
+    struct RawLaunchProfile: Decodable {
+        var arguments: [YAMLScalarText]?
+        var env: [String: YAMLScalarText]?
+        var deeplink: String?
     }
 }
 

@@ -40,6 +40,44 @@ public enum SimulatorDeviceClient {
         try selectDevice(value, from: await listDevices())
     }
 
+    /// Resolves the device a command should drive: the explicit selector if the
+    /// caller gave one, otherwise the project's configured `simulator:`, and
+    /// only then whatever is booted.
+    ///
+    /// The last case refuses to guess between several booted simulators.
+    /// Guessing is worse than failing here: on a machine running parallel
+    /// worktrees, the taps land in another checkout's session and the
+    /// accessibility tree that comes back merely looks stale, which is a very
+    /// expensive thing to debug.
+    public static func resolve(
+        _ value: String?,
+        configuredSimulator: String?
+    ) async throws -> SimulatorDevice {
+        try selectDevice(value, configured: configuredSimulator, from: await listDevices())
+    }
+
+    static func selectDevice(
+        _ value: String?,
+        configured: String?,
+        from devices: [SimulatorDevice]
+    ) throws -> SimulatorDevice {
+        let explicit = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !explicit.isEmpty { return try selectDevice(explicit, from: devices) }
+        let fromConfig = configured?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !fromConfig.isEmpty { return try selectDevice(fromConfig, from: devices) }
+
+        let booted = devices.filter { $0.state == "Booted" && $0.isAvailable }
+        if booted.count > 1 {
+            let names = booted.map { "\($0.name) (\($0.udid))" }.joined(separator: ", ")
+            throw SimToolError("""
+            Several simulators are booted and none was selected: \(names). \
+            Pass --device <udid-or-name>, set `simulator:` in \(ProjectConfigLoader.displayPath), \
+            or pass --device booted to accept whichever is first.
+            """)
+        }
+        return try selectDevice(nil, from: devices)
+    }
+
     /// Picks the device a `value` selects from `devices`. `value` is a UDID, a
     /// (substring) name, the literal "booted", or nil/empty — the last two both
     /// select the first booted+available device, so `simulator: booted` in the

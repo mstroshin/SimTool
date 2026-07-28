@@ -117,6 +117,68 @@ final class TestSessionStoreTests: XCTestCase {
         )
     }
 
+    /// Sessions recorded before the verdict fields existed must keep listing:
+    /// `.simtool/test-sessions` outlives releases, and a decode failure would
+    /// silently drop a directory from the History tab.
+    func testDecodesSessionRecordedBeforeVerdictFieldsExisted() throws {
+        let json = """
+        {
+          "id": "2026-06-12-1430-a1b2c3",
+          "title": "Old run",
+          "deviceUdid": "UDID",
+          "deviceName": "iPhone 16 Pro",
+          "startedAt": "2026-06-12T14:30:00Z",
+          "status": "passed",
+          "entries": [{ "kind": "step", "at": "2026-06-12T14:30:01Z", "text": "✓ 1/1 Tap id \\"a\\"" }]
+        }
+        """
+        let session = try JSON.decoder.decode(TestSession.self, from: Data(json.utf8))
+        XCTAssertEqual(session.id, "2026-06-12-1430-a1b2c3")
+        XCTAssertEqual(session.status, .passed)
+        XCTAssertNil(session.verdict)
+        XCTAssertNil(session.kind)
+        XCTAssertTrue(session.criteria.isEmpty)
+        XCTAssertTrue(session.mocks.isEmpty)
+        XCTAssertTrue(session.evidence.isEmpty)
+        XCTAssertNil(session.provenance)
+        XCTAssertEqual(session.entries.count, 1)
+        XCTAssertNil(session.entries[0].criterion)
+    }
+
+    func testVerdictAndProvenanceRoundTrip() throws {
+        var session = makeSession()
+        session.kind = .bug
+        session.reference = "reported in chat"
+        session.verdict = .unsatisfied
+        session.criteria = [TestCriterionResult(label: "AC-1", status: .unmet, step: 3, detail: "not visible")]
+        session.mocks = [TestMockOutcome(id: "mock-1", method: "*/GetPromo", hits: 0, strict: true)]
+        session.evidence = ["logs.jsonl", "network.jsonl"]
+        session.provenance = TestRunProvenance(
+            testFile: "MB-1_promo.yml",
+            appBundleId: "com.example.MyApp",
+            appVersion: "1.2.3",
+            deviceName: "iPhone 16 Pro",
+            runtime: "iOS 18.2",
+            simtoolVersion: SimToolVersion.current,
+            launch: ResolvedLaunch(profile: "staging", arguments: ["-AutoLogin", "${ACCOUNT}"])
+        )
+
+        // Compared field by field: dates lose sub-second precision through the
+        // encoder's ISO-8601 strategy, so whole-struct equality would fail on
+        // `startedAt` alone.
+        let decoded = try JSON.decoder.decode(TestSession.self, from: JSON.data(session))
+        XCTAssertEqual(decoded.kind, .bug)
+        XCTAssertEqual(decoded.reference, "reported in chat")
+        XCTAssertEqual(decoded.verdict, .unsatisfied)
+        XCTAssertEqual(decoded.criteria, session.criteria)
+        XCTAssertEqual(decoded.mocks, session.mocks)
+        XCTAssertEqual(decoded.evidence, session.evidence)
+        XCTAssertEqual(decoded.provenance, session.provenance)
+        // The recorded launch keeps `${VAR}` unexpanded: the artifact travels,
+        // the account does not.
+        XCTAssertEqual(decoded.provenance?.launch?.arguments, ["-AutoLogin", "${ACCOUNT}"])
+    }
+
     func testPayloadJSONShape() throws {
         var session = makeSession()
         session.videoError = nil
