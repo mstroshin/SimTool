@@ -254,6 +254,58 @@ final class SimToolCommandSurfaceTests: XCTestCase {
         XCTAssertThrowsError(try TestCommand.Run.parse([]))
     }
 
+    // The check the receiver of a test file hits first: the file refers to an
+    // account it does not define, and nothing on this machine defines it either.
+    func testUnresolvedVariablesNameWhatNothingDefines() {
+        let test = TestDefinition(
+            name: "Tab order",
+            launch: TestLaunch(profile: "staging"),
+            setup: ["echo ${SEED}"],
+            steps: [TestStep(action: .waitFor(TestTarget(kind: .id, query: "Main"), timeout: nil))]
+        )
+        let profiles = [LaunchProfile(name: "staging", arguments: ["-FastLoginPhone", "${ACCOUNT}"])]
+
+        let missing = TestCommand.Run.unresolvedVariables(
+            test: test,
+            profiles: profiles,
+            environment: [:],
+            overrides: [:]
+        )
+
+        XCTAssertEqual(missing, ["ACCOUNT", "SEED"])
+    }
+
+    func testTheTestFileTheEnvironmentAndAnOverrideAllSatisfyAReference() {
+        var test = TestDefinition(
+            launch: TestLaunch(profile: "staging"),
+            steps: [TestStep(action: .waitFor(TestTarget(kind: .id, query: "Main"), timeout: nil))]
+        )
+        test.variables = ["ACCOUNT": "+34600000000"]
+        let profiles = [LaunchProfile(name: "staging", arguments: ["-Phone", "${ACCOUNT}", "-Seed", "${SEED}"])]
+
+        XCTAssertEqual(
+            TestCommand.Run.unresolvedVariables(test: test, profiles: profiles, environment: ["SEED": "7"], overrides: [:]),
+            []
+        )
+        XCTAssertEqual(
+            TestCommand.Run.unresolvedVariables(test: test, profiles: profiles, environment: [:], overrides: ["SEED": "7"]),
+            []
+        )
+    }
+
+    // An exported empty string is not a value: it logs the run in as nobody.
+    func testAnEmptyValueCountsAsUnresolved() {
+        let test = TestDefinition(
+            launch: TestLaunch(arguments: ["-Phone", "${ACCOUNT}"]),
+            steps: [TestStep(action: .waitFor(TestTarget(kind: .id, query: "Main"), timeout: nil))]
+        )
+
+        XCTAssertEqual(
+            TestCommand.Run.unresolvedVariables(test: test, profiles: [], environment: ["ACCOUNT": ""], overrides: [:]),
+            ["ACCOUNT"]
+        )
+    }
+
     func testServeParsesWithoutBuiltInPortAndHostDefaults() throws {
         let command = try Serve.parse([])
         XCTAssertNil(command.device)

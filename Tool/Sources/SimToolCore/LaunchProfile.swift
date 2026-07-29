@@ -70,6 +70,25 @@ public enum LaunchVariables {
         }
         return names
     }
+
+    /// Names referenced where SimTool actually substitutes: the launch it is
+    /// about to perform (profile argv, env values and deeplink, plus the test's
+    /// inline ones) and the setup commands, which receive the variables as their
+    /// shell environment.
+    ///
+    /// Deliberately not a scan of the whole test file: `${…}` inside a mock body
+    /// is literal data the app decodes, not a demand on whoever runs the test.
+    public static func names(in launch: ResolvedLaunch, setup: [String] = []) -> [String] {
+        var found: [String] = []
+        func add(_ text: String) {
+            for name in names(in: text) where !found.contains(name) { found.append(name) }
+        }
+        launch.arguments.forEach(add)
+        for key in launch.environment.keys.sorted() { add(launch.environment[key] ?? "") }
+        if let deeplink = launch.deeplink { add(deeplink) }
+        setup.forEach(add)
+        return found
+    }
 }
 
 /// A named launch recipe from `.simtool/config.yml`: the app-specific launch

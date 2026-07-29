@@ -1135,6 +1135,20 @@ struct TestCommand: AsyncParsableCommand {
             let projectConfig = try ProjectConfigLoader.loadIfPresent(explicitPath: config)
             let testURL = URL(fileURLWithPath: test)
             let parsed = try TestDefinitionParser.load(contentsOf: testURL)
+            let missing = Self.unresolvedVariables(
+                test: parsed,
+                profiles: projectConfig?.profiles ?? [],
+                environment: ProcessInfo.processInfo.environment,
+                overrides: overrides
+            )
+            if !missing.isEmpty {
+                let one = missing.count == 1
+                throw SimToolError("""
+                    This test refers to \(missing.joined(separator: ", ")) without defining \(one ? "it" : "them") — \
+                    usually the account it runs as. Export \(one ? "it" : "them"), pass `--var \(missing[0])=…`, \
+                    or add \(one ? "it" : "them") under `variables:` in the test.
+                    """)
+            }
             if !common.json, let description = parsed.description {
                 print(description)
             }
@@ -1188,6 +1202,27 @@ struct TestCommand: AsyncParsableCommand {
                 overrides[String(entry[entry.startIndex..<separator])] = String(entry[entry.index(after: separator)...])
             }
             return overrides
+        }
+
+        /// `${VAR}` the test refers to and nothing supplies: not its own
+        /// `variables:`, not the environment, not `--var`.
+        ///
+        /// Checked before the run touches the simulator, because that is where
+        /// this fails for the person a test was handed to: `expand` would report
+        /// it too, but only after the boot, the reset and the mocks — and a name
+        /// referenced only from `setup:` would never be reported at all, since
+        /// the shell expands an unset variable to nothing.
+        static func unresolvedVariables(
+            test: TestDefinition,
+            profiles: [LaunchProfile],
+            environment: [String: String],
+            overrides: [String: String]
+        ) -> [String] {
+            let profile = profiles.first { $0.name == test.launch.profile }
+            let launch = test.launch.resolved(profile: profile)
+            let available = test.resolvedVariables(environment: environment, overrides: overrides)
+            return LaunchVariables.names(in: launch, setup: test.setup)
+                .filter { (available[$0] ?? "").isEmpty }
         }
 
         /// Aggregates one or more runs. The worst answer wins, in the order
