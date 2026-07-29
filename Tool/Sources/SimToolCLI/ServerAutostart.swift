@@ -30,9 +30,28 @@ enum ServerAutostart {
             """)
     }
 
+    /// Whether a failed spawn is worth another port. Only a port somebody has
+    /// taken since the probe is: the child boots the simulator before it binds,
+    /// so that window is wide enough to lose. Every other failure — no booted
+    /// simulator, bad parameters — fails the same way on the next port.
+    ///
+    /// Note the inverted logic versus `freePort`: there, a probe that cannot answer
+    /// counts as occupied (be pessimistic before taking a port); here, a probe that
+    /// cannot answer counts as *not* a collision, so the real error surfaces instead
+    /// of being buried under two more spawns.
+    static func lostThePort(
+        _ port: UInt16,
+        probe: (UInt16) async throws -> [Int32] = { try await PortReclaimer.listeningPIDs(port: $0) }
+    ) async -> Bool {
+        !((try? await probe(port)) ?? []).isEmpty
+    }
+
     /// The session of a server started here, on a port nobody was listening on.
-    /// Retries on the next port when the bind loses a race with something that
-    /// grabbed it between the probe and the spawn.
+    /// Retries on the next port only when the port was taken in a race between the
+    /// probe and the spawn. The child boots the simulator before it binds, making
+    /// that window real and worth recovering from. Other failures — no booted
+    /// simulator, bad parameters — fail the same way on the next port, so they are
+    /// not retried.
     static func start(parameters: ServeParameters, json: Bool) async throws -> SessionInfo {
         var attempt = parameters
         var lastError: Error?
@@ -49,7 +68,7 @@ enum ServerAutostart {
                 return session
             } catch {
                 lastError = error
-                guard attempt.port < UInt16.max else { break }
+                guard await lostThePort(attempt.port), attempt.port < UInt16.max else { throw error }
                 attempt.port += 1
             }
         }

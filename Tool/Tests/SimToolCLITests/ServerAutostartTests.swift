@@ -42,4 +42,22 @@ final class ServerAutostartTests: XCTestCase {
 
         XCTAssertEqual(port, 3201)
     }
+
+    func testLostThePortReturnsTrueWhenThePortHasAListener() async {
+        let lost = await ServerAutostart.lostThePort(3200) { _ in [4242] }
+
+        XCTAssertTrue(lost)
+    }
+
+    func testLostThePortReturnsFalseWhenThePortIsEmpty() async {
+        let lost = await ServerAutostart.lostThePort(3200) { _ in [] }
+
+        XCTAssertFalse(lost)
+    }
+
+    func testLostThePortReturnsFalseWhenTheProbeCannotAnswer() async {
+        let lost = await ServerAutostart.lostThePort(3200) { _ in throw SimToolError("lsof failed") }
+
+        XCTAssertFalse(lost)
+    }
 }
