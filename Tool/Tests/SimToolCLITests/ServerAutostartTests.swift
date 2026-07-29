@@ -60,4 +60,33 @@ final class ServerAutostartTests: XCTestCase {
 
         XCTAssertFalse(lost)
     }
+
+    // The autostarted child derives its sessions root from its own working
+    // directory unless told otherwise; omitting `--config` here is what let a
+    // run's evidence land in the wrong project.
+    func testDetachedServerArgumentsForwardConfig() {
+        let args = detachedServerArguments(
+            parameters: ServeParameters(device: nil, host: "127.0.0.1", port: 3200),
+            sessionId: "abc",
+            app: nil,
+            verbose: false,
+            reclaimPort: false,
+            config: "/Users/x/Workspace/app/.simtool/config.yml"
+        )
+
+        XCTAssertEqual(Array(args.suffix(2)), ["--config", "/Users/x/Workspace/app/.simtool/config.yml"])
+    }
+
+    func testDetachedServerArgumentsOmitConfigWhenNoneWasGiven() {
+        let args = detachedServerArguments(
+            parameters: ServeParameters(device: nil, host: "127.0.0.1", port: 3200),
+            sessionId: "abc",
+            app: nil,
+            verbose: false,
+            reclaimPort: false,
+            config: nil
+        )
+
+        XCTAssertFalse(args.contains("--config"))
+    }
 }

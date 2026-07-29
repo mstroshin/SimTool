@@ -137,6 +137,21 @@ public struct ProjectConfig: Codable, Equatable, Sendable {
         URL(fileURLWithPath: sourcePath).deletingLastPathComponent()
     }
 
+    /// The project checkout's own path, for comparing "is this the same
+    /// project" across a session file, a freshly loaded config, and a
+    /// recorded test run — computed once here so the three call sites cannot
+    /// drift into comparing different strings for the same directory.
+    ///
+    /// Resolves symlinks rather than merely standardizing: on macOS `/tmp` is
+    /// itself a symlink to `/private/tmp`, so a checkout reached through one
+    /// spelling must still match a session recorded through the other.
+    /// Resolving both sides of a comparison can only turn a false "foreign
+    /// project" into a correct match — it cannot break a match that already
+    /// held.
+    public var projectRoot: String {
+        simtoolDirectory.deletingLastPathComponent().resolvingSymlinksInPath().path
+    }
+
     public func buildSelection() throws -> SimulatorAppBuildSelection {
         try build.selection()
     }

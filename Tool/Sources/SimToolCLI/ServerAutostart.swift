@@ -52,7 +52,7 @@ enum ServerAutostart {
     /// that window real and worth recovering from. Other failures — no booted
     /// simulator, bad parameters — fail the same way on the next port, so they are
     /// not retried.
-    static func start(parameters: ServeParameters, json: Bool) async throws -> SessionInfo {
+    static func start(parameters: ServeParameters, config: String?, json: Bool) async throws -> SessionInfo {
         var attempt = parameters
         var lastError: Error?
         for _ in 0..<3 {
@@ -62,7 +62,8 @@ enum ServerAutostart {
                     parameters: attempt,
                     app: nil,
                     verbose: false,
-                    reclaimPort: false
+                    reclaimPort: false,
+                    config: config
                 )
                 emitNote("No SimTool server running — started one on \(session.url)", json: json)
                 return session

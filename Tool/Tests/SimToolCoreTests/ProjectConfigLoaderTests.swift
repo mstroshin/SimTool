@@ -32,6 +32,26 @@ final class ProjectConfigLoaderTests: XCTestCase {
         XCTAssertEqual(config.simtoolDirectory.path, root.appendingPathComponent(".simtool").standardizedFileURL.path)
     }
 
+    // `projectRoot` resolves symlinks, not merely `standardizedFileURL`: on
+    // macOS `/tmp` is itself a symlink to `/private/tmp`, so the same project
+    // reached through either spelling must compare equal — otherwise it looks
+    // foreign depending on which one happened to be current.
+    func testProjectRootResolvesSymlinksSoTmpAndPrivateTmpAgree() throws {
+        let name = "ProjectConfigLoaderTests-\(UUID().uuidString)"
+        let viaTmp = URL(fileURLWithPath: "/tmp", isDirectory: true).appendingPathComponent(name, isDirectory: true)
+        try FileManager.default.createDirectory(at: viaTmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: viaTmp) }
+        try writeConfig(minimalYAML, in: viaTmp)
+        // Same directory, reached the way it would be if `/tmp` were not
+        // resolved — the two must still name one project, not two.
+        let viaPrivateTmp = URL(fileURLWithPath: "/private/tmp", isDirectory: true).appendingPathComponent(name, isDirectory: true)
+
+        let reachedThroughTmp = try ProjectConfigLoader.load(startDirectory: viaTmp)
+        let reachedThroughPrivateTmp = try ProjectConfigLoader.load(startDirectory: viaPrivateTmp)
+
+        XCTAssertEqual(reachedThroughTmp.projectRoot, reachedThroughPrivateTmp.projectRoot)
+    }
+
     func testDiscoversConfigInAncestorDirectory() throws {
         let root = try makeTempDirectory()
         defer { try? FileManager.default.removeItem(at: root) }

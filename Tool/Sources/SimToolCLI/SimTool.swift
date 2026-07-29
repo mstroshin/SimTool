@@ -1017,20 +1017,33 @@ struct TestCommand: AsyncParsableCommand {
 
         /// The newest running server that serves `projectRoot`, if any. Compared
         /// as paths rather than by device or port: what makes a server the wrong
-        /// one is the project it records sessions into.
-        static func reusableSession(from sessions: [SessionInfo], projectRoot: String?) -> SessionInfo? {
+        /// one is the project it records sessions into. A session whose process
+        /// is gone does not count as running — its file can outlive it — so the
+        /// liveness check is as much a part of "reusable" as the project match.
+        static func reusableSession(
+            from sessions: [SessionInfo],
+            projectRoot: String?,
+            isAlive: (Int32) -> Bool = { isProcessAlive($0) }
+        ) -> SessionInfo? {
             sessions
-                .filter { $0.projectRoot == projectRoot }
+                .filter { $0.projectRoot == projectRoot && isAlive($0.pid) }
                 .max { $0.startedAt < $1.startedAt }
         }
 
         /// The client a run should use, plus the server this process started for
         /// it. Nil means the server was already there: it belongs to someone
         /// else and must outlive the run.
-        func resolveClient(config: ProjectConfig?, json: Bool) async throws -> (SimToolClient, SessionInfo?) {
+        func resolveClient(config: ProjectConfig?, configPath: String?, json: Bool) async throws -> (SimToolClient, SessionInfo?) {
             if let explicit = try explicitClient() { return (explicit, nil) }
-            let projectRoot = config?.simtoolDirectory.deletingLastPathComponent().standardizedFileURL.path
+            let projectRoot = config?.projectRoot
             let sessions = (try? SessionStore.shared.list()) ?? []
+            // A session file outlives the process that wrote it — a SIGKILL or a
+            // machine crash leaves it behind — and the next run should not have
+            // to be told to `simtool kill` a server that is not actually there
+            // before it can autostart its own.
+            for stale in sessions where stale.projectRoot == projectRoot && !isProcessAlive(stale.pid) {
+                SessionStore.shared.remove(stale.sessionId)
+            }
             if let mine = Self.reusableSession(from: sessions, projectRoot: projectRoot),
                let url = URL(string: mine.api) {
                 return (SimToolClient(baseURL: url), nil)
@@ -1043,6 +1056,7 @@ struct TestCommand: AsyncParsableCommand {
             }
             let started = try await ServerAutostart.start(
                 parameters: ServeParameters.resolve(device: nil, host: nil, port: nil, config: config),
+                config: configPath,
                 json: json
             )
             guard let url = URL(string: started.api) else {
@@ -1182,7 +1196,7 @@ struct TestCommand: AsyncParsableCommand {
             if !common.json, let description = parsed.description {
                 print(description)
             }
-            let (client, ownedServer) = try await serverOptions.resolveClient(config: projectConfig, json: common.json)
+            let (client, ownedServer) = try await serverOptions.resolveClient(config: projectConfig, configPath: config, json: common.json)
             var stopOwnedServer: (@Sendable () async -> Void)?
             if let ownedServer {
                 let json = common.json
@@ -1245,7 +1259,7 @@ struct TestCommand: AsyncParsableCommand {
                         profiles: projectConfig?.profiles ?? [],
                         defaultApp: projectConfig?.bundleId,
                         appFacingServerURL: projectConfig?.appFacingServerURL,
-                        projectRoot: projectConfig?.simtoolDirectory.deletingLastPathComponent(),
+                        projectRoot: projectConfig.map { URL(fileURLWithPath: $0.projectRoot) },
                         variableOverrides: overrides
                     )
                 )
@@ -1444,20 +1458,28 @@ struct Serve: AsyncParsableCommand {
             let resolved = try await resolveSimulatorWithProgress(parameters.device)
             booted = try await bootSimulatorWithProgress(resolved)
         }
+        // Re-read rather than thread through ServeParameters: the viewer needs
+        // the launch profiles, which are not part of the serve target.
+        //
+        // Anchored on the config's own directory, not `SimToolDirectory.resolve()`
+        // (which walks up from the process's working directory): a detached
+        // child inherits its parent's cwd, not the directory `--config` named,
+        // so deriving the sessions root from cwd here is what let a run's
+        // evidence land in a project this invocation never named.
+        let projectConfig = try? ProjectConfigLoader.loadIfPresent(explicitPath: config)
+        let simtoolDirectory = projectConfig?.simtoolDirectory ?? SimToolDirectory.resolve()
         try await runViewer(
             device: booted,
             host: parameters.host,
             port: parameters.port,
             defaultLogApp: app.flatMap { $0.isEmpty ? nil : $0 },
-            testSessionsRoot: SimToolDirectory.testSessionsDirectory(in: SimToolDirectory.resolve()),
-            testsRoot: SimToolDirectory.testsDirectory(in: SimToolDirectory.resolve()),
+            testSessionsRoot: SimToolDirectory.testSessionsDirectory(in: simtoolDirectory),
+            testsRoot: SimToolDirectory.testsDirectory(in: simtoolDirectory),
             printSessionJSON: common.json || detachedChild,
             openBrowser: shouldOpenBrowser(webRequested: web, json: common.json, detachedChild: detachedChild),
             sessionId: sessionId,
             reclaimPort: !noReclaim,
-            // Re-read rather than thread through ServeParameters: the viewer
-            // needs the launch profiles, which are not part of the serve target.
-            projectConfig: try? ProjectConfigLoader.loadIfPresent(explicitPath: config)
+            projectConfig: projectConfig
         )
     }
 
@@ -1500,6 +1522,31 @@ struct ServeParameters: Equatable {
     }
 }
 
+/// The child `serve --detached-child` invocation's argv. Factored out of
+/// `launchDetachedServer` so what gets spawned is exactly what a test can
+/// assert about — a `Process`'s arguments are not otherwise observable
+/// without actually running it.
+///
+/// Without `--config`, the child derives its sessions root from its own
+/// working directory rather than the config the caller resolved everything
+/// else from, and the two disagree about where a run's evidence lives.
+func detachedServerArguments(
+    parameters: ServeParameters,
+    sessionId: String,
+    app: String?,
+    verbose: Bool,
+    reclaimPort: Bool,
+    config: String?
+) -> [String] {
+    var args = ["serve", "--port", "\(parameters.port)", "--host", parameters.host, "--session-id", sessionId, "--detached-child"]
+    if let device = parameters.device { args += ["--device", device] }
+    if let app, !app.isEmpty { args += ["--app", app] }
+    if verbose { args += ["--verbose"] }
+    if !reclaimPort { args.append("--no-reclaim") }
+    if let config, !config.isEmpty { args += ["--config", config] }
+    return args
+}
+
 /// Spawns a background `serve --detached-child` process (inheriting this
 /// process's environment, including the `SIMCTL_CHILD_` logger exports) and
 /// waits for it to report a session.
@@ -1511,7 +1558,8 @@ func launchDetachedServer(
     parameters: ServeParameters,
     app: String?,
     verbose: Bool,
-    reclaimPort: Bool = true
+    reclaimPort: Bool = true,
+    config: String? = nil
 ) async throws -> SessionInfo {
     let id = UUID().uuidString
     try SessionStore.shared.ensureRoot()
@@ -1519,12 +1567,14 @@ func launchDetachedServer(
     let executable = Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])
     let process = Process()
     process.executableURL = executable
-    var args = ["serve", "--port", "\(parameters.port)", "--host", parameters.host, "--session-id", id, "--detached-child"]
-    if let device = parameters.device { args += ["--device", device] }
-    if let app, !app.isEmpty { args += ["--app", app] }
-    if verbose { args += ["--verbose"] }
-    if !reclaimPort { args.append("--no-reclaim") }
-    process.arguments = args
+    process.arguments = detachedServerArguments(
+        parameters: parameters,
+        sessionId: id,
+        app: app,
+        verbose: verbose,
+        reclaimPort: reclaimPort,
+        config: config
+    )
     let log = try FileHandle(forWritingTo: logPath.creatingFileIfNeeded())
     process.standardOutput = log
     process.standardError = log
@@ -1606,7 +1656,7 @@ func runViewer(
         api: server.apiURL,
         startedAt: Date(),
         bootedDevices: BootedSimulatorRegistry.shared.all(),
-        projectRoot: projectConfig?.simtoolDirectory.deletingLastPathComponent().standardizedFileURL.path
+        projectRoot: projectConfig?.projectRoot
     )
     try SessionStore.shared.write(session)
     installSignalTrap(sessionId: id, server: server)

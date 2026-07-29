@@ -348,10 +348,15 @@ final class SimToolCommandSurfaceTests: XCTestCase {
     // A server belonging to another checkout drives another simulator and writes
     // its sessions into another project. Reusing it would report a verdict about
     // the wrong app.
+    //
+    // `isAlive` is forced to `true` throughout this group: these tests assert
+    // the project-matching logic only, and must not depend on what process
+    // pid 1 (the fixture's stand-in pid) happens to be on the machine running
+    // the suite.
     func testAServerFromAnotherProjectIsNotReused() {
         let sessions = [session(id: "other", project: "/Users/x/Workspace/other", at: 200)]
 
-        XCTAssertNil(TestCommand.ServerOptions.reusableSession(from: sessions, projectRoot: "/Users/x/Workspace/mine"))
+        XCTAssertNil(TestCommand.ServerOptions.reusableSession(from: sessions, projectRoot: "/Users/x/Workspace/mine", isAlive: { _ in true }))
     }
 
     func testTheNewestSessionOfThisProjectIsReused() {
@@ -362,7 +367,7 @@ final class SimToolCommandSurfaceTests: XCTestCase {
         ]
 
         XCTAssertEqual(
-            TestCommand.ServerOptions.reusableSession(from: sessions, projectRoot: "/Users/x/Workspace/mine")?.sessionId,
+            TestCommand.ServerOptions.reusableSession(from: sessions, projectRoot: "/Users/x/Workspace/mine", isAlive: { _ in true })?.sessionId,
             "mine-new"
         )
     }
@@ -372,8 +377,16 @@ final class SimToolCommandSurfaceTests: XCTestCase {
     func testOutsideAnyProjectASessionWithoutOneIsReused() {
         let sessions = [session(id: "rootless", project: nil, at: 100)]
 
-        XCTAssertEqual(TestCommand.ServerOptions.reusableSession(from: sessions, projectRoot: nil)?.sessionId, "rootless")
-        XCTAssertNil(TestCommand.ServerOptions.reusableSession(from: sessions, projectRoot: "/Users/x/Workspace/mine"))
+        XCTAssertEqual(TestCommand.ServerOptions.reusableSession(from: sessions, projectRoot: nil, isAlive: { _ in true })?.sessionId, "rootless")
+        XCTAssertNil(TestCommand.ServerOptions.reusableSession(from: sessions, projectRoot: "/Users/x/Workspace/mine", isAlive: { _ in true }))
+    }
+
+    // A session file outlives the process that wrote it — SIGKILL, a crash — and
+    // that stale file must not be handed back as if the server were still there.
+    func testASessionWhoseProcessIsGoneIsNotReused() {
+        let sessions = [session(id: "dead", project: "/Users/x/Workspace/mine", at: 200)]
+
+        XCTAssertNil(TestCommand.ServerOptions.reusableSession(from: sessions, projectRoot: "/Users/x/Workspace/mine", isAlive: { _ in false }))
     }
 
     private func session(id: String, project: String?, at seconds: TimeInterval) -> SessionInfo {
