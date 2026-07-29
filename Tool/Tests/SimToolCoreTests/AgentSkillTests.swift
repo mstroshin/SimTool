@@ -90,6 +90,14 @@ final class AgentSkillTests: XCTestCase {
                 )
             }
         }
+
+        // The metadata above can't tell two agents apart from one collapsed
+        // write: read both files back to prove each agent got its own copy.
+        for agent in ["claude", "codex"] {
+            let destination = project.appendingPathComponent(".\(agent)/skills/simtool/SKILL.md")
+            XCTAssertEqual(try String(contentsOf: destination, encoding: .utf8), AgentSkill.simtool.markdown, "\(agent) got the wrong document")
+        }
+        XCTAssertEqual(Set(installed.map(\.path)).count, installed.count, "every installation must be its own file")
     }
 
     func testNoneScopeAndNoAgentsWriteNothing() throws {
