@@ -423,6 +423,36 @@ final class SimToolCommandSurfaceTests: XCTestCase {
         XCTAssertNil(TestCommand.ServerOptions.reusableSession(from: sessions, projectRoot: "/Users/x/Workspace/mine", isAlive: { _ in false }))
     }
 
+    // The "another project's server is running" note must name an actual
+    // server: a different, live project — never our own (a dead session of
+    // ours reads as "another project" once it stops being reusable) and never
+    // a session whose process is already gone.
+    func testAnotherProjectsLiveSessionIsWorthNaming() {
+        let sessions = [session(id: "other", project: "/Users/x/Workspace/other", at: 200)]
+
+        XCTAssertEqual(
+            TestCommand.ServerOptions.foreignRunningSession(from: sessions, projectRoot: "/Users/x/Workspace/mine", isAlive: { _ in true })?.projectRoot,
+            "/Users/x/Workspace/other"
+        )
+    }
+
+    // Before finding 1's liveness check, a dead session of our own project fell
+    // through to here (reusableSession had already failed to match it) and was
+    // reported as "another project" — which it plainly is not.
+    func testADeadSessionOfOurOwnProjectIsNotWorthNaming() {
+        let sessions = [session(id: "mine-dead", project: "/Users/x/Workspace/mine", at: 200)]
+
+        XCTAssertNil(TestCommand.ServerOptions.foreignRunningSession(from: sessions, projectRoot: "/Users/x/Workspace/mine", isAlive: { _ in false }))
+    }
+
+    // A dead session of a genuinely different project is just as un-newsworthy:
+    // nothing is actually running there either.
+    func testADeadSessionOfAnotherProjectIsNotWorthNaming() {
+        let sessions = [session(id: "other-dead", project: "/Users/x/Workspace/other", at: 200)]
+
+        XCTAssertNil(TestCommand.ServerOptions.foreignRunningSession(from: sessions, projectRoot: "/Users/x/Workspace/mine", isAlive: { _ in false }))
+    }
+
     private func session(id: String, project: String?, at seconds: TimeInterval) -> SessionInfo {
         SessionInfo(
             sessionId: id,

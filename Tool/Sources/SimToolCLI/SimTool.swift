@@ -1030,6 +1030,22 @@ struct TestCommand: AsyncParsableCommand {
                 .max { $0.startedAt < $1.startedAt }
         }
 
+        /// The newest session belonging to a different, still-running project —
+        /// the one worth telling the caller about before autostarting a second
+        /// server. Same notion of "running" as `reusableSession`: a dead
+        /// session, ours or someone else's, names no server actually there, so
+        /// a match here can only be a project other than ours that is genuinely
+        /// up. (A session with no `projectRoot` at all — started outside any
+        /// project — still produces no name to report; that gap predates this
+        /// function and is not this fix's to close.)
+        static func foreignRunningSession(
+            from sessions: [SessionInfo],
+            projectRoot: String?,
+            isAlive: (Int32) -> Bool = { isProcessAlive($0) }
+        ) -> SessionInfo? {
+            sessions.first { $0.projectRoot != projectRoot && isAlive($0.pid) }
+        }
+
         /// The client a run should use, plus the server this process started for
         /// it. Nil means the server was already there: it belongs to someone
         /// else and must outlive the run.
@@ -1051,7 +1067,7 @@ struct TestCommand: AsyncParsableCommand {
             // Worth saying out loud: the reason a server is running and this run
             // still starts one is not obvious, and the alternative — driving
             // another checkout's simulator — is worse than a second server.
-            if let foreign = sessions.first, let elsewhere = foreign.projectRoot {
+            if let elsewhere = Self.foreignRunningSession(from: sessions, projectRoot: projectRoot)?.projectRoot {
                 emitNote("A SimTool server is running for another project (\(elsewhere)) — starting one for this project instead.", json: json)
             }
             let started = try await ServerAutostart.start(
