@@ -307,7 +307,10 @@ extension AgentSkill {
           wrong method path is indistinguishable from a working mock.
         - **Find the method path** by triggering the call once and reading
           `simtool network events --protocol grpc`.
-        - **Unary gRPC only.** Streaming RPCs and plain HTTP are not mocked.
+        - **The bundled interceptor answers unary gRPC.** Whether plain HTTP or a
+          streaming RPC gets intercepted depends on the consuming app's own
+          interceptor, not this repository — check `simtool network events` to see
+          what it actually saw.
         - **A `body:` that does not decode** into the method's typed response is
           ignored, and the real backend answers — a malformed mock never breaks the app,
           it just silently stops being a mock. `strict: true` is what turns that into a
