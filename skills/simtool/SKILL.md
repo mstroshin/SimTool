@@ -1,6 +1,6 @@
 ---
 name: simtool
-description: Build an iOS app and install + launch it on an iOS Simulator via the simtool CLI, then drive/inspect it (input, accessibility tree, logs, network, browser viewer), mock backend gRPC responses (simtool mock — return errors/custom bodies/delays for corner-case testing), and write or run declarative YAML UI tests (see the `simtool-test` skill for writing one and for the bug/feature loop). Optionally launch with the app's own debug/test arguments — environment switch, jump to a screen, clean state, locale, deeplink, config overrides. Use when asked to "build and run", "запусти app", "rebuild", "build-only", "build & run", "compile and run", to run/launch with specific arguments, switch environment, open a specific screen on launch, reset app state, rebuild after code changes, tap/type/swipe on the simulator, read the accessibility tree, tail app logs (OSLog/stdout), inspect network traffic, mock/stub a backend response ("замокай ответ", "верни ошибку на этот запрос", "подмени ответ"), open the live simulator viewer, run or write a YAML UI test ("запусти ui тест", "прогони тест", "напиши тест для экрана"), or review recorded test sessions.
+description: Build an iOS app and install + launch it on an iOS Simulator via the simtool CLI, then drive and inspect it (input, accessibility tree, logs, network, viewer), mock backend gRPC responses (simtool mock — errors, custom bodies, delays for corner cases), and run declarative YAML UI tests (simtool test run; writing one, and the bug/feature loop, belong to the `simtool-test` skill). Optionally launch with the app's own debug/test arguments — environment switch, jump to a screen, clean state, locale, deeplink, config overrides. Use when asked to "build and run", "запусти app", "rebuild", "пересобери", "build-only", to launch with specific arguments, switch environment, open a screen on launch, reset app state, tap/type/swipe on the simulator, read the accessibility tree, tail app logs (OSLog/stdout), inspect network traffic, mock a backend response ("замокай ответ", "верни ошибку на этот запрос"), open the live viewer, run a YAML UI test ("запусти ui тест", "прогони тест"), or review recorded test sessions.
 argument-hint: [simtool args like app build / app launch --configuration Debug -- -MyAppFlag …]
 allowed-tools: [Bash, Read, AskUserQuestion]
 ---
@@ -369,8 +369,12 @@ in one step. Flags: `simtool serve --help` / `simtool run --help`.
 
 ## Notes
 
-- simtool boots nothing itself — boot a simulator first (`xcrun simctl boot
-  <udid>` / open Simulator.app) or pass an already-booted device.
+- `simtool app build` / `app launch` boot nothing themselves — boot a simulator
+  first (`xcrun simctl boot <udid>` / open Simulator.app) or pass an
+  already-booted device. `simtool serve` and `simtool run` do boot the simulator
+  named under `simulator:` in `.simtool/config.yml` (which is also why a test run
+  that starts its own server can boot it); with nothing named they use whichever
+  simulator is already booted.
 - Scenarios that talk to a real backend (auto-login, remote config) need the
   device to have network access to it; failures are typically logged and leave
   the regular screen for manual entry.

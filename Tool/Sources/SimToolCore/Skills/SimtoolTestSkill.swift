@@ -6,7 +6,7 @@ extension AgentSkill {
     static let simtoolTestMarkdown = #"""
         ---
         name: simtool-test
-        description: Write a declarative YAML UI test for an iOS app and drive the red→green loop with it — encode a reported bug or an unbuilt feature as a test that asserts the *expected* behaviour, run it with `simtool test run` (whose exit code is the verdict: 0 satisfied, 1 unsatisfied, 2 inconclusive, 3 infra), change the product, and re-run the same file as the regression guard. Covers the test file format (launch profiles, state reset, in-test backend mocks, criteria), finding element ids, reading the evidence a run leaves behind, and handing a test to another developer or agent. Use when asked to reproduce a bug on the simulator, prove a bug exists before fixing it, write a repro test, write a test for acceptance criteria before the feature exists, verify a fix, or share a test — "напиши тест на баг", "воспроизведи баг тестом", "докажи что баг есть", "тест на ожидаемое поведение фичи", "сделай по TDD", "проверь что починилось", "передай тест другому разработчику".
+        description: Write a declarative YAML UI test for an iOS app and drive the red→green loop with it — encode a reported bug or an unbuilt feature as a test that asserts the *expected* behaviour, run it with `simtool test run` (whose exit code is the verdict: 0 satisfied, 1 unsatisfied, 2 inconclusive, 3 infra), change the product, and re-run the same file as the regression guard. Covers the test file format (launch profiles, state reset, in-test backend mocks, criteria), finding element ids, reading the evidence a run leaves behind, and handing a test to another developer or agent. Use when asked to reproduce a bug on the simulator, prove a bug exists before fixing it, write a repro test, write a test for acceptance criteria before the feature exists, verify a fix, or share a test — "напиши тест на баг", "напиши тест для экрана", "воспроизведи баг тестом", "докажи что баг есть", "тест на ожидаемое поведение фичи", "сделай по TDD", "проверь что починилось", "передай тест другому разработчику".
         argument-hint: [a bug report, acceptance criteria, or a path to an existing test]
         allowed-tools: [Bash, Read, Write, Edit, AskUserQuestion]
         ---
@@ -241,7 +241,10 @@ extension AgentSkill {
         ```yaml
         variables: { ACCOUNT: "+34600000000" }
         launch: { profile: staging-account1 }   # its arguments refer to ${ACCOUNT}
-        setup: [simtool app launch … -AutoLogin "$ACCOUNT"]
+        setup:
+          # the app's own arguments go after `--`; without the terminator `app launch`
+          # rejects them as unknown options and the command exits non-zero
+          - simtool app launch --workspace MyApp.xcworkspace --scheme MyApp -- -AutoLogin "$ACCOUNT"
         ```
 
         **A real credential stays in the shell.** Refer to it as `${VAR}` and define it
@@ -264,10 +267,13 @@ extension AgentSkill {
         the run `infra`, never a failing claim.
 
         **`setup:` is the escape hatch for what `reset:` cannot express.** Non-zero
-        exits are recorded in the session and never fail the test, because these
-        commands mostly delete state that may not exist yet. An absolute path or a
-        personal account in there is exactly what stops a test from travelling — keep it
-        to `{udid}` and `{app}`.
+        exits are recorded in the session and never fail the test, because these commands
+        mostly delete state that may not exist yet. The cost of that is on you: a command
+        that fails for a reason you did not intend — a mistyped flag, a missing `--` —
+        stages nothing, and the run carries on against state nobody set up. Read the
+        `Setup n/n (ok)` lines in the run's timeline before trusting a verdict that used
+        `setup:`. An absolute path or a personal account in there is what stops a test
+        from travelling — keep it to `{udid}` and `{app}`.
 
         ## Finding the ids
 
