@@ -190,9 +190,9 @@ anything it leaves to the shell is checked before the simulator is touched, so a
 missing account fails in a second rather than mid-run. `--var NAME=value`
 overrides a value the test does define.
 
-Do not forward the evidence files outside the team: `logs.jsonl` and
-`network.jsonl` hold the real traffic and log output of the account the run used.
-`report.md` says so too.
+Do not forward the evidence files outside the team: `logs.jsonl`,
+`network.jsonl` and `state.jsonl` hold the real traffic and log output of the
+account the run used. `report.md` says so too.
 
 `ax tree` and `ax find` omit the bulky raw AXe payload by default; pass `--raw`
 (or `?raw=1` on `/api/v1/ax/tree` and `/api/v1/ax/find`) to include it. For the
