@@ -1398,11 +1398,7 @@ struct Serve: AsyncParsableCommand {
             verbose: verbose,
             reclaimPort: !noReclaim
         )
-        if common.json {
-            try printJSON(session)
-        } else {
-            makeNoora().success(.alert("SimTool server started", takeaways: ["Open \(session.url)"]))
-        }
+        try reportDetachedSession(session, json: common.json)
     }
 }
 
@@ -1463,6 +1459,18 @@ func launchDetachedServer(
         try await Task.sleep(for: .milliseconds(100))
     }
     throw SimToolError("Detached server did not report a session within 330 seconds. See \(logPath.path)")
+}
+
+/// Reports a session started by `launchDetachedServer`. Its own printing moved
+/// to the caller when the function started returning the session instead, and
+/// two callers need it (`serve --detach` and `run --detach`) — one copy here
+/// keeps their output from drifting apart.
+func reportDetachedSession(_ session: SessionInfo, json: Bool) throws {
+    if json {
+        try printJSON(session)
+    } else {
+        makeNoora().success(.alert("SimTool server started", takeaways: ["Open \(session.url)"]))
+    }
 }
 
 /// The browser viewer is opt-in: it opens only when the user passes `--web`, and
@@ -1730,11 +1738,7 @@ struct Run: AsyncParsableCommand {
                 app: projectConfig.bundleId,
                 verbose: verbose
             )
-            if common.json {
-                try printJSON(session)
-            } else {
-                makeNoora().success(.alert("SimTool server started", takeaways: ["Open \(session.url)"]))
-            }
+            try reportDetachedSession(session, json: common.json)
             return
         }
         try await runViewer(
