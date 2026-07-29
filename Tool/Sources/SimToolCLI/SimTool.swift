@@ -1000,22 +1000,45 @@ struct TestCommand: AsyncParsableCommand {
         @Option(help: "SimTool server URL. Defaults to the latest running session's API.")
         var server: String?
 
+        /// The client `--server` names, or nil when it was not given.
+        private func explicitClient() throws -> SimToolClient? {
+            guard let server, !server.isEmpty else { return nil }
+            guard let url = URL(string: server) else { throw SimToolError("Invalid server URL: \(server)") }
+            return SimToolClient(baseURL: url)
+        }
+
         func client() throws -> SimToolClient {
-            if let server, !server.isEmpty {
-                guard let url = URL(string: server) else { throw SimToolError("Invalid server URL: \(server)") }
-                return SimToolClient(baseURL: url)
-            }
+            if let explicit = try explicitClient() { return explicit }
             guard let session = try SessionStore.shared.latest(), let url = URL(string: session.api) else {
                 throw SimToolError("No running SimTool server found. Start one with `simtool serve` or pass --server.")
             }
             return SimToolClient(baseURL: url)
+        }
+
+        /// The client a run should use, plus the server this process started for
+        /// it. Nil means the server was already there: it belongs to someone
+        /// else and must outlive the run.
+        func resolveClient(config: ProjectConfig?, json: Bool) async throws -> (SimToolClient, SessionInfo?) {
+            if let explicit = try explicitClient() { return (explicit, nil) }
+            if let session = try SessionStore.shared.latest(), let url = URL(string: session.api) {
+                return (SimToolClient(baseURL: url), nil)
+            }
+            let started = try await ServerAutostart.start(
+                parameters: ServeParameters.resolve(device: nil, host: nil, port: nil, config: config),
+                json: json
+            )
+            guard let url = URL(string: started.api) else {
+                await SessionControl.stop(started)
+                throw SimToolError("Started a server but its API URL is unreadable: \(started.api)")
+            }
+            return (SimToolClient(baseURL: url), started)
         }
     }
 
     struct Run: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
             commandName: "run",
-            abstract: "Run a declarative YAML UI test on the served simulator, recorded as a test session.",
+            abstract: "Run a declarative YAML UI test on a simulator, recorded as a test session.",
             discussion: """
             Test file format:
 
@@ -1060,6 +1083,10 @@ struct TestCommand: AsyncParsableCommand {
             disappears for assertHidden), so tests need no explicit sleeps.
             Setup commands reset persisted state; their exit codes are recorded
             in the session but never fail the test.
+
+            A running SimTool server is not a prerequisite: when there is none,
+            the run starts one on a free port and stops it again afterwards. A
+            server that was already running is reused and left alone.
 
             `${VAR}` in a launch profile, in this test's own arguments or in a
             setup command is resolved from `variables:` first, then from the
@@ -1137,38 +1164,35 @@ struct TestCommand: AsyncParsableCommand {
             if !common.json, let description = parsed.description {
                 print(description)
             }
-            let client = try serverOptions.client()
-
-            var results: [TestRunResult] = []
-            for attempt in 1...repeatCount {
-                if repeatCount > 1, !common.json {
-                    print("Run \(attempt)/\(repeatCount)")
+            let (client, ownedServer) = try await serverOptions.resolveClient(config: projectConfig, json: common.json)
+            var stopOwnedServer: (@Sendable () async -> Void)?
+            if let ownedServer {
+                let json = common.json
+                stopOwnedServer = {
+                    await SessionControl.stop(ownedServer)
+                    emitNote("Stopped the server it started.", json: json)
                 }
-                let executor = TestRunExecutor(
-                    client: client,
-                    options: TestRunOptions(
-                        title: title,
-                        testFile: testURL,
-                        recordSession: !noSession,
-                        evidence: evidence,
-                        profiles: projectConfig?.profiles ?? [],
-                        defaultApp: projectConfig?.bundleId,
-                        appFacingServerURL: projectConfig?.appFacingServerURL,
-                        projectRoot: projectConfig?.simtoolDirectory.deletingLastPathComponent(),
-                        variableOverrides: overrides
-                    )
-                )
-                if !common.json {
-                    executor.onNarration = { print($0) }
-                }
-                results.append(await executor.run(parsed))
-                // A run that cannot be trusted will not become trustworthy by
-                // being repeated, and repeating a reproduction that already
-                // succeeded only costs minutes.
-                if let last = results.last, last.verdict == .infra || last.cancelled { break }
+                // Ctrl-C during a run must not leave a server and a simulator
+                // behind that the user never started and cannot see.
+                SignalTrap.shared.installCleanup { await SessionControl.stop(ownedServer) }
             }
 
-            let report = Self.report(for: results, test: parsed, file: testURL)
+            let report: TestRunReport
+            do {
+                report = try await Self.execute(
+                    test: parsed,
+                    file: testURL,
+                    client: client,
+                    projectConfig: projectConfig,
+                    options: self,
+                    overrides: overrides
+                )
+            } catch {
+                await stopOwnedServer?()
+                throw error
+            }
+            await stopOwnedServer?()
+
             if common.json {
                 try printJSON(report)
             } else {
@@ -1178,6 +1202,46 @@ struct TestCommand: AsyncParsableCommand {
             }
             let code = report.verdict.exitCode
             if code != 0 { throw ExitCode(code) }
+        }
+
+        private static func execute(
+            test: TestDefinition,
+            file: URL,
+            client: SimToolClient,
+            projectConfig: ProjectConfig?,
+            options: Run,
+            overrides: [String: String]
+        ) async throws -> TestRunReport {
+            var results: [TestRunResult] = []
+            for attempt in 1...options.repeatCount {
+                if options.repeatCount > 1, !options.common.json {
+                    print("Run \(attempt)/\(options.repeatCount)")
+                }
+                let executor = TestRunExecutor(
+                    client: client,
+                    options: TestRunOptions(
+                        title: options.title,
+                        testFile: file,
+                        recordSession: !options.noSession,
+                        evidence: options.evidence,
+                        profiles: projectConfig?.profiles ?? [],
+                        defaultApp: projectConfig?.bundleId,
+                        appFacingServerURL: projectConfig?.appFacingServerURL,
+                        projectRoot: projectConfig?.simtoolDirectory.deletingLastPathComponent(),
+                        variableOverrides: overrides
+                    )
+                )
+                if !options.common.json {
+                    executor.onNarration = { print($0) }
+                }
+                results.append(await executor.run(test))
+                // A run that cannot be trusted will not become trustworthy by
+                // being repeated, and repeating a reproduction that already
+                // succeeded only costs minutes.
+                if let last = results.last, last.verdict == .infra || last.cancelled { break }
+            }
+
+            return Self.report(for: results, test: test, file: file)
         }
 
         static func parseVariableOverrides(_ raw: [String]) throws -> [String: String] {
