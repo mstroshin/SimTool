@@ -320,6 +320,33 @@ final class TestDefinitionParserTests: XCTestCase {
 
     // MARK: - variables
 
+    /// The simplest form, and the one to reach for first: a test that owns its
+    /// argv writes the account straight into it. `variables:` earns its keep
+    /// only when a *shared* profile has to be parameterised, or when the same
+    /// value is needed in more than one place.
+    func testAnAccountCanBeWrittenStraightIntoTheLaunchArguments() throws {
+        let test = try TestDefinitionParser.parse("""
+        app: com.example.app
+        launch:
+          arguments: [-Environment, stable, -FastLoginPhone, "+52 971 624 9725", -AutoPasscode, "111111"]
+        steps:
+          - wait: 1
+        """)
+
+        let resolved = test.launch.resolved(profile: nil)
+        XCTAssertEqual(
+            resolved.arguments,
+            ["-Environment", "stable", "-FastLoginPhone", "+52 971 624 9725", "-AutoPasscode", "111111"]
+        )
+        // Nothing to substitute, so nothing has to be defined anywhere: an empty
+        // environment resolves it unchanged.
+        XCTAssertEqual(
+            try resolved.resolvingVariables(using: [:], context: "launch").arguments,
+            resolved.arguments
+        )
+        XCTAssertTrue(test.variables.isEmpty)
+    }
+
     func testParsesVariablesAsText() throws {
         let test = try TestDefinitionParser.parse("""
         variables:

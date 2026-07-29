@@ -439,16 +439,28 @@ public enum AgentSkill {
           profile; the environment switches, the master switch and the shape of the
           login arguments live in `profiles:` in `.simtool/config.yml` (see
           [Project options](#project-options)), which refers to accounts as `${VAR}`.
-        - **`variables:` says which account the test runs as.** That is what makes a test
-          reproducible and self-contained: the value is in the file, so the same file
-          reproduces the same run for whoever receives it, with nothing to export.
+        - **Writing the account inline is fine and is the simplest thing that works**:
+          `launch: { arguments: [-Environment, stable, -FastLoginPhone, "+52 971 624 9725"] }`.
+          argv reaches `simctl` as separate elements, so spaces need no escaping. Reach
+          for this when the test carries its own arguments.
+        - **`variables:` is for the two cases inline cannot cover**: parameterising a
+          *shared* profile (the recipe is in `.simtool/config.yml` and must not carry one
+          test's account), and needing the same value twice (typically a `setup:` launch
+          plus the run's own launch) without keeping two copies in sync.
+          ```yaml
+          variables: { ACCOUNT: "+52 971 624 9725" }
+          launch: { profile: staging-account1 }        # its argv refers to ${ACCOUNT}
+          setup: [simtool app launch … -FastLoginPhone "$ACCOUNT"]
+          ```
           Resolution order is `--var NAME=value`, then `variables:`, then the process
           environment — the file beating the environment on purpose, so a stale `export`
-          in someone's shell cannot silently redirect the test to another account. Leave
-          a variable out of `variables:` when its value must stay in the shell (a real
-          credential, anything for a production account); an unresolved `${VAR}` fails
-          the run rather than expanding to nothing. `variables:` also reach `setup:`
-          commands as shell environment.
+          in someone's shell cannot silently redirect the test to another account.
+          `variables:` also reach `setup:` commands as shell environment.
+        - **What belongs in the shell rather than in the file**: a real credential, or
+          anything touching a production account. Refer to it as `${VAR}` and define it
+          nowhere in the test; an unresolved reference fails the run rather than
+          expanding to nothing, and an exported archive then names it as the receiver's
+          to supply.
         - **`reset:` replaces hand-written state-clearing shell** and travels with the
           test. `permissions:` pre-answers the system alerts that would otherwise block
           the drive — `simtool input` cannot reach a system alert, and while one is up

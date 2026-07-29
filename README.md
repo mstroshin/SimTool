@@ -454,15 +454,25 @@ the app-specific arguments — environment switches, a UI-testing master switch,
 the shape of the login arguments — stay in the project config and out of every
 test file.
 
-`${VAR}` in a profile, in a test's own arguments or in a `setup:` command is
-resolved from the test's `variables:` first, then from the process environment,
-and `--var NAME=value` overrides both. Writing the account under `variables:` is
-what makes a test state which account it runs as and travel ready-to-run; the
-file beats the environment on purpose, so a stale `export` cannot silently
-redirect a test to a different account. Leave a variable out of `variables:` when
-its value must stay in the shell. Either way an unresolved `${VAR}` fails the run
-rather than expanding to nothing, because an empty account argument logs in as
-nobody and the test then tests nothing.
+A test that carries its own arguments can simply write the account into them
+(`arguments: [-Environment, stable, -FastLoginPhone, "+52 971 624 9725"]`) — argv
+reaches `simctl` as separate elements, so spaces need no escaping, and that is
+the simplest form. `variables:` covers what inline argv cannot: parameterising a
+*shared* profile, and stating a value once when both a `setup:` command and the
+run's own launch need it.
+
+```yaml
+variables: { ACCOUNT: "+52 971 624 9725" }
+launch: { profile: staging-account1 }     # whose argv refers to ${ACCOUNT}
+```
+
+`${VAR}` is resolved from `variables:` first, then from the process environment,
+and `--var NAME=value` overrides both. The file beats the environment on purpose:
+a stale `export` must not silently redirect a test to a different account. Keep a
+value out of `variables:` when it must stay in the shell — a real credential,
+anything for a production account. Either way an unresolved `${VAR}` fails the
+run rather than expanding to nothing, because an empty account argument logs in
+as nobody and the test then tests nothing.
 
 `simulator:` is also the default device for **every** command, not just
 `run`/`serve`/`open`. With several simulators booted and neither `--device` nor a
