@@ -1424,17 +1424,32 @@ EOF
 
 - [ ] **Step 1: Add the resolver**
 
-In `TestCommand.ServerOptions`, keep `client()` exactly as it is — `test list` must not boot a simulator to print a table — and add:
+In `TestCommand.ServerOptions`, `test list` must keep resolving a server without
+starting one — booting a simulator to print a table would be absurd — so
+`client()` stays, and the `--server` branch both methods need is factored out
+rather than written twice:
 
 ```swift
+        /// The client `--server` names, or nil when it was not given.
+        private func explicitClient() throws -> SimToolClient? {
+            guard let server, !server.isEmpty else { return nil }
+            guard let url = URL(string: server) else { throw SimToolError("Invalid server URL: \(server)") }
+            return SimToolClient(baseURL: url)
+        }
+
+        func client() throws -> SimToolClient {
+            if let explicit = try explicitClient() { return explicit }
+            guard let session = try SessionStore.shared.latest(), let url = URL(string: session.api) else {
+                throw SimToolError("No running SimTool server found. Start one with `simtool serve` or pass --server.")
+            }
+            return SimToolClient(baseURL: url)
+        }
+
         /// The client a run should use, plus the server this process started for
         /// it. Nil means the server was already there: it belongs to someone
         /// else and must outlive the run.
         func resolveClient(config: ProjectConfig?, json: Bool) async throws -> (SimToolClient, SessionInfo?) {
-            if let server, !server.isEmpty {
-                guard let url = URL(string: server) else { throw SimToolError("Invalid server URL: \(server)") }
-                return (SimToolClient(baseURL: url), nil)
-            }
+            if let explicit = try explicitClient() { return (explicit, nil) }
             if let session = try SessionStore.shared.latest(), let url = URL(string: session.api) {
                 return (SimToolClient(baseURL: url), nil)
             }
@@ -1787,6 +1802,10 @@ public struct AgentSkill: Sendable, Equatable {
         self.markdown = markdown
     }
 
+    /// One element for now on purpose: `simtool-test` joins it in the task that
+    /// authors it, because `AgentSkillTests` asserts every entry has an
+    /// authoring copy under `skills/<name>/SKILL.md` and that file does not
+    /// exist yet.
     public static let all: [AgentSkill] = [.simtool]
 
     public static let fileName = "SKILL.md"
