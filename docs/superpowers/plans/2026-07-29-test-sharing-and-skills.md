@@ -1359,6 +1359,16 @@ enum ServerAutostart {
             """)
     }
 
+    // SUPERSEDED BY A RULING DURING EXECUTION. The catch below retries *any*
+    // spawn failure on the next port, which the review caught: a test run
+    // against an unbooted simulator would spawn three servers before reporting
+    // what was actually wrong. The human ruled that the finding governs. The
+    // shipped code (392f980) instead extracts a testable `lostThePort(_:probe:)`
+    // and rethrows unless the port really was taken — with the probe-cannot-
+    // answer case returning false, the deliberate inverse of `freePort`'s
+    // pessimism. Read `Tool/Sources/SimToolCLI/ServerAutostart.swift`, not this
+    // block, for what the code does.
+
     /// The session of a server started here, on a port nobody was listening on.
     /// Retries on the next port when the bind loses a race with something that
     /// grabbed it between the probe and the spawn.
