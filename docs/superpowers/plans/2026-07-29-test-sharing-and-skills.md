@@ -1598,6 +1598,167 @@ EOF
 
 ---
 
+### Task 6b: A run reuses only its own project's server
+
+Added during execution. Verifying Task 6 by hand surfaced it: this machine had a
+server running for a different checkout, and `resolveClient` would have reused it
+— sending the test to another project's simulator, recording the session into that
+project's `.simtool/test-sessions` (the server derives its sessions root from its
+own working directory), and reporting a verdict about the wrong app. `client()`
+always behaved this way, but a user who typed `simtool serve` knew which server
+existed; a run that picks one up silently does not.
+
+**Files:**
+- Modify: `Tool/Sources/SimToolCore/SessionStore.swift` (`SessionInfo`)
+- Modify: `Tool/Sources/SimToolCLI/SimTool.swift` (`runViewer`, `TestCommand.ServerOptions`)
+- Modify: `Tool/Tests/SimToolCLITests/SimToolCommandSurfaceTests.swift`
+
+**Interfaces:**
+- Consumes: `TestCommand.ServerOptions.resolveClient(config:json:)` and
+  `ServerAutostart.start(parameters:json:)` from Task 6.
+- Produces: `SessionInfo.projectRoot: String?`;
+  `TestCommand.ServerOptions.reusableSession(from: [SessionInfo], projectRoot: String?) -> SessionInfo?`
+
+- [ ] **Step 1: Write the failing test**
+
+Add to `Tool/Tests/SimToolCLITests/SimToolCommandSurfaceTests.swift`:
+
+```swift
+    // A server belonging to another checkout drives another simulator and writes
+    // its sessions into another project. Reusing it would report a verdict about
+    // the wrong app.
+    func testAServerFromAnotherProjectIsNotReused() {
+        let sessions = [session(id: "other", project: "/Users/x/Workspace/other", at: 200)]
+
+        XCTAssertNil(TestCommand.ServerOptions.reusableSession(from: sessions, projectRoot: "/Users/x/Workspace/mine"))
+    }
+
+    func testTheNewestSessionOfThisProjectIsReused() {
+        let sessions = [
+            session(id: "newest-elsewhere", project: "/Users/x/Workspace/other", at: 300),
+            session(id: "mine-new", project: "/Users/x/Workspace/mine", at: 200),
+            session(id: "mine-old", project: "/Users/x/Workspace/mine", at: 100),
+        ]
+
+        XCTAssertEqual(
+            TestCommand.ServerOptions.reusableSession(from: sessions, projectRoot: "/Users/x/Workspace/mine")?.sessionId,
+            "mine-new"
+        )
+    }
+
+    // Two runs outside any project share the "no project" context, which is what
+    // the behaviour was before sessions recorded a project at all.
+    func testOutsideAnyProjectASessionWithoutOneIsReused() {
+        let sessions = [session(id: "rootless", project: nil, at: 100)]
+
+        XCTAssertEqual(TestCommand.ServerOptions.reusableSession(from: sessions, projectRoot: nil)?.sessionId, "rootless")
+        XCTAssertNil(TestCommand.ServerOptions.reusableSession(from: sessions, projectRoot: "/Users/x/Workspace/mine"))
+    }
+
+    private func session(id: String, project: String?, at seconds: TimeInterval) -> SessionInfo {
+        SessionInfo(
+            sessionId: id,
+            pid: 1,
+            device: SimulatorDevice(udid: "UDID", name: "iPhone", state: "Booted", runtime: "iOS 18.2", isAvailable: true),
+            url: "http://127.0.0.1:3200",
+            api: "http://127.0.0.1:3200/api/v1",
+            startedAt: Date(timeIntervalSince1970: seconds),
+            projectRoot: project
+        )
+    }
+```
+
+Check `SimulatorDevice`'s initializer before writing the fixture and match its
+actual parameter list.
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `swift test --package-path Tool --filter SimToolCommandSurfaceTests`
+Expected: compile failure — `SessionInfo` has no `projectRoot`, `ServerOptions`
+has no `reusableSession`.
+
+- [ ] **Step 3: Record the project on the session**
+
+In `SessionInfo` add, after `bootedDevices`:
+
+```swift
+    /// The project this server serves, so a command in another checkout does not
+    /// reuse it: its simulator is another project's, and the sessions it records
+    /// land in that project's `.simtool`. Nil when it was started outside one.
+    public var projectRoot: String?
+```
+
+Thread it through the memberwise initializer (defaulted `nil`, last parameter),
+`CodingKeys`, and the custom `init(from:)` with
+`decodeIfPresent` — sessions written before this field existed must keep
+decoding, exactly as `bootedDevices` does.
+
+`runViewer` is the one place that builds a `SessionInfo`; it already computes the
+project root for `StreamServerConfig`, so pass the same value:
+
+```swift
+        projectRoot: projectConfig?.simtoolDirectory.deletingLastPathComponent().standardizedFileURL.path
+```
+
+- [ ] **Step 4: Reuse only a matching session**
+
+In `TestCommand.ServerOptions`:
+
+```swift
+        /// The newest running server that serves `projectRoot`, if any. Compared
+        /// as paths rather than by device or port: what makes a server the wrong
+        /// one is the project it records sessions into.
+        static func reusableSession(from sessions: [SessionInfo], projectRoot: String?) -> SessionInfo? {
+            sessions
+                .filter { $0.projectRoot == projectRoot }
+                .max { $0.startedAt < $1.startedAt }
+        }
+```
+
+and in `resolveClient`, replace the `SessionStore.shared.latest()` branch:
+
+```swift
+            let projectRoot = config?.simtoolDirectory.deletingLastPathComponent().standardizedFileURL.path
+            let sessions = (try? SessionStore.shared.list()) ?? []
+            if let mine = Self.reusableSession(from: sessions, projectRoot: projectRoot),
+               let url = URL(string: mine.api) {
+                return (SimToolClient(baseURL: url), nil)
+            }
+            // Worth saying out loud: the reason a server is running and this run
+            // still starts one is not obvious, and the alternative — driving
+            // another checkout's simulator — is worse than a second server.
+            if let foreign = sessions.first, let elsewhere = foreign.projectRoot {
+                emitNote("A SimTool server is running for another project (\(elsewhere)) — starting one for this project instead.", json: json)
+            }
+```
+
+- [ ] **Step 5: Run the tests**
+
+Run: `swift test --package-path Tool --filter SimToolCommandSurfaceTests`
+Expected: PASS. Then the full suite.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add -A Tool
+git commit -m "$(cat <<'EOF'
+fix(test): reuse a server only when it serves this project
+
+A machine running several checkouts has several servers, and the run took
+whichever started last. That sends the test to another project's simulator,
+records the session into that project's .simtool, and reports a verdict about
+an app the test never drove.
+
+A session now records the project it serves, and a run that finds only foreign
+ones says so and starts its own.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+EOF
+)"
+```
+
+---
+
 ### Task 7: The installer grows an agent axis
 
 **Files:**
