@@ -6,7 +6,7 @@ extension AgentSkill {
     static let simtoolMarkdown = #"""
         ---
         name: simtool
-        description: Build an iOS app and install + launch it on an iOS Simulator via the simtool CLI, then drive/inspect it (input, accessibility tree, logs, network, browser viewer), mock backend gRPC responses (simtool mock — return errors/custom bodies/delays for corner-case testing), and write or run declarative YAML UI tests (simtool test run — implicit-wait steps over the accessibility tree, launch profiles, state reset, in-test mocks, and a verdict that says whether a bug reproduces or a feature is confirmed; every run recorded as a session with video and evidence, also runnable from the viewer's Tests tab), and package a test with its verdict and evidence into one archive to hand to whoever comes next (simtool test export / show / run <archive>). Optionally launch with the app's own debug/test arguments — environment switch, jump to a screen, clean state, locale, deeplink, config overrides. Use when asked to "build and run", "запусти app", "rebuild", "build-only", "build & run", "compile and run", to run/launch with specific arguments, switch environment, open a specific screen on launch, reset app state, rebuild after code changes, tap/type/swipe on the simulator, read the accessibility tree, tail app logs (OSLog/stdout), inspect network traffic, mock/stub a backend response ("замокай ответ", "верни ошибку на этот запрос", "подмени ответ"), open the live simulator viewer, run or write a YAML UI test ("запусти ui тест", "прогони тест", "напиши тест для экрана"), review recorded test sessions, or hand a test and its proof to someone else ("передай тест", "экспортируй тест", "отправь тестировщику", "send the repro").
+        description: Build an iOS app and install + launch it on an iOS Simulator via the simtool CLI, then drive/inspect it (input, accessibility tree, logs, network, browser viewer), mock backend gRPC responses (simtool mock — return errors/custom bodies/delays for corner-case testing), and write or run declarative YAML UI tests (see the `simtool-test` skill for writing one and for the bug/feature loop). Optionally launch with the app's own debug/test arguments — environment switch, jump to a screen, clean state, locale, deeplink, config overrides. Use when asked to "build and run", "запусти app", "rebuild", "build-only", "build & run", "compile and run", to run/launch with specific arguments, switch environment, open a specific screen on launch, reset app state, rebuild after code changes, tap/type/swipe on the simulator, read the accessibility tree, tail app logs (OSLog/stdout), inspect network traffic, mock/stub a backend response ("замокай ответ", "верни ошибку на этот запрос", "подмени ответ"), open the live simulator viewer, run or write a YAML UI test ("запусти ui тест", "прогони тест", "напиши тест для экрана"), or review recorded test sessions.
         argument-hint: [simtool args like app build / app launch --configuration Debug -- -MyAppFlag …]
         allowed-tools: [Bash, Read, AskUserQuestion]
         ---
@@ -296,194 +296,27 @@ extension AgentSkill {
           where `strict: true` also makes a rule that never fired fail the run.
 
         ### UI tests (`simtool test run`)
-        Declarative YAML tests drive the app through the accessibility tree: every step
-        polls until its target appears (or disappears), so tests need no sleeps. Needs a
-        running SimTool server (the `serve`/`run` one, or pass `--server`). Every run is
-        recorded as a test session — timestamped steps, screen recording and the run's
-        evidence — persisted under `.simtool/test-sessions/<id>/` and shown in the
-        viewer's Tests tab (History subtab) with the timeline synced to the video.
+        Declarative YAML tests in `.simtool/tests/*.yml` drive the app through the
+        accessibility tree: every step polls until its target appears (or disappears),
+        so tests need no sleeps. A test carries everything needed to stage its scenario,
+        so it reproduces on another machine: `launch:` (a named profile from
+        `.simtool/config.yml` plus inline argv/env), `reset:` (UserDefaults, data
+        container, permission alerts, locale) and `mocks:` (backend answers, applied
+        before launch). A running server is not a prerequisite — with none, the run
+        starts one on a free port and stops it again afterwards.
 
-        Tests live in `.simtool/tests/*.yml`. Schema (full reference:
-        `simtool test run --help`):
+        Every run is recorded as a reviewable test session — timestamped steps, a screen
+        recording and the run's evidence — under `.simtool/test-sessions/<id>/`, where a
+        `report.md` written for a person sits next to `video.mp4`; the viewer's Tests tab
+        lists the tests with Run buttons and live progress, and its History subtab the
+        recorded sessions with the timeline synced to the video. Commands:
+        `simtool test run <file>` (`--json` for the machine-readable report, `--repeat N`
+        to check an intermittent claim, `--evidence none|failure|full`, `--no-session` to
+        skip recording) and `simtool test list` (recorded sessions with their verdicts).
+        One test runs at a time.
 
-        ```yaml
-        name: tab bar badges
-        kind: feature                # optional; bug | feature — see "Verifying tests"
-        reference: "PROJ-42"         # optional; free-form origin, stored, never parsed
-        description: >               # what is tested and the expected result
-          Home shows the summed count badge; opening the second tab clears the red dot.
-        app: com.example.myapp.debug # relaunched before steps
-        variables:                   # values for the ${VAR} the profile/setup below use
-          ACCOUNT: "+34600000000"    #   the account this test runs as
-        launch:                      # how to launch it
-          profile: staging-account1  #   a `profiles:` entry from .simtool/config.yml
-          arguments: [-RemoteConfig, some_flag, "true"]   # appended after the profile's
-          env: { SOME_FLAG: "1" }    #   exported to the app as SIMCTL_CHILD_*
-          deeplink: myapp://home     #   opened once the app is running
-        reset:                       # simulator state, before launch
-          defaults: true             #   clear the app's UserDefaults
-          container: false           #   wipe the app's data container (keeps it installed)
-          permissions: { att: deny, location: grant }     # grant | deny | reset
-          locale: es_ES              #   applied as -AppleLocale / -AppleLanguages
-          language: es
-        mocks:                       # backend answers, applied before launch
-          - method: "*/GetBadges"    #   gRPC full-method or HTTP path, `*` globs
-            body: { count: 3 }       #   YAML or a JSON string (or `error: unavailable`)
-            strict: true             #   must fire, or the run is reported as `infra`
-        setup:                       # escape hatch: shell before launch, {udid}/{app}
-          - xcrun simctl spawn {udid} defaults delete …   # substituted; failures logged
-        timeout: 10                  # default per-step wait, seconds
-        steps:
-          - waitFor: { id: MainScreenView, timeout: 45 }
-          - tap: { id: tabbar_second }
-          - longPress: { id: tabbar_main, duration: 1 }
-          - assertVisible: { text: "Welcome", criterion: AC-1 }   # id / label / text
-          - assertHidden: { id: some-badge, timeout: 15 }
-          - swipe: up
-          - type: "hello"
-          - wait: 2                  # escape hatch; prefer waitFor/assert
-        ```
-
-        Key semantics:
-        - **Targets**: `id` matches accessibilityIdentifier exactly, `label` matches
-          label/title exactly, `text` is a case-insensitive substring across fields;
-          a bare string target means `text`.
-        - **Launch profiles keep app-specific argv out of the test.** A test names a
-          profile; the environment switches, the master switch and the shape of the
-          login arguments live in `profiles:` in `.simtool/config.yml` (see
-          [Project options](#project-options)), which refers to accounts as `${VAR}`.
-        - **Writing the account inline is fine and is the simplest thing that works**:
-          `launch: { arguments: [-Environment, stable, -FastLoginPhone, "+52 971 624 9725"] }`.
-          argv reaches `simctl` as separate elements, so spaces need no escaping. Reach
-          for this when the test carries its own arguments.
-        - **`variables:` is for the two cases inline cannot cover**: parameterising a
-          *shared* profile (the recipe is in `.simtool/config.yml` and must not carry one
-          test's account), and needing the same value twice (typically a `setup:` launch
-          plus the run's own launch) without keeping two copies in sync.
-          ```yaml
-          variables: { ACCOUNT: "+52 971 624 9725" }
-          launch: { profile: staging-account1 }        # its argv refers to ${ACCOUNT}
-          setup: [simtool app launch … -FastLoginPhone "$ACCOUNT"]
-          ```
-          Resolution order is `--var NAME=value`, then `variables:`, then the process
-          environment — the file beating the environment on purpose, so a stale `export`
-          in someone's shell cannot silently redirect the test to another account.
-          `variables:` also reach `setup:` commands as shell environment.
-        - **What belongs in the shell rather than in the file**: a real credential, or
-          anything touching a production account. Refer to it as `${VAR}` and define it
-          nowhere in the test; an unresolved reference fails the run rather than
-          expanding to nothing, and an exported archive then names it as the receiver's
-          to supply.
-        - **`reset:` replaces hand-written state-clearing shell** and travels with the
-          test. `permissions:` pre-answers the system alerts that would otherwise block
-          the drive — `simtool input` cannot reach a system alert, and while one is up
-          the a11y tree is unreadable, which reads exactly like a broken app. The
-          notification prompt has no simctl backdoor: answer it once by hand.
-        - **`mocks:` belongs in the test, not in `simtool mock set`.** Rules declared
-          here are applied before launch, the run waits until the app confirms it has
-          them, and they are cleared afterwards — so the scenario reproduces on another
-          machine. Existing rules are cleared first, so a leftover manual rule cannot
-          answer a call this test never accounted for.
-        - **`setup` is for what `reset:` cannot express**; non-zero exits are recorded
-          but never fail the test.
-        - Discover ids for steps with `simtool ax find <needle>` / `ax tree` while
-          driving the app manually.
-
-        #### Verifying tests: `kind`, `criterion` and the verdict
-
-        Add `kind:` and mark the assertions that check the claim with `criterion:`, and
-        the run answers *whether the claim holds* instead of merely pass/fail:
-
-        | Verdict | Exit | `kind: bug` | `kind: feature` |
-        |---|---|---|---|
-        | `satisfied` | 0 | not reproduced / fixed | feature confirmed |
-        | `unsatisfied` | 1 | **bug reproduced** | feature not confirmed |
-        | `inconclusive` | 2 | the run never reached a criterion — fix the test | same |
-        | `infra` | 3 | the run cannot be trusted — see below | same |
-
-        - **Assert the expected behaviour, not the current one.** A bug repro fails
-          today — that failure *is* the reproduction — and the same file starts passing
-          when the bug is fixed, so it becomes the regression guard. A test that asserts
-          the broken state has to be inverted after the fix, and inverted tests get
-          deleted.
-        - Steps without a `criterion:` merely stage the scenario. A failure there is
-          `inconclusive`, never a reproduction: it means the run never got to what it
-          checks. Fix the test, not the report.
-        - `kind: bug` stops at the first unmet criterion; `kind: feature` reports every
-          criterion from one run, so "AC-1 ok, AC-3 unmet" does not cost three runs.
-        - `infra` means the run proves nothing in either direction: a `strict:` mock
-          never fired, the app never picked up its mock rules (its network logger is not
-          running), or `reset:` could not be applied. An `infra` run is never reported as
-          a pass — that is the direction that would tell a fixing agent the bug is gone.
-        - `criterion:` labels are free-form: an id like `AC-2` when the work came with
-          acceptance criteria, a short sentence when it came as prose. SimTool assumes no
-          issue tracker; `reference:` is stored and displayed but never parsed.
-
-        #### Evidence
-
-        Unless `--evidence none`, the run arms the log capture itself, scopes it to its
-        own launches, and writes into the session directory next to `video.mp4`:
-
-        - `logs.jsonl` — the app's OSLog for the run (stdout is not captured: attaching a
-          console would mean relaunching the app the run just launched)
-        - `network.jsonl` — the app-emitted HTTP/gRPC events, each with `mocked` and the
-          rule id that answered it
-        - `state.jsonl` — `@SimToolDebugState` snapshots, when the state logger is linked
-        - `mocks.json` — what each declared rule actually did, including `hits: 0`
-        - `failure-step-<n>.png` / `-ax.txt` — screen and visible elements at the failure
-
-        Step entries carry the log-cursor range and the start/end timestamps of their
-        step, so the logs and requests belonging to one step can be sliced out of those
-        files. `--evidence full` also captures a screenshot after every step.
-
-        #### Handing the test to whoever comes next
-
-        The point of a verifying test is that someone else re-runs it: the agent that
-        fixes the bug, a reviewer, whoever tests the fix. `simtool test export` packs the
-        test, the verdict, and the evidence into one `*.simflow.zip`:
-
-        ```bash
-        simtool test export .simtool/tests/tab-order.yml            # newest run of that test
-        simtool test export --session <id> -o PROJ-42.simflow.zip   # a specific run
-        simtool test export --no-video --no-evidence                # KBs instead of MBs
-        simtool test show PROJ-42.simflow.zip                       # claim, verdict, what it carries
-        simtool test show PROJ-42.simflow.zip --report              # the report written for a person
-        simtool test show PROJ-42.simflow.zip --import              # replay it in this project's viewer
-        simtool test run  PROJ-42.simflow.zip                       # run it here
-        ```
-
-        Inside: `manifest.json` (claim, verdict, criteria, provenance, `requires`),
-        `test.yml` with `${VAR}` unexpanded, `report.md`, and `runs/<session>/` with
-        `session.json`, the evidence files and `video.mp4`.
-
-        - **The test says which account it runs as.** Write it under `variables:` and
-          the archive travels ready-to-run — `requires.carries` lists what it brought,
-          and the receiver needs no setup. Anything the test refers to but does not
-          define stays a requirement (`requires.env`), checked *before* the simulator is
-          touched; the receiver supplies it by exporting it or with `--var NAME=value`,
-          which also overrides a value the test does define.
-        - **The archive is self-contained about the launch.** When the receiver's
-          `.simtool/config.yml` has no `profiles:` entry by that name, the launch the
-          sender recorded stands in for it, and the run says so.
-        - **Evidence is real account data.** `logs.jsonl` and `network.jsonl` hold the
-          traffic and log output of the account the run used — team-internal; use
-          `--no-evidence` for anywhere else. Both the export summary and `report.md` say
-          this, so nobody has to remember it.
-        - **Which build produced the verdict is part of the answer.** `test run` on an
-          archive prints the installed app version/build next to the recorded one: a
-          repro re-run against different code and pronounced fixed is the mistake this
-          prevents.
-        - The app binary never travels — `requires.app` names the bundle id and the
-          receiver installs their own build, which is the point when verifying a fix.
-
-        Commands: `simtool test run <test.yml|archive.simflow.zip>` (`--json` for the
-        machine-readable report, `--repeat N` to check an intermittent claim,
-        `--evidence none|failure|full`, `--no-session` to skip recording), `simtool test
-        list` (recorded sessions with their verdicts), `simtool test export`,
-        `simtool test show`. The viewer's Tests tab has two subtabs:
-        **Tests** lists the YAML tests with Run buttons, live progress and results
-        (`GET /api/v1/tests/definitions`, `GET/POST /api/v1/tests/run`); **History**
-        shows recorded sessions with the video-synced timeline. One test runs at a time.
+        **To write one, or to run the bug/feature loop, use the `simtool-test` skill** —
+        it owns the file format, the criteria and the verdicts.
 
         #### Reading live model state (`@SimToolDebugState`)
         To observe view-model state while driving the app, use the state logger:
@@ -553,8 +386,8 @@ extension AgentSkill {
           YAML tests in `.simtool/tests/`, and recorded sessions with their evidence in
           `.simtool/test-sessions/`. Discovered by walking up from the working directory,
           so run simtool from inside the repo. Because the directory is gitignored, a
-          test and its session are machine-local: `simtool test export` is how one leaves
-          the machine, and `simtool test show --import` is how it arrives on another.
+          test travels as a file: send the YAML, and the session's `report.md` or
+          `video.mp4` when they help.
         - With a generated project (Tuist, XcodeGen, …), switching git branches can
           desync it; if a build fails with a missing input file, regenerate the project
           before rebuilding.

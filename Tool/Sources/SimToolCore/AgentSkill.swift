@@ -15,11 +15,7 @@ public struct AgentSkill: Sendable, Equatable {
         self.markdown = markdown
     }
 
-    /// One element for now on purpose: `simtool-test` joins it in the task that
-    /// authors it, because `AgentSkillTests` asserts every entry has an
-    /// authoring copy under `skills/<name>/SKILL.md` and that file does not
-    /// exist yet.
-    public static let all: [AgentSkill] = [.simtool]
+    public static let all: [AgentSkill] = [.simtool, .simtoolTest]
 
     public static let fileName = "SKILL.md"
 }
