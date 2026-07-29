@@ -311,6 +311,40 @@ final class SimToolCommandSurfaceTests: XCTestCase {
         )
     }
 
+    // A typo'd profile name must fail before the simulator is touched, the same
+    // way an unresolved ${VAR} does — not surface later from the executor, after
+    // a server started and a device booted to discover it.
+    func testATestNamingAnUndefinedProfileFailsPreflight() {
+        let test = TestDefinition(
+            launch: TestLaunch(profile: "staging-typo"),
+            steps: [TestStep(action: .waitFor(TestTarget(kind: .id, query: "Main"), timeout: nil))]
+        )
+        let profiles = [LaunchProfile(name: "staging-account1")]
+
+        let message = TestCommand.Run.unknownProfile(test: test, profiles: profiles)
+
+        XCTAssertEqual(message, "Unknown launch profile 'staging-typo'. Available: staging-account1.")
+    }
+
+    func testATestNamingAKnownProfilePassesPreflight() {
+        let test = TestDefinition(
+            launch: TestLaunch(profile: "staging-account1"),
+            steps: [TestStep(action: .waitFor(TestTarget(kind: .id, query: "Main"), timeout: nil))]
+        )
+        let profiles = [LaunchProfile(name: "staging-account1")]
+
+        XCTAssertNil(TestCommand.Run.unknownProfile(test: test, profiles: profiles))
+    }
+
+    // No `launch.profile` at all is not an error — most tests never name one.
+    func testATestNamingNoProfilePassesPreflightRegardlessOfProfiles() {
+        let test = TestDefinition(
+            steps: [TestStep(action: .waitFor(TestTarget(kind: .id, query: "Main"), timeout: nil))]
+        )
+
+        XCTAssertNil(TestCommand.Run.unknownProfile(test: test, profiles: []))
+    }
+
     func testServeParsesWithoutBuiltInPortAndHostDefaults() throws {
         let command = try Serve.parse([])
         XCTAssertNil(command.device)

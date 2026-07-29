@@ -161,13 +161,22 @@ public struct ProjectConfig: Codable, Equatable, Sendable {
     /// not exist must say so, not launch with no arguments at all.
     public func profile(named name: String) throws -> LaunchProfile {
         guard let match = profiles.first(where: { $0.name == name }) else {
-            let available = profiles.map(\.name).joined(separator: ", ")
-            let hint = available.isEmpty
-                ? " No `profiles:` are defined in \(ProjectConfigLoader.displayPath)."
-                : " Available: \(available)."
-            throw SimToolError("Unknown launch profile '\(name)'.\(hint)")
+            throw SimToolError(ProjectConfig.unknownProfileMessage(name: name, profiles: profiles))
         }
         return match
+    }
+
+    /// The "unknown launch profile" wording, factored out so a pre-flight check
+    /// that only has a profile list (not a full `ProjectConfig`) — a test's
+    /// `launch.profile` checked before the simulator is touched — reports the
+    /// same message as this lookup would, rather than a second phrasing of the
+    /// same fact.
+    public static func unknownProfileMessage(name: String, profiles: [LaunchProfile]) -> String {
+        let available = profiles.map(\.name).joined(separator: ", ")
+        let hint = available.isEmpty
+            ? " No `profiles:` are defined in \(ProjectConfigLoader.displayPath)."
+            : " Available: \(available)."
+        return "Unknown launch profile '\(name)'.\(hint)"
     }
 
     /// Looks up a configured deeplink by name, throwing a clear error that lists

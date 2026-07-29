@@ -992,7 +992,7 @@ extension AppCommand {
 struct TestCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "test",
-        abstract: "Run declarative YAML UI tests on the served simulator, recorded as test sessions.",
+        abstract: "Run declarative YAML UI tests on a simulator, recorded as test sessions.",
         subcommands: [Run.self, List.self]
     )
 
@@ -1179,6 +1179,12 @@ struct TestCommand: AsyncParsableCommand {
             let projectConfig = try ProjectConfigLoader.loadIfPresent(explicitPath: config)
             let testURL = URL(fileURLWithPath: test)
             let parsed = try TestDefinitionParser.load(contentsOf: testURL)
+            // Same reason as the unresolved-variable check below: a typo'd
+            // profile name must fail here, not after the executor has already
+            // started a server and booted a simulator to discover it.
+            if let profileError = Self.unknownProfile(test: parsed, profiles: projectConfig?.profiles ?? []) {
+                throw SimToolError(profileError)
+            }
             let missing = Self.unresolvedVariables(
                 test: parsed,
                 profiles: projectConfig?.profiles ?? [],
@@ -1306,6 +1312,15 @@ struct TestCommand: AsyncParsableCommand {
             let available = test.resolvedVariables(environment: environment, overrides: overrides)
             return LaunchVariables.names(in: launch, setup: test.setup)
                 .filter { (available[$0] ?? "").isEmpty }
+        }
+
+        /// The test's `launch.profile` naming one this project does not define —
+        /// a typo the executor would also catch, but only after a server started
+        /// and a simulator booted for it. Nil means the name resolves, or the
+        /// test named none at all.
+        static func unknownProfile(test: TestDefinition, profiles: [LaunchProfile]) -> String? {
+            guard let name = test.launch.profile, !profiles.contains(where: { $0.name == name }) else { return nil }
+            return ProjectConfig.unknownProfileMessage(name: name, profiles: profiles)
         }
 
         /// Aggregates one or more runs. The worst answer wins, in the order
@@ -1590,6 +1605,11 @@ func launchDetachedServer(
         }
         try await Task.sleep(for: .milliseconds(100))
     }
+    // Giving up on the child is not the same as it giving up on itself: left
+    // running, it (and whatever simulator it booted) would outlive a caller
+    // that has already stopped waiting for it. Terminate lets it run its own
+    // signal-triggered shutdown rather than leaving an orphan behind.
+    process.terminate()
     throw SimToolError("Detached server did not report a session within 330 seconds. See \(logPath.path)")
 }
 
@@ -1892,7 +1912,7 @@ struct Run: AsyncParsableCommand {
 struct Init: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "init",
-        abstract: "Scaffold a starter .simtool/config.yml in the current directory, detecting the workspace/scheme where possible, and optionally install the simtool agent skill."
+        abstract: "Scaffold a starter .simtool/config.yml in the current directory, detecting the workspace/scheme where possible, and optionally install the simtool agent skills."
     )
 
     @Flag(name: .long, help: "Overwrite an existing .simtool/config.yml (and a modified installed skill).")
@@ -1930,7 +1950,7 @@ struct Init: ParsableCommand {
         // existing config only aborts when there is nothing else to do.
         let writesConfig = !alreadyExists || force
         if !writesConfig, skill == nil || skill == AgentSkillInstaller.Scope.none {
-            throw SimToolError("\(ProjectConfigLoader.displayPath) already exists. Edit it, pass --force to overwrite, or pass --skill <local|global> to just install the agent skill.")
+            throw SimToolError("\(ProjectConfigLoader.displayPath) already exists. Edit it, pass --force to overwrite, or pass --skill <local|global> to just install the agent skills.")
         }
 
         let detected = ProjectConfigTemplate.detect(in: cwd)
