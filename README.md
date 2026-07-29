@@ -113,6 +113,11 @@ swift run simtool test run .simtool/tests/my-test.yml --json --repeat 5
 swift run simtool test list --json
 ```
 
+A running server is not a prerequisite: when none is running, `test run` starts
+one on a free port and stops it again afterwards. One already running for this
+project is reused and left alone; one belonging to another checkout is not — the
+run says so and starts its own instead.
+
 A test carries everything needed to stage its scenario, so it reproduces on
 another machine: `launch:` (a named profile from `.simtool/config.yml` plus
 inline argv/env), `reset:` (UserDefaults, data container, permission alerts,
@@ -158,40 +163,36 @@ none|failure|full` controls how much; `full` also captures every step.
 app's bundle id and version, the device and runtime, the simtool version, and
 the commit.
 
+Every recorded run also writes `report.md` — the same run rendered for a person —
+regardless of `--evidence`, which controls captures rather than that.
+
 One session is active at a time; sessions can also be driven directly over HTTP
 via `POST /api/v1/tests/start|entries|stop`.
 
-#### Handing a test on
+#### Sharing a test
 
-`test export` packs a test, the verdict a run of it reached and the evidence
-behind that verdict into one `*.simflow.zip` — for the agent that will fix the
-bug, for a reviewer, or for whoever tests the fix:
+The test is the artifact. It carries everything needed to stage its scenario, so
+sending the `.yml` file is the whole handoff — to the agent that will fix the
+bug, to a reviewer, to whoever tests the fix:
 
 ```bash
-swift run simtool test export .simtool/tests/my-test.yml        # newest run of it
-swift run simtool test export --session 2026-07-28-1955-vy1cu3 -o PROJ-42.simflow.zip
-swift run simtool test export --no-video --no-evidence          # lean: KBs, not MBs
-swift run simtool test show PROJ-42.simflow.zip                 # what it claims and carries
-swift run simtool test show PROJ-42.simflow.zip --report        # the report written for a person
-swift run simtool test show PROJ-42.simflow.zip --import        # replay it in this project's viewer
-swift run simtool test run PROJ-42.simflow.zip                  # run it here
+swift run simtool test run .simtool/tests/my-test.yml     # on the receiving side
 ```
 
-The archive holds `manifest.json` (claim, verdict, criteria, provenance and what
-the receiver must supply), `test.yml` as it ran, `report.md`, and
-`runs/<session>/` with the session and its evidence. A test that defines its
-`variables:` travels ready-to-run and says so (`requires.carries`); anything it
-refers to without defining stays the receiver's to supply (`requires.env`),
-checked before the simulator is touched. The app binary never travels —
-`requires.app` names the bundle id, because the receiver installs the build they
-want to verify. `test run` on an archive also falls back to the launch the sender
-recorded when this project's config has no such profile, and prints the installed
-build next to the recorded one, since a repro re-run against different code and
-pronounced fixed is the failure worth preventing.
+Attach the two files next to the run when they help: `report.md` — the run
+written for a person, with the claim, the verdict, the timeline and what the
+receiver has to supply — and `video.mp4`.
 
-Evidence does carry the account's real traffic and log output — that is what
-makes it worth reading inside the team, and why `--no-evidence` exists for
-anywhere else. `report.md` says so too.
+What the receiver needs: `simtool`, a booted simulator, their own build of the
+app (which is the point when verifying a fix), and any `${VAR}` the test refers
+to without defining. A test that defines its `variables:` travels ready-to-run;
+anything it leaves to the shell is checked before the simulator is touched, so a
+missing account fails in a second rather than mid-run. `--var NAME=value`
+overrides a value the test does define.
+
+Do not forward the evidence files outside the team: `logs.jsonl` and
+`network.jsonl` hold the real traffic and log output of the account the run used.
+`report.md` says so too.
 
 `ax tree` and `ax find` omit the bulky raw AXe payload by default; pass `--raw`
 (or `?raw=1` on `/api/v1/ax/tree` and `/api/v1/ax/find`) to include it. For the
@@ -402,27 +403,31 @@ it detects the `.xcworkspace`/`.xcodeproj` and scheme where it can, defaults
 fields (such as `bundleId`) for you to fill in. It refuses to clobber an existing
 config unless you pass `--force`.
 
-`init` also offers to install the **agent skill** — a Markdown brief that teaches a
-coding agent how to build, launch, drive, mock, and UI-test your app through this
-CLI. Run interactively it asks where to put it; pass `--skill` to choose up front:
+`init` also offers to install the two bundled **agent skills** — `simtool`
+(build, launch, drive, mock, inspect) and `simtool-test` (write a verifying test
+and drive it red to green) — Markdown briefs that teach a coding agent how to
+work with your app through this CLI. Run interactively it asks where to put
+them; pass `--skill local|global|none` to choose the tree up front and
+`--skill-agent claude|codex|both` to choose the layout (`.claude/skills` or
+`.codex/skills`):
 
 | Scope | Destination | Applies to |
 |---|---|---|
-| `--skill local` | `<project>/.claude/skills/simtool/SKILL.md` | this checkout (commit it to share with the team) |
-| `--skill global` | `~/.claude/skills/simtool/SKILL.md` | every project on this machine |
+| `--skill local` | `<project>/.claude/skills/` (or `.codex/skills/`) | this checkout (commit it to share with the team) |
+| `--skill global` | `~/.claude/skills/` (or `~/.codex/skills/`) | every project on this machine |
 | `--skill none` | — | nothing installed |
 
 Non-interactive runs (`--json`, or no TTY) default to `none`, so scripted `init`
 never writes outside the project. Re-running `init` leaves an installed skill
-alone once you have edited it — `--force` replaces it with the bundled version.
-The skill ships app-agnostic and has two placeholder sections, *Project options*
-and *Launch argument catalog*, to fill in with your workspace/scheme and with the
-debug launch arguments your own app reads.
+alone once you have edited it — `--force` replaces it with the bundled version,
+because the `simtool` skill has two placeholder sections, *Project options* and
+*Launch argument catalog*, that you are expected to fill in with your
+workspace/scheme and with the debug launch arguments your own app reads.
 
 ```sh
-simtool init --skill local           # config + skill for this project
-simtool init --skill global          # …and make the skill available everywhere
-simtool init --skill local --force   # refresh both from the bundled versions
+swift run simtool init --skill local                        # config + both skills for this project
+swift run simtool init --skill global --skill-agent both    # …skills for both agents, everywhere
+swift run simtool init --skill local --force                 # refresh config and skills from the bundled versions
 ```
 
 ```yaml
