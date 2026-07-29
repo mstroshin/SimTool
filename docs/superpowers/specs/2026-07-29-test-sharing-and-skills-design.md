@@ -475,7 +475,7 @@ Sections:
 7. **Finding targets** — `simtool ax find <needle>`, `ax tree --flat --labeled`
    while driving the app by hand; `id` over `label` over `text`.
 8. **Mocks belong in the test** — declared in `mocks:`, applied before launch,
-   cleared after; `strict: true` so a rule that never fired makes the run
+   cleared before the next test that declares any; `strict: true` so a rule that never fired makes the run
    `infra` instead of a quiet pass against the real backend.
 9. **Verdicts** — the table, and what to do with each of the four.
 10. **What the run leaves behind** — the session directory: `report.md`,

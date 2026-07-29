@@ -2472,7 +2472,8 @@ Then, in this order:
    --labeled`, while driving the app with `simtool input`. Prefer `id`, then
    `label`, then `text`.
 9. `## Mocks belong in the test` — declared in `mocks:`, applied before launch,
-   the run waits until the app confirms it has them, cleared afterwards, so the
+   the run waits until the app confirms it has them, and existing rules are cleared
+   first (not at the end — verified against TestRunExecutor during execution), so the
    scenario reproduces on another machine. `strict: true` makes a rule that never
    fired an `infra` run instead of a quiet pass against the real backend. Use
    `simtool mock set` while exploring, then move what worked into the test. Unary
