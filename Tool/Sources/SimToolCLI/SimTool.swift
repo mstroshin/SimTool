@@ -1015,13 +1015,31 @@ struct TestCommand: AsyncParsableCommand {
             return SimToolClient(baseURL: url)
         }
 
+        /// The newest running server that serves `projectRoot`, if any. Compared
+        /// as paths rather than by device or port: what makes a server the wrong
+        /// one is the project it records sessions into.
+        static func reusableSession(from sessions: [SessionInfo], projectRoot: String?) -> SessionInfo? {
+            sessions
+                .filter { $0.projectRoot == projectRoot }
+                .max { $0.startedAt < $1.startedAt }
+        }
+
         /// The client a run should use, plus the server this process started for
         /// it. Nil means the server was already there: it belongs to someone
         /// else and must outlive the run.
         func resolveClient(config: ProjectConfig?, json: Bool) async throws -> (SimToolClient, SessionInfo?) {
             if let explicit = try explicitClient() { return (explicit, nil) }
-            if let session = try SessionStore.shared.latest(), let url = URL(string: session.api) {
+            let projectRoot = config?.simtoolDirectory.deletingLastPathComponent().standardizedFileURL.path
+            let sessions = (try? SessionStore.shared.list()) ?? []
+            if let mine = Self.reusableSession(from: sessions, projectRoot: projectRoot),
+               let url = URL(string: mine.api) {
                 return (SimToolClient(baseURL: url), nil)
+            }
+            // Worth saying out loud: the reason a server is running and this run
+            // still starts one is not obvious, and the alternative — driving
+            // another checkout's simulator — is worse than a second server.
+            if let foreign = sessions.first, let elsewhere = foreign.projectRoot {
+                emitNote("A SimTool server is running for another project (\(elsewhere)) — starting one for this project instead.", json: json)
             }
             let started = try await ServerAutostart.start(
                 parameters: ServeParameters.resolve(device: nil, host: nil, port: nil, config: config),
@@ -1587,7 +1605,8 @@ func runViewer(
         url: server.baseURL,
         api: server.apiURL,
         startedAt: Date(),
-        bootedDevices: BootedSimulatorRegistry.shared.all()
+        bootedDevices: BootedSimulatorRegistry.shared.all(),
+        projectRoot: projectConfig?.simtoolDirectory.deletingLastPathComponent().standardizedFileURL.path
     )
     try SessionStore.shared.write(session)
     installSignalTrap(sessionId: id, server: server)

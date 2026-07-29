@@ -12,6 +12,10 @@ public struct SessionInfo: Codable, Equatable, Identifiable, Sendable {
     /// Persisted so another SimTool can reap them if this process dies abruptly
     /// (e.g. SIGKILL) without running its own shutdown.
     public var bootedDevices: [String]
+    /// The project this server serves, so a command in another checkout does not
+    /// reuse it: its simulator is another project's, and the sessions it records
+    /// land in that project's `.simtool`. Nil when it was started outside one.
+    public var projectRoot: String?
 
     public init(
         sessionId: String,
@@ -20,7 +24,8 @@ public struct SessionInfo: Codable, Equatable, Identifiable, Sendable {
         url: String,
         api: String,
         startedAt: Date,
-        bootedDevices: [String] = []
+        bootedDevices: [String] = [],
+        projectRoot: String? = nil
     ) {
         self.sessionId = sessionId
         self.pid = pid
@@ -29,10 +34,11 @@ public struct SessionInfo: Codable, Equatable, Identifiable, Sendable {
         self.api = api
         self.startedAt = startedAt
         self.bootedDevices = bootedDevices
+        self.projectRoot = projectRoot
     }
 
     private enum CodingKeys: String, CodingKey {
-        case sessionId, pid, device, url, api, startedAt, bootedDevices
+        case sessionId, pid, device, url, api, startedAt, bootedDevices, projectRoot
     }
 
     public init(from decoder: Decoder) throws {
@@ -45,6 +51,8 @@ public struct SessionInfo: Codable, Equatable, Identifiable, Sendable {
         startedAt = try container.decode(Date.self, forKey: .startedAt)
         // Tolerate session files written before bootedDevices existed.
         bootedDevices = try container.decodeIfPresent([String].self, forKey: .bootedDevices) ?? []
+        // Tolerate session files written before projectRoot existed.
+        projectRoot = try container.decodeIfPresent(String.self, forKey: .projectRoot)
     }
 }
 

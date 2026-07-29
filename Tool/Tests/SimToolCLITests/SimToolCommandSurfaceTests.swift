@@ -340,6 +340,49 @@ final class SimToolCommandSurfaceTests: XCTestCase {
         XCTAssertEqual(params, ServeParameters(device: nil, host: "127.0.0.1", port: 3200))
     }
 
+    // A server belonging to another checkout drives another simulator and writes
+    // its sessions into another project. Reusing it would report a verdict about
+    // the wrong app.
+    func testAServerFromAnotherProjectIsNotReused() {
+        let sessions = [session(id: "other", project: "/Users/x/Workspace/other", at: 200)]
+
+        XCTAssertNil(TestCommand.ServerOptions.reusableSession(from: sessions, projectRoot: "/Users/x/Workspace/mine"))
+    }
+
+    func testTheNewestSessionOfThisProjectIsReused() {
+        let sessions = [
+            session(id: "newest-elsewhere", project: "/Users/x/Workspace/other", at: 300),
+            session(id: "mine-new", project: "/Users/x/Workspace/mine", at: 200),
+            session(id: "mine-old", project: "/Users/x/Workspace/mine", at: 100),
+        ]
+
+        XCTAssertEqual(
+            TestCommand.ServerOptions.reusableSession(from: sessions, projectRoot: "/Users/x/Workspace/mine")?.sessionId,
+            "mine-new"
+        )
+    }
+
+    // Two runs outside any project share the "no project" context, which is what
+    // the behaviour was before sessions recorded a project at all.
+    func testOutsideAnyProjectASessionWithoutOneIsReused() {
+        let sessions = [session(id: "rootless", project: nil, at: 100)]
+
+        XCTAssertEqual(TestCommand.ServerOptions.reusableSession(from: sessions, projectRoot: nil)?.sessionId, "rootless")
+        XCTAssertNil(TestCommand.ServerOptions.reusableSession(from: sessions, projectRoot: "/Users/x/Workspace/mine"))
+    }
+
+    private func session(id: String, project: String?, at seconds: TimeInterval) -> SessionInfo {
+        SessionInfo(
+            sessionId: id,
+            pid: 1,
+            device: SimulatorDevice(udid: "UDID", name: "iPhone", runtime: "iOS 18.2", state: "Booted", isAvailable: true),
+            url: "http://127.0.0.1:3200",
+            api: "http://127.0.0.1:3200/api/v1",
+            startedAt: Date(timeIntervalSince1970: seconds),
+            projectRoot: project
+        )
+    }
+
     private var configFixture: ProjectConfig {
         ProjectConfig(
             simulator: "iPhone 16 Pro",
