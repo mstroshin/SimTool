@@ -1187,7 +1187,9 @@ struct TestCommand: AsyncParsableCommand {
             if common.json {
                 try printJSON(report)
             } else {
-                Self.printReport(report)
+                Self.printReport(report, sessionsRoot: projectConfig.map {
+                    SimToolDirectory.testSessionsDirectory(in: $0.simtoolDirectory)
+                })
             }
             let code = report.verdict.exitCode
             if code != 0 { throw ExitCode(code) }
@@ -1253,7 +1255,7 @@ struct TestCommand: AsyncParsableCommand {
             )
         }
 
-        static func printReport(_ report: TestRunReport) {
+        static func printReport(_ report: TestRunReport, sessionsRoot: URL?) {
             var takeaways: [String] = []
             if let runs = report.runs {
                 takeaways.append("Claim held in \(runs.satisfied)/\(runs.total) runs" + (runs.isFlaky ? " — intermittent" : ""))
@@ -1272,12 +1274,24 @@ struct TestCommand: AsyncParsableCommand {
                 takeaways.append("Mock \(mock.method) never fired")
             }
             takeaways += report.sessions.map { "Session: \($0)" }
+            if let sessionsRoot, let id = report.sessions.last {
+                takeaways.append("\(displayPath(sessionsRoot.appendingPathComponent(id))) — report.md, video.mp4")
+            }
             let rendered = takeaways.map { TerminalText("\($0)") }
             if report.verdict == .satisfied {
                 makeNoora().success(.alert(TerminalText("\(report.headline)"), takeaways: rendered))
             } else {
                 makeNoora().error(.alert(TerminalText("\(report.headline)"), takeaways: rendered))
             }
+        }
+
+        /// Relative to the working directory when it is inside it: an absolute
+        /// path is noise when the reader is standing in the checkout.
+        private static func displayPath(_ url: URL) -> String {
+            let cwd = FileManager.default.currentDirectoryPath
+            let path = url.standardizedFileURL.path
+            guard path.hasPrefix(cwd + "/") else { return path }
+            return String(path.dropFirst(cwd.count + 1))
         }
     }
 

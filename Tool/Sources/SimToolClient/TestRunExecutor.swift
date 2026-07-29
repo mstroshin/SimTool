@@ -127,6 +127,13 @@ public final class TestRunExecutor: @unchecked Sendable {
 
     private var sessionId: String?
     private var evidenceDirectory: URL?
+    /// The run's own directory. Unlike `evidenceDirectory` this is not gated on
+    /// the evidence level: `report.md` is the one artifact written for a person,
+    /// and `--evidence none` is a statement about captures, not about that.
+    private var sessionDirectory: URL?
+    /// `${VAR}` the test refers to without defining, for the report's
+    /// "what you have to supply" section.
+    private var requiredVariables: [String] = []
     private var evidenceFiles: [String] = []
     private var logCursor: Int?
     private var stateCursor: Int?
@@ -174,6 +181,8 @@ public final class TestRunExecutor: @unchecked Sendable {
         let recordedLaunch: ResolvedLaunch
         do {
             (launch, recordedLaunch) = try resolveLaunch(test)
+            requiredVariables = LaunchVariables.names(in: recordedLaunch, setup: test.setup)
+                .filter { test.variables[$0] == nil }
         } catch {
             return TestRunResult(
                 verdict: .infra,
@@ -200,8 +209,9 @@ public final class TestRunExecutor: @unchecked Sendable {
                 sessionId = session?.id
                 if let session {
                     onSessionStarted?(session)
-                    if let root = config.testSessionsPath, options.evidence != .none {
-                        evidenceDirectory = URL(fileURLWithPath: root).appendingPathComponent(session.id, isDirectory: true)
+                    if let root = config.testSessionsPath {
+                        sessionDirectory = URL(fileURLWithPath: root).appendingPathComponent(session.id, isDirectory: true)
+                        if options.evidence != .none { evidenceDirectory = sessionDirectory }
                     }
                 }
             } catch {
@@ -413,7 +423,8 @@ public final class TestRunExecutor: @unchecked Sendable {
         if cancelled {
             await drainStreams()
             let evidence = await collectEvidence(test: test, app: app, declaredMocks: declaredMocks)
-            await stopSession(status: .interrupted, verdict: .inconclusive, criteria: criteria, mocks: evidence.mocks, detached: true)
+            let stopped = await stopSession(status: .interrupted, verdict: .inconclusive, criteria: criteria, mocks: evidence.mocks, detached: true)
+            await writeReport(stopped, test: test)
             return TestRunResult(
                 verdict: .inconclusive,
                 kind: test.kind,
@@ -805,6 +816,7 @@ public final class TestRunExecutor: @unchecked Sendable {
             mocks: mocks,
             detached: false
         )
+        await writeReport(stopped, test: test)
         return TestRunResult(
             verdict: verdict,
             kind: test.kind,
@@ -817,6 +829,22 @@ public final class TestRunExecutor: @unchecked Sendable {
             evidence: evidenceFiles,
             infraReason: infraReason
         )
+    }
+
+    /// Written after the session is stopped, because that response is where the
+    /// finalized video length lives — and the report's timeline is in video time.
+    private func writeReport(_ stopped: TestSession?, test: TestDefinition) async {
+        guard let stopped, let directory = sessionDirectory else { return }
+        do {
+            try TestReportWriter.write(
+                session: stopped,
+                definition: test,
+                requiredVariables: requiredVariables,
+                into: directory
+            )
+        } catch {
+            await note(["Report not written: \(message(of: error))"])
+        }
     }
 
     @discardableResult
