@@ -174,7 +174,8 @@ final class TestFlowCommandTests: XCTestCase {
             XCTFail("expected a refusal")
         } catch {
             XCTAssertTrue(message(error).contains("SIMTOOL_FLOW_TEST_ACCOUNT"), message(error))
-            XCTAssertTrue(message(error).contains("never carries its value"), message(error))
+            XCTAssertTrue(message(error).contains("without defining it"), message(error))
+            XCTAssertTrue(message(error).contains("--var SIMTOOL_FLOW_TEST_ACCOUNT="), message(error))
         }
     }
 
@@ -193,6 +194,32 @@ final class TestFlowCommandTests: XCTestCase {
         XCTAssertEqual(profile.arguments, ["-Environment", "stable", "-FastLoginPhone", "${SIMTOOL_FLOW_TEST_ACCOUNT}"])
         XCTAssertEqual(profile.environment, ["SEED": "1"])
         XCTAssertTrue(prepared.notes.contains { $0.contains("not in this project's config") }, "\(prepared.notes)")
+    }
+
+    /// The whole point of writing the account into the test: the receiver runs
+    /// the archive with nothing exported.
+    func testAnArchiveWhoseTestDefinesItsVariablesRunsWithAnEmptyShell() async throws {
+        unsetenv("SIMTOOL_FLOW_TEST_ACCOUNT")
+        let archive = try await makeArchive(definingAccount: "+34600000000")
+
+        let prepared = try await TestSourceLoader.load(path: archive.path, config: nil)
+
+        XCTAssertEqual(prepared.definition.variables["SIMTOOL_FLOW_TEST_ACCOUNT"], "+34600000000")
+        XCTAssertEqual(prepared.manifest?.requires.env, [])
+        XCTAssertEqual(prepared.manifest?.requires.carries, ["SIMTOOL_FLOW_TEST_ACCOUNT"])
+    }
+
+    func testAnOverrideSatisfiesAVariableTheTestLeavesOpen() async throws {
+        unsetenv("SIMTOOL_FLOW_TEST_ACCOUNT")
+        let archive = try await makeArchive()
+
+        let prepared = try await TestSourceLoader.load(
+            path: archive.path,
+            config: nil,
+            overrides: ["SIMTOOL_FLOW_TEST_ACCOUNT": "+34611111111"]
+        )
+
+        XCTAssertEqual(prepared.definition.name, "Tab order")
     }
 
     func testAKnownLaunchProfileIsLeftToTheProjectConfig() async throws {
@@ -262,9 +289,13 @@ final class TestFlowCommandTests: XCTestCase {
 
     /// Packs an archive whose recorded launch is what a real run would have
     /// recorded: reset arguments, then the profile's, then the test's inline
-    /// ones, with `${VAR}` left unexpanded.
-    private func makeArchive() async throws -> URL {
-        let definition = try TestDefinitionParser.parse(Self.archivedYAML)
+    /// ones, with `${VAR}` left unexpanded. Passing `definingAccount` writes the
+    /// account into the packaged test, the way a self-contained test does.
+    private func makeArchive(definingAccount account: String? = nil) async throws -> URL {
+        let yaml = account.map { value in
+            "variables:\n  SIMTOOL_FLOW_TEST_ACCOUNT: \"\(value)\"\n" + Self.archivedYAML
+        } ?? Self.archivedYAML
+        let definition = try TestDefinitionParser.parse(yaml)
         let recorded = ResolvedLaunch(
             profile: "pyme-stable",
             arguments: definition.reset.launchArguments
@@ -279,9 +310,10 @@ final class TestFlowCommandTests: XCTestCase {
             reference: definition.reference,
             verdict: .unsatisfied,
             requires: TestFlowArchive.requirements(
-                testYAML: Self.archivedYAML,
+                testYAML: yaml,
                 launch: recorded,
-                app: definition.app
+                app: definition.app,
+                defined: definition.variables
             ),
             provenance: TestRunProvenance(
                 testFile: "tab_order.yml",
@@ -291,7 +323,7 @@ final class TestFlowCommandTests: XCTestCase {
         )
         let destination = workspace.appendingPathComponent("PROJ-42.simflow.zip")
         _ = try await TestFlowArchive.pack(
-            TestFlowArchive.Contents(manifest: manifest, testYAML: Self.archivedYAML, report: "# Tab order\n"),
+            TestFlowArchive.Contents(manifest: manifest, testYAML: yaml, report: "# Tab order\n"),
             to: destination
         )
         return destination

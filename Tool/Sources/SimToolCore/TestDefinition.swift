@@ -13,6 +13,8 @@ import Yams
 ///   Opening Settings displays the preferences screen and lets the user
 ///   enable an option.
 /// app: com.example.demo           # when present, the app is relaunched before steps
+/// variables:                      # values for the ${VAR} a profile or setup uses
+///   ACCOUNT: "+34600000000"       #   the account this test runs as, in the test
 /// launch:                         # how to launch it
 ///   profile: staging-account1     #   named recipe from .simtool/config.yml
 ///   arguments: [-UITesting]       #   appended after the profile's arguments
@@ -58,6 +60,14 @@ public struct TestDefinition: Equatable, Sendable {
     /// Stored and displayed, never interpreted: SimTool assumes no tracker.
     public var reference: String?
     public var app: String?
+    /// Values for the `${VAR}` references in a launch profile, in this test's
+    /// own launch arguments, and in `setup:` commands — written here so the test
+    /// says which account and which data it runs as, instead of depending on
+    /// whatever the shell happened to export.
+    ///
+    /// A value defined here wins over the process environment, which stays the
+    /// way to keep something out of the file. `--var NAME=value` overrides both.
+    public var variables: [String: String]
     public var launch: TestLaunch
     public var reset: TestReset
     public var mocks: [TestMock]
@@ -71,6 +81,7 @@ public struct TestDefinition: Equatable, Sendable {
         kind: TestKind? = nil,
         reference: String? = nil,
         app: String? = nil,
+        variables: [String: String] = [:],
         launch: TestLaunch = TestLaunch(),
         reset: TestReset = TestReset(),
         mocks: [TestMock] = [],
@@ -83,12 +94,28 @@ public struct TestDefinition: Equatable, Sendable {
         self.kind = kind
         self.reference = reference
         self.app = app
+        self.variables = variables
         self.launch = launch
         self.reset = reset
         self.mocks = mocks
         self.setup = setup
         self.stepTimeout = stepTimeout
         self.steps = steps
+    }
+
+    /// The variables a run substitutes, in precedence order: an explicit
+    /// override beats the test file, and the test file beats the environment.
+    ///
+    /// The file winning over the environment is what makes a run reproducible:
+    /// a stale `export` in someone's shell must not silently send the test to a
+    /// different account than the one it names.
+    public func resolvedVariables(
+        environment: [String: String],
+        overrides: [String: String] = [:]
+    ) -> [String: String] {
+        environment
+            .merging(variables) { _, fromTest in fromTest }
+            .merging(overrides) { _, fromOverride in fromOverride }
     }
 
     /// The distinct criterion labels this test claims, in first-appearance
@@ -498,8 +525,8 @@ public enum TestDefinitionParser {
         }
 
         let knownKeys: Set<String> = [
-            "name", "description", "kind", "reference", "app", "launch", "reset",
-            "mocks", "setup", "launchArguments", "timeout", "steps",
+            "name", "description", "kind", "reference", "app", "variables", "launch",
+            "reset", "mocks", "setup", "launchArguments", "timeout", "steps",
         ]
         if let unknown = dictionary.keys.first(where: { !knownKeys.contains($0) }) {
             throw SimToolError("Unknown test key `\(unknown)`. Known keys: \(knownKeys.sorted().joined(separator: ", ")).")
@@ -553,6 +580,7 @@ public enum TestDefinitionParser {
             kind: kind,
             reference: dictionary["reference"].map { scalarString($0).trimmingCharacters(in: .whitespacesAndNewlines) },
             app: dictionary["app"].map(scalarString),
+            variables: try parseVariables(dictionary["variables"]),
             launch: launch,
             reset: try parseReset(dictionary["reset"]),
             mocks: try parseMocks(dictionary["mocks"]),
@@ -560,6 +588,26 @@ public enum TestDefinitionParser {
             stepTimeout: try dictionary["timeout"].map { try seconds($0, context: "timeout") } ?? 10,
             steps: steps
         )
+    }
+
+    // MARK: - variables
+
+    private static func parseVariables(_ raw: Any?) throws -> [String: String] {
+        guard let raw else { return [:] }
+        guard let mapping = raw as? [String: Any] else {
+            throw SimToolError("`variables` must be a mapping of NAME: value.")
+        }
+        var variables: [String: String] = [:]
+        for (name, value) in mapping {
+            guard SimulatorAppLifecycleClient.isValidEnvironmentKey(name) else {
+                throw SimToolError("`variables` name `\(name)` may contain only letters, numbers and underscores — it is referenced as `${\(name)}`.")
+            }
+            if value is [Any] || value is [String: Any] {
+                throw SimToolError("`variables.\(name)` must be a single value, not a list or a mapping.")
+            }
+            variables[name] = scalarString(value)
+        }
+        return variables
     }
 
     // MARK: - launch

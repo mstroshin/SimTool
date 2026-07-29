@@ -207,6 +207,20 @@ final class TestFlowArchiveTests: XCTestCase {
         XCTAssertEqual(requires.simtool, "0.9.0")
     }
 
+    /// A value the test defines is not something the receiver has to supply —
+    /// but it does travel with the archive, so it is listed as carried.
+    func testVariablesTheTestDefinesAreCarriedNotRequired() {
+        let requires = TestFlowArchive.requirements(
+            testYAML: "variables:\n  PYME_PHONE: \"+34600000000\"\nsetup:\n  - echo ${SEED_TOKEN}\n",
+            launch: ResolvedLaunch(arguments: ["-FastLoginPhone", "${PYME_PHONE}"]),
+            app: "com.example.app",
+            defined: ["PYME_PHONE": "+34600000000"]
+        )
+
+        XCTAssertEqual(requires.env, ["SEED_TOKEN"])
+        XCTAssertEqual(requires.carries, ["PYME_PHONE"])
+    }
+
     func testRequirementsAreEmptyWhenNothingIsParameterised() {
         let requires = TestFlowArchive.requirements(
             testYAML: "name: plain\nsteps: []\n",

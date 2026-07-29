@@ -1041,6 +1041,8 @@ struct TestCommand: AsyncParsableCommand {
                 Opening Settings displays the preferences screen and
                 lets the user enable an option.
               app: com.example.demo           # optional; relaunched before steps
+              variables:                      # optional; values for the ${VAR} below
+                ACCOUNT: "+34600000000"       #   the account this test runs as
               launch:                         # optional; how to launch it
                 profile: staging-account1     #   a `profiles:` entry from .simtool/config.yml
                 arguments: [-UITesting]       #   appended after the profile's arguments
@@ -1073,6 +1075,13 @@ struct TestCommand: AsyncParsableCommand {
             disappears for assertHidden), so tests need no explicit sleeps.
             Setup commands reset persisted state; their exit codes are recorded
             in the session but never fail the test.
+
+            `${VAR}` in a launch profile, in this test's own arguments or in a
+            setup command is resolved from `variables:` first, then from the
+            environment; `--var NAME=value` overrides both. Writing the account
+            under `variables:` is what makes a test say which account it runs as
+            and travel ready-to-run — at the cost of carrying that value in the
+            file. Leave it out of `variables:` to keep it in the shell instead.
 
             An assertion carrying `criterion:` is part of the claim the test
             verifies; every other step merely stages it. That is what lets a run
@@ -1118,13 +1127,17 @@ struct TestCommand: AsyncParsableCommand {
         @Option(help: "Path to .simtool/config.yml, for launch profiles and the default app.")
         var config: String?
 
+        @Option(name: .customLong("var"), help: "Override a ${VAR} as NAME=value. Wins over the test's `variables:` and over the environment; repeatable.")
+        var variables: [String] = []
+
         @OptionGroup var serverOptions: ServerOptions
         @OptionGroup var common: CommonJSON
 
         func run() async throws {
             guard repeatCount >= 1 else { throw SimToolError("--repeat must be at least 1.") }
+            let overrides = try Self.parseVariableOverrides(variables)
             let projectConfig = try ProjectConfigLoader.loadIfPresent(explicitPath: config)
-            let prepared = try await TestSourceLoader.load(path: test, config: projectConfig)
+            let prepared = try await TestSourceLoader.load(path: test, config: projectConfig, overrides: overrides)
             let parsed = prepared.definition
             let testURL = prepared.file
             if !common.json, let description = parsed.description {
@@ -1154,7 +1167,8 @@ struct TestCommand: AsyncParsableCommand {
                         profiles: (projectConfig?.profiles ?? []) + prepared.extraProfiles,
                         defaultApp: projectConfig?.bundleId,
                         appFacingServerURL: projectConfig?.appFacingServerURL,
-                        projectRoot: projectConfig?.simtoolDirectory.deletingLastPathComponent()
+                        projectRoot: projectConfig?.simtoolDirectory.deletingLastPathComponent(),
+                        variableOverrides: overrides
                     )
                 )
                 if !common.json {
@@ -1175,6 +1189,17 @@ struct TestCommand: AsyncParsableCommand {
             }
             let code = report.verdict.exitCode
             if code != 0 { throw ExitCode(code) }
+        }
+
+        static func parseVariableOverrides(_ raw: [String]) throws -> [String: String] {
+            var overrides: [String: String] = [:]
+            for entry in raw {
+                guard let separator = entry.firstIndex(of: "="), separator != entry.startIndex else {
+                    throw SimToolError("--var expects NAME=value, got \"\(entry)\".")
+                }
+                overrides[String(entry[entry.startIndex..<separator])] = String(entry[entry.index(after: separator)...])
+            }
+            return overrides
         }
 
         /// Says which build this machine is about to run against, next to the

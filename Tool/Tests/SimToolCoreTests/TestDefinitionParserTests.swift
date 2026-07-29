@@ -318,6 +318,80 @@ final class TestDefinitionParserTests: XCTestCase {
         }
     }
 
+    // MARK: - variables
+
+    func testParsesVariablesAsText() throws {
+        let test = try TestDefinitionParser.parse("""
+        variables:
+          ACCOUNT: "+34600000000"
+          PASSCODE: 1234
+          SEEDED: true
+        steps:
+          - wait: 1
+        """)
+
+        XCTAssertEqual(test.variables, ["ACCOUNT": "+34600000000", "PASSCODE": "1234", "SEEDED": "true"])
+    }
+
+    func testRejectsAVariableNameThatCannotBeReferenced() {
+        XCTAssertThrowsError(try TestDefinitionParser.parse("""
+        variables:
+          "my account": x
+        steps:
+          - wait: 1
+        """)) { error in
+            XCTAssertTrue(message(error).contains("only letters, numbers and underscores"), message(error))
+        }
+    }
+
+    func testRejectsAStructuredVariableValue() {
+        XCTAssertThrowsError(try TestDefinitionParser.parse("""
+        variables:
+          ACCOUNTS: [a, b]
+        steps:
+          - wait: 1
+        """)) { error in
+            XCTAssertTrue(message(error).contains("must be a single value"), message(error))
+        }
+    }
+
+    /// The file wins over the environment so a run is reproducible: a stale
+    /// `export` in someone's shell must not silently send the test to another
+    /// account than the one it names.
+    func testTheTestFileWinsOverTheEnvironmentAndOverridesWinOverBoth() throws {
+        let test = try TestDefinitionParser.parse("""
+        variables:
+          ACCOUNT: from-test
+        steps:
+          - wait: 1
+        """)
+
+        XCTAssertEqual(
+            test.resolvedVariables(environment: ["ACCOUNT": "from-shell", "HOME": "/tmp"]),
+            ["ACCOUNT": "from-test", "HOME": "/tmp"]
+        )
+        XCTAssertEqual(
+            test.resolvedVariables(environment: ["ACCOUNT": "from-shell"], overrides: ["ACCOUNT": "from-flag"]),
+            ["ACCOUNT": "from-flag"]
+        )
+    }
+
+    func testATestWithoutVariablesStillSeesTheEnvironment() throws {
+        let test = try TestDefinitionParser.parse("steps:\n  - wait: 1\n")
+
+        XCTAssertEqual(test.resolvedVariables(environment: ["ACCOUNT": "from-shell"]), ["ACCOUNT": "from-shell"])
+    }
+
+    func testUnresolvedVariableErrorNamesEveryWayToSupplyIt() {
+        let launch = ResolvedLaunch(arguments: ["-AutoLogin", "${ACCOUNT}"])
+        XCTAssertThrowsError(try launch.resolvingVariables(using: [:], context: "launch")) { error in
+            let text = message(error)
+            XCTAssertTrue(text.contains("`variables:`"), text)
+            XCTAssertTrue(text.contains("--var ACCOUNT="), text)
+            XCTAssertTrue(text.contains("export it"), text)
+        }
+    }
+
     // MARK: - reset
 
     func testParsesReset() throws {
@@ -463,5 +537,9 @@ final class TestDefinitionParserTests: XCTestCase {
         XCTAssertTrue(TestTarget(kind: .label, query: "Action").matches(node))
         XCTAssertTrue(TestTarget(kind: .text, query: "items").matches(node))
         XCTAssertFalse(TestTarget(kind: .text, query: "missing").matches(node))
+    }
+
+    private func message(_ error: Error) -> String {
+        (error as? SimToolError)?.message ?? error.localizedDescription
     }
 }

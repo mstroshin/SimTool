@@ -24,8 +24,13 @@ public struct TestRunOptions: Sendable {
     public var appFacingServerURL: String?
     /// Checkout the run happens in, for the provenance commit.
     public var projectRoot: URL?
-    /// Source of `${VAR}` values in profiles and launch arguments.
+    /// Where `${VAR}` values come from when the test does not define them
+    /// itself. The test's own `variables:` win over this; see
+    /// `TestDefinition.resolvedVariables`.
     public var variables: [String: String]
+    /// `--var NAME=value`: wins over both the test file and the environment, so
+    /// a received test can be run as a different account without editing it.
+    public var variableOverrides: [String: String]
     /// How long to wait for the app to confirm it applied the run's mock rules.
     public var mockAckTimeoutSeconds: Double
 
@@ -40,6 +45,7 @@ public struct TestRunOptions: Sendable {
         appFacingServerURL: String? = nil,
         projectRoot: URL? = nil,
         variables: [String: String] = ProcessInfo.processInfo.environment,
+        variableOverrides: [String: String] = [:],
         mockAckTimeoutSeconds: Double = 20
     ) {
         self.title = title
@@ -52,6 +58,7 @@ public struct TestRunOptions: Sendable {
         self.appFacingServerURL = appFacingServerURL
         self.projectRoot = projectRoot
         self.variables = variables
+        self.variableOverrides = variableOverrides
         self.mockAckTimeoutSeconds = mockAckTimeoutSeconds
     }
 }
@@ -262,7 +269,7 @@ public final class TestRunExecutor: @unchecked Sendable {
         // 3 — setup shell. Kept non-fatal on purpose: these commands mostly
         // delete state that may not exist yet.
         for (index, command) in test.setup.enumerated() {
-            let status = await runSetupCommand(command, udid: config.udid, app: app)
+            let status = await runSetupCommand(command, udid: config.udid, app: app, variables: variables(for: test))
             await narrate("Setup \(index + 1)/\(test.setup.count) (\(status)): \(command.trimmingCharacters(in: .whitespacesAndNewlines))")
         }
 
@@ -488,9 +495,13 @@ public final class TestRunExecutor: @unchecked Sendable {
 
     // MARK: - staging
 
+    private func variables(for test: TestDefinition) -> [String: String] {
+        test.resolvedVariables(environment: options.variables, overrides: options.variableOverrides)
+    }
+
     /// Returns the launch to use and the one to record. They differ by
-    /// `${VAR}` expansion: the artifact must not carry an account or a token
-    /// just because the run needed one.
+    /// `${VAR}` expansion: the timeline must not repeat a value the test either
+    /// deliberately keeps in the shell or already states once in `variables:`.
     private func resolveLaunch(_ test: TestDefinition) throws -> (used: ResolvedLaunch, recorded: ResolvedLaunch) {
         var profile: LaunchProfile?
         if let name = test.launch.profile, !name.isEmpty {
@@ -505,7 +516,7 @@ public final class TestRunExecutor: @unchecked Sendable {
         }
         var recorded = test.launch.resolved(profile: profile)
         recorded.arguments = test.reset.launchArguments + recorded.arguments
-        let used = try recorded.resolvingVariables(using: options.variables, context: "launch")
+        let used = try recorded.resolvingVariables(using: variables(for: test), context: "launch")
         return (used, recorded)
     }
 
@@ -544,7 +555,7 @@ public final class TestRunExecutor: @unchecked Sendable {
     /// Setup commands reset persisted state before launch (delete a defaults
     /// key, clear a container), so a non-zero exit — the key not existing on a
     /// first run — is reported but never fails the test.
-    private func runSetupCommand(_ command: String, udid: String, app: String?) async -> String {
+    private func runSetupCommand(_ command: String, udid: String, app: String?, variables: [String: String]) async -> String {
         let rendered = command
             .replacingOccurrences(of: "{udid}", with: udid)
             .replacingOccurrences(of: "{app}", with: app ?? "")
@@ -552,6 +563,10 @@ public final class TestRunExecutor: @unchecked Sendable {
             let output = try await ProcessRunner.run(
                 executable: URL(fileURLWithPath: "/bin/sh"),
                 arguments: ["-c", rendered],
+                // The test's own `variables:` are exported to the shell too, so
+                // `$ACCOUNT` in a setup command means the same thing it means in
+                // a launch argument.
+                environment: variables,
                 timeoutSeconds: 60
             )
             return output.status == 0 ? "ok" : "exit \(output.status)"

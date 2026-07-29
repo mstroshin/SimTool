@@ -1,0 +1,1 @@
+Simtool is project agnostic tool. Do not store project relative information in this repository.

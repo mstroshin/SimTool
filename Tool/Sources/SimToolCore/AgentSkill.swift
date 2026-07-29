@@ -400,6 +400,8 @@ public enum AgentSkill {
         description: >               # what is tested and the expected result
           Home shows the summed count badge; opening the second tab clears the red dot.
         app: com.example.myapp.debug # relaunched before steps
+        variables:                   # values for the ${VAR} the profile/setup below use
+          ACCOUNT: "+34600000000"    #   the account this test runs as
         launch:                      # how to launch it
           profile: staging-account1  #   a `profiles:` entry from .simtool/config.yml
           arguments: [-RemoteConfig, some_flag, "true"]   # appended after the profile's
@@ -434,10 +436,19 @@ public enum AgentSkill {
           label/title exactly, `text` is a case-insensitive substring across fields;
           a bare string target means `text`.
         - **Launch profiles keep app-specific argv out of the test.** A test names a
-          profile; the accounts, environment switches and master switch live in
-          `profiles:` in `.simtool/config.yml` (see [Project options](#project-options)),
-          where `${VAR}` reads from your shell — so no test file carries a credential.
-          An unset `${VAR}` fails the run rather than expanding to nothing.
+          profile; the environment switches, the master switch and the shape of the
+          login arguments live in `profiles:` in `.simtool/config.yml` (see
+          [Project options](#project-options)), which refers to accounts as `${VAR}`.
+        - **`variables:` says which account the test runs as.** That is what makes a test
+          reproducible and self-contained: the value is in the file, so the same file
+          reproduces the same run for whoever receives it, with nothing to export.
+          Resolution order is `--var NAME=value`, then `variables:`, then the process
+          environment — the file beating the environment on purpose, so a stale `export`
+          in someone's shell cannot silently redirect the test to another account. Leave
+          a variable out of `variables:` when its value must stay in the shell (a real
+          credential, anything for a production account); an unresolved `${VAR}` fails
+          the run rather than expanding to nothing. `variables:` also reach `setup:`
+          commands as shell environment.
         - **`reset:` replaces hand-written state-clearing shell** and travels with the
           test. `permissions:` pre-answers the system alerts that would otherwise block
           the drive — `simtool input` cannot reach a system alert, and while one is up
@@ -520,9 +531,12 @@ public enum AgentSkill {
         `test.yml` with `${VAR}` unexpanded, `report.md`, and `runs/<session>/` with
         `session.json`, the evidence files and `video.mp4`.
 
-        - **Nothing secret travels.** `${VAR}` values stay in the sender's shell;
-          `requires.env` only names them. `test run <archive>` checks those variables
-          *before* touching the simulator and stops with the list when one is missing.
+        - **The test says which account it runs as.** Write it under `variables:` and
+          the archive travels ready-to-run — `requires.carries` lists what it brought,
+          and the receiver needs no setup. Anything the test refers to but does not
+          define stays a requirement (`requires.env`), checked *before* the simulator is
+          touched; the receiver supplies it by exporting it or with `--var NAME=value`,
+          which also overrides a value the test does define.
         - **The archive is self-contained about the launch.** When the receiver's
           `.simtool/config.yml` has no `profiles:` entry by that name, the launch the
           sender recorded stands in for it, and the run says so.

@@ -177,16 +177,17 @@ swift run simtool test show PROJ-42.simflow.zip --import        # replay it in t
 swift run simtool test run PROJ-42.simflow.zip                  # run it here
 ```
 
-The archive holds `manifest.json` (claim, verdict, criteria, provenance and
-what the receiver must supply), `test.yml` with `${VAR}` left unexpanded,
-`report.md`, and `runs/<session>/` with the session and its evidence. Two things
-deliberately stay out: the values behind `${VAR}` — `requires.env` names them,
-so an account never travels with a test — and the app binary, since the
-receiver installs the build they want to verify. `test run` on an archive checks
-those variables before it touches the simulator, falls back to the launch the
-sender recorded when this project's config has no such profile, and prints the
-installed build next to the recorded one, because a repro re-run against
-different code and pronounced fixed is the failure worth preventing.
+The archive holds `manifest.json` (claim, verdict, criteria, provenance and what
+the receiver must supply), `test.yml` as it ran, `report.md`, and
+`runs/<session>/` with the session and its evidence. A test that defines its
+`variables:` travels ready-to-run and says so (`requires.carries`); anything it
+refers to without defining stays the receiver's to supply (`requires.env`),
+checked before the simulator is touched. The app binary never travels —
+`requires.app` names the bundle id, because the receiver installs the build they
+want to verify. `test run` on an archive also falls back to the launch the sender
+recorded when this project's config has no such profile, and prints the installed
+build next to the recorded one, since a repro re-run against different code and
+pronounced fixed is the failure worth preventing.
 
 Evidence does carry the account's real traffic and log output — that is what
 makes it worth reading inside the team, and why `--no-evidence` exists for
@@ -449,10 +450,19 @@ profiles:                           # optional named launch recipes for tests
 ```
 
 A test refers to a profile by name (`launch: { profile: staging-account1 }`), so
-the app-specific arguments — accounts, environment switches, a UI-testing master
-switch — stay in the project config and out of every test file. `${VAR}` is read
-from the environment when the test runs, which keeps credentials out of both
-files; an unset variable fails the run rather than expanding to nothing.
+the app-specific arguments — environment switches, a UI-testing master switch,
+the shape of the login arguments — stay in the project config and out of every
+test file.
+
+`${VAR}` in a profile, in a test's own arguments or in a `setup:` command is
+resolved from the test's `variables:` first, then from the process environment,
+and `--var NAME=value` overrides both. Writing the account under `variables:` is
+what makes a test state which account it runs as and travel ready-to-run; the
+file beats the environment on purpose, so a stale `export` cannot silently
+redirect a test to a different account. Leave a variable out of `variables:` when
+its value must stay in the shell. Either way an unresolved `${VAR}` fails the run
+rather than expanding to nothing, because an empty account argument logs in as
+nobody and the test then tests nothing.
 
 `simulator:` is also the default device for **every** command, not just
 `run`/`serve`/`open`. With several simulators booted and neither `--device` nor a

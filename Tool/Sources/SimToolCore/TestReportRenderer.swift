@@ -189,6 +189,10 @@ public enum TestReportRenderer {
         } else {
             out.paragraph("You need " + sentence(needs) + ".")
         }
+        if !manifest.requires.carries.isEmpty {
+            let names = manifest.requires.carries.map { "`\($0)`" }.joined(separator: ", ")
+            out.paragraph("The test defines \(names) itself, so \(manifest.requires.carries.count == 1 ? "that value travels" : "those values travel") with this archive and you need no setup for \(manifest.requires.carries.count == 1 ? "it" : "them"). To run as something else, pass `--var NAME=value` — it overrides the test without editing it.")
+        }
         var lines: [String] = []
         for name in manifest.requires.env {
             lines.append("export \(name)=…")
@@ -207,17 +211,19 @@ public enum TestReportRenderer {
 
     private static func forwarding(_ out: inout Markdown, manifest: TestFlowManifest, includedFiles: [String: [String]]) {
         let packaged = Set(manifest.runs.flatMap { files(for: $0, includedFiles: includedFiles) })
-        let sensitive = packaged.intersection(["logs.jsonl", "network.jsonl", "state.jsonl"])
-        guard !sensitive.isEmpty else {
-            if !manifest.notes.isEmpty {
-                out.heading(2, "What is not here")
-                for note in manifest.notes { out.bullet(note) }
-                out.blank()
-            }
-            return
+        let sensitive = packaged.intersection(["logs.jsonl", "network.jsonl", "state.jsonl"]).sorted()
+        var reasons: [String] = []
+        if !sensitive.isEmpty {
+            let one = sensitive.count == 1
+            reasons.append("\(sensitive.map { "`\($0)`" }.joined(separator: " and ")) \(one ? "holds" : "hold") the real traffic and log output of the account the run used — identifiers, tokens, whatever the app printed. That is what makes \(one ? "it" : "them") worth reading, and what makes this archive team-internal. Re-export with `--no-evidence` for anywhere else.")
         }
-        out.heading(2, "Before you forward this")
-        out.paragraph("\(sensitive.sorted().map { "`\($0)`" }.joined(separator: " and ")) hold the real traffic and log output of the account the run used — identifiers, tokens, whatever the app printed. That is what makes them worth reading, and what makes this archive team-internal. Re-export with `--no-evidence` for anywhere else.")
+        if !manifest.requires.carries.isEmpty {
+            reasons.append("`test.yml` defines \(manifest.requires.carries.map { "`\($0)`" }.joined(separator: ", ")) inline — the point being that the test runs as-is, the cost being that \(manifest.requires.carries.count == 1 ? "the value goes" : "the values go") wherever this file goes. Move \(manifest.requires.carries.count == 1 ? "it" : "them") to the environment and refer to \(manifest.requires.carries.count == 1 ? "it" : "them") as `${NAME}` if that is not wanted.")
+        }
+        if !reasons.isEmpty {
+            out.heading(2, "Before you forward this")
+            for reason in reasons { out.paragraph(reason) }
+        }
         if !manifest.notes.isEmpty {
             out.heading(2, "What is not here")
             for note in manifest.notes { out.bullet(note) }

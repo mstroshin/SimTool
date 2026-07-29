@@ -45,7 +45,7 @@ public enum LaunchVariables {
                 throw SimToolError("\(context): empty variable reference `${}` in \"\(text)\".")
             }
             guard let value = environment[name] else {
-                throw SimToolError("\(context): `${\(name)}` is not set in the environment. Export it before running, or inline the value.")
+                throw SimToolError("\(context): nothing defines `${\(name)}`. Add it under `variables:` in the test, pass `--var \(name)=…`, or export it.")
             }
             result += value
             rest = afterOpen[afterOpen.index(after: close)...]

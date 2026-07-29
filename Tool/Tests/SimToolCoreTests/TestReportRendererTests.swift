@@ -116,6 +116,19 @@ final class TestReportRendererTests: XCTestCase {
         XCTAssertTrue(report.contains("The launch profile `pyme-stable` does not have to exist"), report)
     }
 
+    func testSaysTheTestCarriesItsOwnValuesAndHowToOverrideThem() {
+        var subject = manifest()
+        subject.requires = TestFlowManifest.Requires(env: [], app: "com.example.app", simtool: "0.9.0", carries: ["PYME_PHONE"])
+
+        let report = TestReportRenderer.render(manifest: subject, sessions: [session()])
+
+        XCTAssertTrue(report.contains("The test defines `PYME_PHONE` itself"), report)
+        XCTAssertTrue(report.contains("--var NAME=value"), report)
+        XCTAssertFalse(report.contains("export PYME_PHONE=…"), report)
+        // And the forwarding warning has to mention it: the value is in the file.
+        XCTAssertTrue(report.contains("`test.yml` defines `PYME_PHONE` inline"), report)
+    }
+
     func testWarnsAboutForwardingWhenTheAccountsTrafficTravels() {
         let report = TestReportRenderer.render(manifest: manifest(), sessions: [session()])
 

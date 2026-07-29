@@ -117,7 +117,8 @@ extension TestCommand {
                 requires: TestFlowArchive.requirements(
                     testYAML: yaml,
                     launch: provenance?.launch,
-                    app: provenance?.appBundleId ?? definition?.app
+                    app: provenance?.appBundleId ?? definition?.app,
+                    defined: definition?.variables ?? [:]
                 ),
                 provenance: provenance,
                 notes: notes
@@ -271,6 +272,12 @@ extension TestCommand {
             }
             if let app = manifest.requires.app {
                 takeaways.append("…and have \(app) installed")
+            }
+            // The test defining its own values is what makes the archive
+            // runnable as-is, and also what puts them inside it. Both halves of
+            // that trade are worth saying out loud.
+            if !manifest.requires.carries.isEmpty {
+                takeaways.append("Runs as-is: the test defines \(manifest.requires.carries.joined(separator: ", ")) — so the archive carries \(manifest.requires.carries.count == 1 ? "that value" : "those values")")
             }
             if packaged.contains(where: { ["logs.jsonl", "network.jsonl", "state.jsonl"].contains($0) }) {
                 takeaways.append("Contains the account's real traffic and logs — team-internal; re-export with --no-evidence for anywhere else")
@@ -427,6 +434,9 @@ extension TestCommand {
             if !manifest.requires.env.isEmpty { needs.append("export " + manifest.requires.env.joined(separator: ", ")) }
             if let app = manifest.requires.app { needs.append("\(app) installed") }
             if !needs.isEmpty { rows.append(("Needs", [needs.joined(separator: " · ")])) }
+            if !manifest.requires.carries.isEmpty {
+                rows.append(("Defines", [manifest.requires.carries.joined(separator: ", ") + " — in the test, so nothing to export (`--var NAME=value` overrides)"]))
+            }
             let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).flatMap { $0 }
             rows.append(("Carries", ["\(entries.count) files" + (size.map { ", \(formatBytes($0))" } ?? "")]))
             if !manifest.notes.isEmpty { rows.append(("Not here", manifest.notes)) }
@@ -469,7 +479,11 @@ struct PreparedTest {
 }
 
 enum TestSourceLoader {
-    static func load(path: String, config: ProjectConfig?) async throws -> PreparedTest {
+    static func load(
+        path: String,
+        config: ProjectConfig?,
+        overrides: [String: String] = [:]
+    ) async throws -> PreparedTest {
         let url = URL(fileURLWithPath: path)
         guard TestFlowArchive.isArchive(url) else {
             return PreparedTest(
@@ -480,10 +494,14 @@ enum TestSourceLoader {
                 notes: []
             )
         }
-        return try await loadArchive(url, config: config)
+        return try await loadArchive(url, config: config, overrides: overrides)
     }
 
-    private static func loadArchive(_ url: URL, config: ProjectConfig?) async throws -> PreparedTest {
+    private static func loadArchive(
+        _ url: URL,
+        config: ProjectConfig?,
+        overrides: [String: String]
+    ) async throws -> PreparedTest {
         let manifest = try await TestFlowArchive.manifest(in: url)
         guard let data = try await TestFlowArchive.read(TestFlowArchive.testName, in: url),
               let yaml = String(data: data, encoding: .utf8)
@@ -492,18 +510,6 @@ enum TestSourceLoader {
         }
 
         var notes: [String] = []
-        // Before anything touches the simulator: a missing variable fails the
-        // launch minutes later with a much worse message.
-        let missing = manifest.requires.env.filter { (ProcessInfo.processInfo.environment[$0] ?? "").isEmpty }
-        if !missing.isEmpty {
-            let one = missing.count == 1
-            throw SimToolError("""
-                \(url.lastPathComponent) needs \(one ? "a variable" : "variables") this shell does not have: \(missing.joined(separator: ", ")). \
-                The archive names \(one ? "it" : "them") but never carries \(one ? "its value" : "their values") — \
-                \(one ? "it is" : "they are") the account it ran as. Export \(one ? "it" : "them") and run again.
-                """)
-        }
-
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("simtool-run-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -519,6 +525,30 @@ enum TestSourceLoader {
         } catch {
             let reason = (error as? SimToolError)?.message ?? error.localizedDescription
             throw SimToolError("The test packaged in \(url.lastPathComponent) does not parse: \(reason)" + (manifest.requires.simtool.map { " It was written by simtool \($0); this is \(SimToolVersion.current)." } ?? ""))
+        }
+
+        // Checked against the packaged test rather than the sender's `requires`
+        // list, and before anything touches the simulator: an unresolved
+        // variable otherwise fails the launch minutes later with a worse
+        // message. Values the test defines itself need nothing from the receiver.
+        let referenced = TestFlowArchive.requirements(
+            testYAML: yaml,
+            launch: manifest.provenance?.launch,
+            app: nil,
+            defined: definition.variables
+        ).env
+        let available = definition.resolvedVariables(
+            environment: ProcessInfo.processInfo.environment,
+            overrides: overrides
+        )
+        let missing = referenced.filter { (available[$0] ?? "").isEmpty }
+        if !missing.isEmpty {
+            let one = missing.count == 1
+            throw SimToolError("""
+                \(url.lastPathComponent) leaves \(one ? "a variable" : "variables") for you to supply: \(missing.joined(separator: ", ")). \
+                The test refers to \(one ? "it" : "them") without defining \(one ? "it" : "them") — usually the account it runs as. \
+                Export \(one ? "it" : "them"), pass `--var \(missing[0])=…`, or add \(one ? "it" : "them") under `variables:` in the test.
+                """)
         }
 
         var extraProfiles: [LaunchProfile] = []

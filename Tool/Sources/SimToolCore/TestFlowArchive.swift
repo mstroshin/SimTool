@@ -14,18 +14,33 @@ public struct TestFlowManifest: Codable, Equatable, Sendable {
 
     /// Everything the receiver must already have. Named, never carried.
     public struct Requires: Codable, Equatable, Sendable {
-        /// `${VAR}` names the test, its launch profile or its setup refer to.
-        /// Names only — these are accounts and credentials.
+        /// `${VAR}` names the test, its launch profile or its setup refer to and
+        /// does *not* define itself. Names only, never values — the receiver
+        /// supplies these.
         public var env: [String]
         /// Bundle id that has to be installed on the simulator.
         public var app: String?
         /// The `simtool` version that wrote the archive.
         public var simtool: String?
+        /// Variables the packaged `test.yml` defines itself, so the receiver
+        /// needs no setup for them — and so a reader knows this archive carries
+        /// those values (an account, a seed) rather than only naming them.
+        public var carries: [String]
 
-        public init(env: [String] = [], app: String? = nil, simtool: String? = nil) {
+        public init(env: [String] = [], app: String? = nil, simtool: String? = nil, carries: [String] = []) {
             self.env = env
             self.app = app
             self.simtool = simtool
+            self.carries = carries
+        }
+
+        /// Tolerates archives written before `carries` existed.
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            env = try container.decodeIfPresent([String].self, forKey: .env) ?? []
+            app = try container.decodeIfPresent(String.self, forKey: .app)
+            simtool = try container.decodeIfPresent(String.self, forKey: .simtool)
+            carries = try container.decodeIfPresent([String].self, forKey: .carries) ?? []
         }
     }
 
@@ -334,12 +349,16 @@ public enum TestFlowArchive {
     }
 
     /// The `${VAR}` names and the app an archive's receiver has to supply.
+    ///
     /// Reads the launch too, because a profile's arguments live in the sender's
-    /// `config.yml` and never appear in the test file itself.
+    /// `config.yml` and never appear in the test file itself. Names the test
+    /// defines in its own `variables:` are not requirements — the test carries
+    /// those values, which is the point of writing them there.
     public static func requirements(
         testYAML: String,
         launch: ResolvedLaunch?,
         app: String?,
+        defined: [String: String] = [:],
         simtoolVersion: String? = SimToolVersion.current
     ) -> TestFlowManifest.Requires {
         var names = LaunchVariables.names(in: testYAML)
@@ -351,7 +370,12 @@ public enum TestFlowArchive {
             launch.environment.values.sorted().forEach(add)
             if let deeplink = launch.deeplink { add(deeplink) }
         }
-        return TestFlowManifest.Requires(env: names.sorted(), app: app, simtool: simtoolVersion)
+        return TestFlowManifest.Requires(
+            env: names.filter { defined[$0] == nil }.sorted(),
+            app: app,
+            simtool: simtoolVersion,
+            carries: defined.keys.sorted()
+        )
     }
 
     /// A file name for an archive of this test: the reference if it has one,
