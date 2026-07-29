@@ -1,58 +1,60 @@
 import Foundation
 
-/// Renders a run into the Markdown report that travels with it.
+/// Renders one recorded run into the Markdown report that sits next to it, at
+/// `.simtool/test-sessions/<id>/report.md`.
 ///
 /// The one artifact written for a person rather than a process: someone who has
 /// no checkout, no simulator and no intention of reading `session.json` should
 /// still be able to open this and see what was claimed, what happened, and what
-/// to look at next.
+/// to look at next. It is also what a sender attaches when handing the test on,
+/// so it says what the receiver has to supply and what the run's evidence
+/// carries.
 public enum TestReportRenderer {
     /// - Parameters:
-    ///   - manifest: the claim and the verdict.
-    ///   - sessions: packaged runs, in the order they should be read.
-    ///   - archiveName: the archive's file name, for the re-run instructions.
-    ///   - includedFiles: per session id, the file names that actually travel —
-    ///     a report must not point at evidence the export left behind.
+    ///   - session: the run, as it stands after being stopped — which is when
+    ///     the video length and the final criteria are known.
+    ///   - definition: the test, for the two things a session does not record:
+    ///     its `description` and the variables it defines itself. Optional
+    ///     because the file may be gone by the time a report is rendered.
+    ///   - requiredVariables: `${VAR}` the test refers to without defining, so
+    ///     the report names them as the receiver's to supply.
     public static func render(
-        manifest: TestFlowManifest,
-        sessions: [TestSession],
-        archiveName: String? = nil,
-        includedFiles: [String: [String]] = [:]
+        session: TestSession,
+        definition: TestDefinition? = nil,
+        requiredVariables: [String] = []
     ) -> String {
         var out = Markdown()
-        let kind = manifest.kind
-        out.heading(1, manifest.name ?? "Verifying test")
+        let kind = session.kind ?? definition?.kind
+        out.heading(1, definition?.name ?? session.title)
 
-        if let verdict = manifest.verdict {
-            out.paragraph("**\(manifest.headline ?? verdict.headline(for: kind))** — `\(verdict.rawValue)`, exit code \(verdict.exitCode)")
+        if let verdict = session.verdict {
+            out.paragraph("**\(verdict.headline(for: kind))** — `\(verdict.rawValue)`, exit code \(verdict.exitCode)")
         } else {
-            out.paragraph("_This archive carries a test that has not been run._")
+            out.paragraph("_This run makes no claim: the test declares no `kind:`, so it reports a plain \(session.status.rawValue)._")
         }
-        if let description = manifest.description?.trimmingCharacters(in: .whitespacesAndNewlines), !description.isEmpty {
+        if let description = definition?.description?.trimmingCharacters(in: .whitespacesAndNewlines), !description.isEmpty {
             out.paragraph(description)
         }
 
-        facts(&out, manifest: manifest, sessions: sessions)
-        claim(&out, manifest: manifest)
-        mocks(&out, manifest: manifest)
-        for session in sessions {
-            timeline(&out, session: session)
-        }
-        evidence(&out, manifest: manifest, sessions: sessions, includedFiles: includedFiles)
-        rerun(&out, manifest: manifest, archiveName: archiveName)
-        forwarding(&out, manifest: manifest, includedFiles: includedFiles)
+        facts(&out, session: session, kind: kind)
+        claim(&out, session: session, kind: kind)
+        mocks(&out, session: session)
+        timeline(&out, session: session)
+        evidence(&out, session: session)
+        rerun(&out, session: session, definition: definition, requiredVariables: requiredVariables)
+        forwarding(&out, session: session, definition: definition)
         return out.text
     }
 
     // MARK: - sections
 
-    private static func facts(_ out: inout Markdown, manifest: TestFlowManifest, sessions: [TestSession]) {
+    private static func facts(_ out: inout Markdown, session: TestSession, kind: TestKind?) {
         var rows: [(String, String)] = []
-        if let kind = manifest.kind {
+        if let kind {
             rows.append(("Verifying", kind == .bug ? "a bug — the claim is what *should* happen" : "a feature — the claim is its acceptance"))
         }
-        if let reference = manifest.reference, !reference.isEmpty { rows.append(("Reference", reference)) }
-        let provenance = manifest.provenance
+        if let reference = session.reference, !reference.isEmpty { rows.append(("Reference", reference)) }
+        let provenance = session.provenance
         if let app = provenance?.appBundleId {
             let build = InstalledAppBundle(path: URL(fileURLWithPath: "/"), version: provenance?.appVersion, build: provenance?.appBuild)
             rows.append(("App", [app, build.shortDescription].compactMap { $0 }.joined(separator: " ")))
@@ -60,26 +62,22 @@ public enum TestReportRenderer {
         if let commit = provenance?.commit, !commit.isEmpty {
             rows.append(("Commit", "`\(commit)`"))
         }
-        let device = [provenance?.deviceName, provenance?.runtime.map(prettyRuntime)].compactMap { $0 }.joined(separator: " · ")
+        let device = [provenance?.deviceName ?? session.deviceName, provenance?.runtime.map(prettyRuntime)]
+            .compactMap { $0 }
+            .joined(separator: " · ")
         if !device.isEmpty { rows.append(("Device", device)) }
-        if let session = sessions.first {
-            let recorded = timestamp(session.startedAt)
-            let tool = provenance?.simtoolVersion.map { " · simtool \($0)" } ?? ""
-            rows.append(("Recorded", recorded + tool))
-        }
-        rows.append(("Packaged", timestamp(manifest.exportedAt) + (manifest.requires.simtool.map { " · simtool \($0)" } ?? "")))
-        guard !rows.isEmpty else { return }
+        let tool = provenance?.simtoolVersion.map { " · simtool \($0)" } ?? ""
+        rows.append(("Recorded", timestamp(session.startedAt) + tool))
         out.table(headers: ["", ""], rows: rows.map { [$0.0, $0.1] })
     }
 
-    private static func claim(_ out: inout Markdown, manifest: TestFlowManifest) {
-        guard !manifest.criteria.isEmpty else {
-            out.heading(2, "The claim")
+    private static func claim(_ out: inout Markdown, session: TestSession, kind: TestKind?) {
+        out.heading(2, "The claim")
+        guard !session.criteria.isEmpty else {
             out.paragraph("This test declares no criteria, so it reports a plain pass or fail.")
             return
         }
-        out.heading(2, "The claim")
-        for criterion in manifest.criteria {
+        for criterion in session.criteria {
             let mark = switch criterion.status {
             case .met: "✓"
             case .unmet: "✗"
@@ -94,7 +92,7 @@ public enum TestReportRenderer {
             out.bullet(line)
         }
         out.blank()
-        switch manifest.kind {
+        switch kind {
         case .bug:
             out.paragraph("_Every step without a criterion only stages the scenario; a `bug` test stops at the first criterion that does not hold, because the reproduction is complete there._")
         case .feature:
@@ -104,16 +102,16 @@ public enum TestReportRenderer {
         }
     }
 
-    private static func mocks(_ out: inout Markdown, manifest: TestFlowManifest) {
-        guard !manifest.mocks.isEmpty else { return }
+    private static func mocks(_ out: inout Markdown, session: TestSession) {
+        guard !session.mocks.isEmpty else { return }
         out.heading(2, "Mocked backend")
         out.table(
             headers: ["Method", "Answered", "Strict"],
-            rows: manifest.mocks.map { mock in
+            rows: session.mocks.map { mock in
                 ["`\(mock.method)`", mock.hits == 1 ? "1 call" : "\(mock.hits) calls", mock.strict ? "yes" : "no"]
             }
         )
-        if manifest.mocks.contains(where: { $0.strict }) {
+        if session.mocks.contains(where: { $0.strict }) {
             out.paragraph("_A strict rule that answers nothing makes the run `infra` rather than a result: the test would have been measuring the real backend._")
         }
     }
@@ -156,88 +154,68 @@ public enum TestReportRenderer {
         }
     }
 
-    private static func evidence(
-        _ out: inout Markdown,
-        manifest: TestFlowManifest,
-        sessions: [TestSession],
-        includedFiles: [String: [String]]
-    ) {
-        let runs = manifest.runs.filter { !files(for: $0, includedFiles: includedFiles).isEmpty }
-        guard !runs.isEmpty else { return }
+    private static func evidence(_ out: inout Markdown, session: TestSession) {
+        var names = ["session.json"] + session.evidence
+        if session.videoDurationSeconds != nil { names.append("video.mp4") }
         out.heading(2, "Evidence")
-        for run in runs {
-            let names = files(for: run, includedFiles: includedFiles)
-            out.paragraph("`\(TestFlowArchive.runsDirectoryName)/\(run.session)/`")
-            let session = sessions.first { $0.id == run.session }
-            out.table(
-                headers: ["File", "What it holds"],
-                rows: names.sorted().map { ["`\($0)`", describe(file: $0, session: session)] }
-            )
-        }
+        out.paragraph("All of it in this report's own directory, `.simtool/test-sessions/\(session.id)/`:")
+        out.table(
+            headers: ["File", "What it holds"],
+            rows: Set(names).sorted().map { ["`\($0)`", describe(file: $0, session: session)] }
+        )
     }
 
-    private static func rerun(_ out: inout Markdown, manifest: TestFlowManifest, archiveName: String?) {
+    private static func rerun(
+        _ out: inout Markdown,
+        session: TestSession,
+        definition: TestDefinition?,
+        requiredVariables: [String]
+    ) {
         out.heading(2, "Re-running this")
         var needs: [String] = []
-        if let simtool = manifest.requires.simtool { needs.append("`simtool` \(simtool) or newer") }
-        if let app = manifest.requires.app { needs.append("`\(app)` installed on a booted simulator") }
-        if !manifest.requires.env.isEmpty {
-            needs.append("these variables exported: " + manifest.requires.env.map { "`\($0)`" }.joined(separator: ", "))
+        if let simtool = session.provenance?.simtoolVersion { needs.append("`simtool` \(simtool) or newer") }
+        if let app = session.provenance?.appBundleId {
+            needs.append("`\(app)` installed on a booted simulator — your own build, which is the point when verifying a fix")
         }
-        if needs.isEmpty {
-            out.paragraph("Needs `simtool` and a booted simulator.")
-        } else {
-            out.paragraph("You need " + sentence(needs) + ".")
+        if !requiredVariables.isEmpty {
+            needs.append("these variables exported: " + requiredVariables.map { "`\($0)`" }.joined(separator: ", "))
         }
-        if !manifest.requires.carries.isEmpty {
-            let names = manifest.requires.carries.map { "`\($0)`" }.joined(separator: ", ")
-            out.paragraph("The test defines \(names) itself, so \(manifest.requires.carries.count == 1 ? "that value travels" : "those values travel") with this archive and you need no setup for \(manifest.requires.carries.count == 1 ? "it" : "them"). To run as something else, pass `--var NAME=value` — it overrides the test without editing it.")
+        out.paragraph(needs.isEmpty ? "Needs `simtool` and a booted simulator." : "You need " + sentence(needs) + ".")
+
+        let defined = (definition?.variables ?? [:]).keys.sorted()
+        if !defined.isEmpty {
+            let names = defined.map { "`\($0)`" }.joined(separator: ", ")
+            out.paragraph("The test defines \(names) itself, so \(defined.count == 1 ? "that value travels" : "those values travel") with the file and you need no setup for \(defined.count == 1 ? "it" : "them"). To run as something else, pass `--var NAME=value` — it overrides the test without editing it.")
         }
-        var lines: [String] = []
-        for name in manifest.requires.env {
-            lines.append("export \(name)=…")
-        }
-        lines.append("simtool serve --detach")
-        lines.append("simtool test run \(archiveName ?? "flow.simflow.zip")")
+
+        var lines = requiredVariables.map { "export \($0)=…" }
+        lines.append("simtool test run \(session.provenance?.testFile ?? "test.yml")")
         out.code(lines.joined(separator: "\n"), language: "sh")
-        out.paragraph("The exit code is the verdict: `0` satisfied, `1` unsatisfied, `2` inconclusive (the run never reached the claim — fix the test, not the product), `3` infra (the run cannot be trusted).")
-        if let profile = manifest.provenance?.launch?.profile {
-            out.paragraph("The launch profile `\(profile)` does not have to exist in your `.simtool/config.yml`: the archive carries the launch this run used, and `test run` falls back to it when the profile is missing.")
-        }
-        if let commit = manifest.provenance?.commit, !commit.isEmpty {
-            out.paragraph("This run exercised commit `\(commit)`. Re-running against different code is the point when verifying a fix — but a `satisfied` verdict only means something if you know which build produced it, so `test run` prints the installed build alongside the one recorded here.")
+        out.paragraph("The exit code is the verdict: `0` satisfied, `1` unsatisfied, `2` inconclusive (the run never reached the claim — fix the test, not the product), `3` infra (the run cannot be trusted). `simtool test run` starts a server itself when none is running.")
+        if let commit = session.provenance?.commit, !commit.isEmpty {
+            out.paragraph("This run exercised commit `\(commit)`. Re-running against different code is the point when verifying a fix — but a `satisfied` verdict only means something if you know which build produced it, so check the build you have installed against the one above.")
         }
     }
 
-    private static func forwarding(_ out: inout Markdown, manifest: TestFlowManifest, includedFiles: [String: [String]]) {
-        let packaged = Set(manifest.runs.flatMap { files(for: $0, includedFiles: includedFiles) })
-        let sensitive = packaged.intersection(["logs.jsonl", "network.jsonl", "state.jsonl"]).sorted()
+    private static func forwarding(_ out: inout Markdown, session: TestSession, definition: TestDefinition?) {
         var reasons: [String] = []
+        let sensitive = Set(session.evidence).intersection(["logs.jsonl", "network.jsonl", "state.jsonl"]).sorted()
         if !sensitive.isEmpty {
             let one = sensitive.count == 1
-            reasons.append("\(sensitive.map { "`\($0)`" }.joined(separator: " and ")) \(one ? "holds" : "hold") the real traffic and log output of the account the run used — identifiers, tokens, whatever the app printed. That is what makes \(one ? "it" : "them") worth reading, and what makes this archive team-internal. Re-export with `--no-evidence` for anywhere else.")
+            reasons.append("\(sensitive.map { "`\($0)`" }.joined(separator: " and ")) \(one ? "holds" : "hold") the real traffic and log output of the account the run used — identifiers, tokens, whatever the app printed. That is what makes \(one ? "it" : "them") worth reading, and what makes \(one ? "it" : "them") team-internal. The test file alone carries none of it.")
         }
-        if !manifest.requires.carries.isEmpty {
-            reasons.append("`test.yml` defines \(manifest.requires.carries.map { "`\($0)`" }.joined(separator: ", ")) inline — the point being that the test runs as-is, the cost being that \(manifest.requires.carries.count == 1 ? "the value goes" : "the values go") wherever this file goes. Move \(manifest.requires.carries.count == 1 ? "it" : "them") to the environment and refer to \(manifest.requires.carries.count == 1 ? "it" : "them") as `${NAME}` if that is not wanted.")
+        let defined = (definition?.variables ?? [:]).keys.sorted()
+        if !defined.isEmpty {
+            reasons.append("The test defines \(defined.map { "`\($0)`" }.joined(separator: ", ")) inline — the point being that it runs as-is, the cost being that the value goes wherever this file goes. Move \(defined.count == 1 ? "it" : "them") to the environment and refer to \(defined.count == 1 ? "it" : "them") as `${NAME}` if that is not wanted.")
         }
-        if !reasons.isEmpty {
-            out.heading(2, "Before you forward this")
-            for reason in reasons { out.paragraph(reason) }
-        }
-        if !manifest.notes.isEmpty {
-            out.heading(2, "What is not here")
-            for note in manifest.notes { out.bullet(note) }
-            out.blank()
-        }
+        guard !reasons.isEmpty else { return }
+        out.heading(2, "Before you forward this")
+        for reason in reasons { out.paragraph(reason) }
     }
 
     // MARK: - helpers
 
     private static let logLinesPerEntry = 12
-
-    private static func files(for run: TestFlowManifest.Run, includedFiles: [String: [String]]) -> [String] {
-        includedFiles[run.session] ?? run.files
-    }
 
     private static func describe(file: String, session: TestSession?) -> String {
         switch file {

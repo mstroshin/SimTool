@@ -1008,7 +1008,7 @@ struct TestCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "test",
         abstract: "Run declarative YAML UI tests on the served simulator, recorded as test sessions.",
-        subcommands: [Run.self, List.self, Export.self, Show.self]
+        subcommands: [Run.self, List.self]
     )
 
     struct ServerOptions: ParsableArguments {
@@ -1078,10 +1078,12 @@ struct TestCommand: AsyncParsableCommand {
 
             `${VAR}` in a launch profile, in this test's own arguments or in a
             setup command is resolved from `variables:` first, then from the
-            environment; `--var NAME=value` overrides both. Writing the account
-            under `variables:` is what makes a test say which account it runs as
-            and travel ready-to-run — at the cost of carrying that value in the
-            file. Leave it out of `variables:` to keep it in the shell instead.
+            environment; `--var NAME=value` overrides both. A reference nothing
+            defines fails the run before the simulator is touched. Writing the
+            account under `variables:` is what makes a test say which account it
+            runs as and travel ready-to-run — at the cost of carrying that value
+            in the file. Leave it out of `variables:` to keep it in the shell
+            instead.
 
             An assertion carrying `criterion:` is part of the claim the test
             verifies; every other step merely stages it. That is what lets a run
@@ -1100,16 +1102,10 @@ struct TestCommand: AsyncParsableCommand {
             A `kind: bug` run stops at the first unmet criterion; a
             `kind: feature` run reports all of them. Tests with no `kind:` keep
             the old behaviour: pass (0) or fail (1).
-
-            A `*.simflow.zip` from `simtool test export` runs the same way. The
-            archive supplies the test and, when this project's config does not
-            have the launch profile it names, the launch the sender recorded; it
-            never supplies the `${VAR}` values behind an account, so the run
-            stops early and names what to export.
             """
         )
 
-        @Argument(help: "Path to a YAML test file, or to a *.simflow.zip archive.")
+        @Argument(help: "Path to a YAML test file.")
         var test: String
 
         @Option(help: "Test session title. Defaults to the test's `name`, then the file name.")
@@ -1137,20 +1133,12 @@ struct TestCommand: AsyncParsableCommand {
             guard repeatCount >= 1 else { throw SimToolError("--repeat must be at least 1.") }
             let overrides = try Self.parseVariableOverrides(variables)
             let projectConfig = try ProjectConfigLoader.loadIfPresent(explicitPath: config)
-            let prepared = try await TestSourceLoader.load(path: test, config: projectConfig, overrides: overrides)
-            let parsed = prepared.definition
-            let testURL = prepared.file
+            let testURL = URL(fileURLWithPath: test)
+            let parsed = try TestDefinitionParser.load(contentsOf: testURL)
             if !common.json, let description = parsed.description {
                 print(description)
             }
             let client = try serverOptions.client()
-            var notes = prepared.notes
-            if let manifest = prepared.manifest {
-                notes += await Self.buildDrift(manifest: manifest, test: parsed, config: projectConfig, client: client)
-            }
-            // Notes go to stderr under --json so a caller parsing stdout still
-            // sees them in a terminal.
-            for line in notes { emitNote(line, json: common.json) }
 
             var results: [TestRunResult] = []
             for attempt in 1...repeatCount {
@@ -1164,7 +1152,7 @@ struct TestCommand: AsyncParsableCommand {
                         testFile: testURL,
                         recordSession: !noSession,
                         evidence: evidence,
-                        profiles: (projectConfig?.profiles ?? []) + prepared.extraProfiles,
+                        profiles: projectConfig?.profiles ?? [],
                         defaultApp: projectConfig?.bundleId,
                         appFacingServerURL: projectConfig?.appFacingServerURL,
                         projectRoot: projectConfig?.simtoolDirectory.deletingLastPathComponent(),
@@ -1200,22 +1188,6 @@ struct TestCommand: AsyncParsableCommand {
                 overrides[String(entry[entry.startIndex..<separator])] = String(entry[entry.index(after: separator)...])
             }
             return overrides
-        }
-
-        /// Says which build this machine is about to run against, next to the
-        /// one the archive recorded. Asked before the run rather than after: a
-        /// missing app or the wrong build is worth knowing in a second instead
-        /// of at the end of a several-minute scenario.
-        static func buildDrift(
-            manifest: TestFlowManifest,
-            test: TestDefinition,
-            config: ProjectConfig?,
-            client: SimToolClient
-        ) async -> [String] {
-            let app = (test.app ?? manifest.requires.app ?? config?.bundleId).flatMap { $0.isEmpty ? nil : $0 }
-            guard let app, let serverConfig = try? await client.config() else { return [] }
-            let installed = await InstalledAppBundle.read(app: app, udid: serverConfig.udid)
-            return BuildDrift.lines(manifest: manifest, installed: installed, app: app)
         }
 
         /// Aggregates one or more runs. The worst answer wins, in the order
