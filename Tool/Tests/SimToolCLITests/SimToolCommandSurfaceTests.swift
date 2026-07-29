@@ -68,11 +68,16 @@ final class SimToolCommandSurfaceTests: XCTestCase {
         XCTAssertFalse(bare.common.json)
     }
 
-    func testInitParserAcceptsSkillScopes() throws {
+    func testInitParsesTheSkillScopeAndAgent() throws {
         XCTAssertEqual(try Init.parse(["--skill", "local"]).skill, .local)
         XCTAssertEqual(try Init.parse(["--skill", "global"]).skill, .global)
-        XCTAssertEqual(try Init.parse(["--skill", "none"]).skill, AgentSkill.Scope.none)
+        XCTAssertEqual(try Init.parse(["--skill", "none"]).skill, AgentSkillInstaller.Scope.none)
         XCTAssertThrowsError(try Init.parse(["--skill", "everywhere"]))
+
+        XCTAssertEqual(try Init.parse([]).skillAgent, .claude)
+        XCTAssertEqual(try Init.parse(["--skill-agent", "codex"]).skillAgent, .codex)
+        XCTAssertEqual(try Init.parse(["--skill-agent", "both"]).skillAgent.agents, [.claude, .codex])
+        XCTAssertThrowsError(try Init.parse(["--skill-agent", "cursor"]))
     }
 
     // Nil, not `.none`: an omitted flag means "ask", which is a different

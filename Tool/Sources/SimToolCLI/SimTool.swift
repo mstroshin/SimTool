@@ -1850,9 +1850,15 @@ struct Init: ParsableCommand {
 
     @Option(
         name: .long,
-        help: "Install the agent skill: `local` (this project, .claude/skills/simtool), `global` (all projects, ~/.claude/skills/simtool), or `none`. Omit to be asked interactively; non-interactive runs default to `none`."
+        help: "Install the agent skills: `local` (this project), `global` (all projects, under $HOME), or `none`. Omit to be asked interactively; non-interactive runs default to `none`."
     )
-    var skill: AgentSkill.Scope?
+    var skill: AgentSkillInstaller.Scope?
+
+    @Option(
+        name: .long,
+        help: "Whose skills layout to write: `claude` (.claude/skills), `codex` (.codex/skills), or `both`. Only used when skills are installed."
+    )
+    var skillAgent: SkillAgentOption = .claude
 
     @OptionGroup var common: CommonJSON
 
@@ -1862,7 +1868,7 @@ struct Init: ParsableCommand {
         var project: String?
         var scheme: String?
         var created: Bool
-        var skill: AgentSkill.Installation
+        var skills: [AgentSkillInstaller.Installation]
     }
 
     func run() throws {
@@ -1873,7 +1879,7 @@ struct Init: ParsableCommand {
         // Re-running `init` purely to install the skill is legitimate, so an
         // existing config only aborts when there is nothing else to do.
         let writesConfig = !alreadyExists || force
-        if !writesConfig, skill == nil || skill == AgentSkill.Scope.none {
+        if !writesConfig, skill == nil || skill == AgentSkillInstaller.Scope.none {
             throw SimToolError("\(ProjectConfigLoader.displayPath) already exists. Edit it, pass --force to overwrite, or pass --skill <local|global> to just install the agent skill.")
         }
 
@@ -1884,7 +1890,13 @@ struct Init: ParsableCommand {
             try Data(ProjectConfigTemplate.render(detected).utf8).write(to: configURL, options: [.atomic])
         }
 
-        let installation = try AgentSkill.install(scope: resolveSkillScope(), projectDirectory: cwd, force: force)
+        let scope = resolveSkillScope()
+        let installations = try AgentSkillInstaller.install(
+            agents: scope == .none ? [] : resolveSkillAgents(),
+            scope: scope,
+            projectDirectory: cwd,
+            force: force
+        )
 
         let result = InitResult(
             configPath: configURL.standardizedFileURL.path,
@@ -1892,7 +1904,7 @@ struct Init: ParsableCommand {
             project: detected.project,
             scheme: detected.scheme,
             created: writesConfig && !alreadyExists,
-            skill: installation
+            skills: installations
         )
         if common.json {
             try printJSON(result)
@@ -1907,43 +1919,58 @@ struct Init: ParsableCommand {
                 todos.append("Set `build.workspace` or `build.project`.")
             }
         }
-        if installation.outcome == .created || installation.outcome == .updated {
+        if installations.contains(where: { $0.skill == AgentSkill.simtool.name && ($0.outcome == .created || $0.outcome == .updated) }) {
             todos.append("Fill in the skill's project options and launch-argument catalog for this app.")
         }
         let detail = [detected.workspace.map { "Workspace: \($0)" }, detected.project.map { "Project: \($0)" }, detected.scheme.map { "Scheme: \($0)" }]
             .compactMap { $0 }
         let headline = writesConfig
             ? "\(alreadyExists ? "Overwrote" : "Created") \(ProjectConfigLoader.displayPath)"
-            : "Installed the simtool agent skill"
+            : "Installed the simtool agent skills"
         let configLine = writesConfig ? ["Config: \(result.configPath)"] : []
         makeNoora().success(.alert(
             TerminalText(stringLiteral: headline),
-            takeaways: (configLine + (writesConfig ? detail : []) + skillTakeaway(installation)).map { TerminalText(stringLiteral: $0) } + todos
+            takeaways: (configLine + (writesConfig ? detail : []) + skillTakeaways(installations)).map { TerminalText(stringLiteral: $0) } + todos
         ))
     }
 
     /// The explicit `--skill`, else an interactive pick. Non-interactive runs
     /// install nothing: `init` is scriptable, and `global` writes outside the
     /// project, which must never happen without the user saying so.
-    private func resolveSkillScope() -> AgentSkill.Scope {
+    private func resolveSkillScope() -> AgentSkillInstaller.Scope {
         if let skill { return skill }
         guard !common.json, isatty(STDIN_FILENO) != 0 else { return .none }
         return makeNoora().singleChoicePrompt(
-            title: "Agent skill",
-            question: "Install the simtool agent skill?",
+            title: "Agent skills",
+            question: "Install the simtool agent skills?",
             options: SkillChoice.allCases,
-            description: "Teaches a coding agent to build, launch, drive, mock, and UI-test your app with simtool."
+            description: "Teaches a coding agent to build, launch, drive and mock your app with simtool, and to write UI tests that verify a bug or a feature."
         ).scope
     }
 
-    private func skillTakeaway(_ installation: AgentSkill.Installation) -> [String] {
-        guard let path = installation.path else { return ["Skill: not installed"] }
-        switch installation.outcome {
-        case .created: return ["Skill: installed at \(path)"]
-        case .updated: return ["Skill: updated at \(path)"]
-        case .upToDate: return ["Skill: already up to date at \(path)"]
-        case .conflict: return ["Skill: kept your edited \(path) (pass --force to replace it)"]
-        case .skipped: return ["Skill: not installed"]
+    /// Asked only when a scope was chosen interactively: someone who passed
+    /// `--skill` and no `--skill-agent` gets the default rather than a prompt,
+    /// so scripted runs stay scripted.
+    private func resolveSkillAgents() -> [AgentSkillInstaller.Agent] {
+        guard skill == nil, !common.json, isatty(STDIN_FILENO) != 0 else { return skillAgent.agents }
+        return makeNoora().singleChoicePrompt(
+            title: "Coding agent",
+            question: "Which agent should read them?",
+            options: SkillAgentOption.allCases,
+            description: "The same documents, in each agent's own skills directory."
+        ).agents
+    }
+
+    private func skillTakeaways(_ installations: [AgentSkillInstaller.Installation]) -> [String] {
+        guard !installations.isEmpty else { return ["Skills: not installed"] }
+        return installations.map { installation in
+            let verb = switch installation.outcome {
+            case .created: "installed"
+            case .updated: "updated"
+            case .upToDate: "already up to date"
+            case .conflict: "kept your edited copy (pass --force to replace it)"
+            }
+            return "\(installation.skill): \(verb) at \(installation.path)"
         }
     }
 
@@ -1952,7 +1979,7 @@ struct Init: ParsableCommand {
     private enum SkillChoice: CaseIterable, CustomStringConvertible, Equatable {
         case local, global, skip
 
-        var scope: AgentSkill.Scope {
+        var scope: AgentSkillInstaller.Scope {
             switch self {
             case .local: return .local
             case .global: return .global
@@ -1962,15 +1989,35 @@ struct Init: ParsableCommand {
 
         var description: String {
             switch self {
-            case .local: return "This project only (.claude/skills/simtool)"
-            case .global: return "All projects (~/.claude/skills/simtool)"
+            case .local: return "This project only"
+            case .global: return "All projects (under $HOME)"
             case .skip: return "Don't install"
             }
         }
     }
 }
 
-extension AgentSkill.Scope: ExpressibleByArgument {}
+enum SkillAgentOption: String, CaseIterable, CustomStringConvertible, ExpressibleByArgument, Equatable {
+    case claude, codex, both
+
+    var agents: [AgentSkillInstaller.Agent] {
+        switch self {
+        case .claude: [.claude]
+        case .codex: [.codex]
+        case .both: [.claude, .codex]
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .claude: "Claude Code (.claude/skills)"
+        case .codex: "Codex (.codex/skills)"
+        case .both: "Both"
+        }
+    }
+}
+
+extension AgentSkillInstaller.Scope: ExpressibleByArgument {}
 
 struct Checksum: AsyncParsableCommand {
     static let configuration = CommandConfiguration(

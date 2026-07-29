@@ -29,13 +29,19 @@ final class AgentSkillTests: XCTestCase {
 
     func testLocalScopeWritesIntoTheProject() throws {
         let project = try project()
-        let installation = try AgentSkill.install(scope: .local, projectDirectory: project, home: try home())
+        let installed = try AgentSkillInstaller.install(
+            skills: [.simtool], agents: [.claude], scope: .local,
+            projectDirectory: project, home: try home()
+        )
 
-        XCTAssertEqual(installation.outcome, .created)
-        XCTAssertEqual(installation.scope, "local")
+        XCTAssertEqual(installed.count, 1)
+        XCTAssertEqual(installed[0].outcome, .created)
+        XCTAssertEqual(installed[0].skill, "simtool")
+        XCTAssertEqual(installed[0].agent, "claude")
+        XCTAssertEqual(installed[0].scope, "local")
         let expected = project.appendingPathComponent(".claude/skills/simtool/SKILL.md")
-        XCTAssertEqual(installation.path, expected.standardizedFileURL.path)
-        XCTAssertEqual(try String(contentsOf: expected, encoding: .utf8), AgentSkill.markdown)
+        XCTAssertEqual(installed[0].path, expected.standardizedFileURL.path)
+        XCTAssertEqual(try String(contentsOf: expected, encoding: .utf8), AgentSkill.simtool.markdown)
     }
 
     // `global` must land in $HOME, not in whatever directory `init` happened to
@@ -43,78 +49,125 @@ final class AgentSkillTests: XCTestCase {
     func testGlobalScopeWritesIntoHomeNotTheProject() throws {
         let project = try project()
         let home = try home()
-        let installation = try AgentSkill.install(scope: .global, projectDirectory: project, home: home)
+        let installed = try AgentSkillInstaller.install(
+            skills: [.simtool], agents: [.claude], scope: .global,
+            projectDirectory: project, home: home
+        )
 
-        XCTAssertEqual(installation.outcome, .created)
-        XCTAssertEqual(installation.path, home.appendingPathComponent(".claude/skills/simtool/SKILL.md").standardizedFileURL.path)
+        XCTAssertEqual(installed[0].path, home.appendingPathComponent(".claude/skills/simtool/SKILL.md").standardizedFileURL.path)
         XCTAssertFalse(FileManager.default.fileExists(atPath: project.appendingPathComponent(".claude").path))
     }
 
-    func testNoneScopeWritesNothing() throws {
+    // Same document, two layouts: the point of the agent axis is that nothing
+    // about the skill itself differs.
+    func testCodexGetsTheSameDocumentInItsOwnLayout() throws {
         let project = try project()
-        let installation = try AgentSkill.install(scope: .none, projectDirectory: project, home: try home())
+        let installed = try AgentSkillInstaller.install(
+            skills: [.simtool], agents: [.codex], scope: .local,
+            projectDirectory: project, home: try home()
+        )
 
-        XCTAssertEqual(installation.outcome, .skipped)
-        XCTAssertNil(installation.path)
+        let expected = project.appendingPathComponent(".codex/skills/simtool/SKILL.md")
+        XCTAssertEqual(installed[0].agent, "codex")
+        XCTAssertEqual(installed[0].path, expected.standardizedFileURL.path)
+        XCTAssertEqual(try String(contentsOf: expected, encoding: .utf8), AgentSkill.simtool.markdown)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: project.appendingPathComponent(".claude").path))
+    }
+
+    func testBothAgentsGetEverySkill() throws {
+        let project = try project()
+        let installed = try AgentSkillInstaller.install(
+            agents: [.claude, .codex], scope: .local,
+            projectDirectory: project, home: try home()
+        )
+
+        XCTAssertEqual(installed.count, AgentSkill.all.count * 2)
+        for skill in AgentSkill.all {
+            for agent in ["claude", "codex"] {
+                XCTAssertTrue(
+                    installed.contains { $0.skill == skill.name && $0.agent == agent },
+                    "\(skill.name) missing for \(agent)"
+                )
+            }
+        }
+    }
+
+    func testNoneScopeAndNoAgentsWriteNothing() throws {
+        let project = try project()
+
+        XCTAssertEqual(try AgentSkillInstaller.install(agents: [.claude], scope: .none, projectDirectory: project, home: try home()), [])
+        XCTAssertEqual(try AgentSkillInstaller.install(agents: [], scope: .local, projectDirectory: project, home: try home()), [])
         XCTAssertFalse(FileManager.default.fileExists(atPath: project.appendingPathComponent(".claude").path))
     }
 
     func testReinstallingAnUnchangedSkillReportsUpToDate() throws {
         let project = try project()
         let home = try home()
-        try AgentSkill.install(scope: .local, projectDirectory: project, home: home)
-        let second = try AgentSkill.install(scope: .local, projectDirectory: project, home: home)
+        _ = try AgentSkillInstaller.install(agents: [.claude], scope: .local, projectDirectory: project, home: home)
 
-        XCTAssertEqual(second.outcome, .upToDate)
+        let second = try AgentSkillInstaller.install(agents: [.claude], scope: .local, projectDirectory: project, home: home)
+
+        XCTAssertTrue(second.allSatisfy { $0.outcome == .upToDate }, "\(second)")
     }
 
     // `init` is re-run routinely; a skill the user filled in with their app's
-    // launch-argument catalog must survive that.
+    // launch-argument catalog must survive that. Per file, so an edited
+    // `simtool` does not block a fresh sibling.
     func testEditedSkillIsKeptUntilForced() throws {
         let project = try project()
         let home = try home()
-        try AgentSkill.install(scope: .local, projectDirectory: project, home: home)
+        _ = try AgentSkillInstaller.install(skills: [.simtool], agents: [.claude], scope: .local, projectDirectory: project, home: home)
         let destination = project.appendingPathComponent(".claude/skills/simtool/SKILL.md")
         try Data("edited by the user\n".utf8).write(to: destination)
 
-        let kept = try AgentSkill.install(scope: .local, projectDirectory: project, home: home)
-        XCTAssertEqual(kept.outcome, .conflict)
+        let kept = try AgentSkillInstaller.install(skills: [.simtool], agents: [.claude], scope: .local, projectDirectory: project, home: home)
+        XCTAssertEqual(kept[0].outcome, .conflict)
         XCTAssertEqual(try String(contentsOf: destination, encoding: .utf8), "edited by the user\n")
 
-        let forced = try AgentSkill.install(scope: .local, projectDirectory: project, home: home, force: true)
-        XCTAssertEqual(forced.outcome, .updated)
-        XCTAssertEqual(try String(contentsOf: destination, encoding: .utf8), AgentSkill.markdown)
+        let forced = try AgentSkillInstaller.install(skills: [.simtool], agents: [.claude], scope: .local, projectDirectory: project, home: home, force: true)
+        XCTAssertEqual(forced[0].outcome, .updated)
+        XCTAssertEqual(try String(contentsOf: destination, encoding: .utf8), AgentSkill.simtool.markdown)
     }
 
-    func testMarkdownIsAValidSkillDocument() {
-        XCTAssertTrue(AgentSkill.markdown.hasPrefix("---\nname: simtool\n"), "frontmatter must open the file or the skill is not loadable")
-        XCTAssertTrue(AgentSkill.markdown.hasSuffix("\n"), "installed files end with a newline")
-        XCTAssertTrue(AgentSkill.markdown.contains("\ndescription: "))
-    }
-
-    // The skill is app-agnostic on purpose: it ships to every simtool user, so a
-    // stray identifier from the project it was authored against would leak.
-    func testMarkdownCarriesNoProjectSpecificIdentifiers() {
-        for needle in ["diftech", "platamator", "/Users/", "xcworkspace --scheme App "] {
-            XCTAssertFalse(
-                AgentSkill.markdown.lowercased().contains(needle.lowercased()),
-                "the bundled skill must not mention \(needle)"
+    func testEverySkillIsAValidSkillDocument() {
+        for skill in AgentSkill.all {
+            XCTAssertTrue(
+                skill.markdown.hasPrefix("---\nname: \(skill.name)\n"),
+                "\(skill.name): frontmatter must open the file, and its `name` must match the directory"
             )
+            XCTAssertTrue(skill.markdown.contains("\ndescription: "), "\(skill.name): no description")
+            XCTAssertTrue(skill.markdown.hasSuffix("\n"), "\(skill.name): installed files end with a newline")
         }
     }
 
-    // `skills/simtool/SKILL.md` is the copy you edit by hand; the literal above is
-    // what actually ships. Drift between them means users get a stale skill.
-    func testBundledMarkdownMatchesTheRepositoryCopy() throws {
+    // The skills are app-agnostic on purpose: they ship to every simtool user,
+    // so a stray identifier from the project one was authored against would leak.
+    func testNoSkillCarriesProjectSpecificIdentifiers() {
+        for skill in AgentSkill.all {
+            for needle in ["diftech", "platamator", "/Users/", "xcworkspace --scheme App "] {
+                XCTAssertFalse(
+                    skill.markdown.lowercased().contains(needle.lowercased()),
+                    "\(skill.name) must not mention \(needle)"
+                )
+            }
+        }
+    }
+
+    // `skills/<name>/SKILL.md` is the copy you edit by hand; the literal is what
+    // ships. Drift means users get a stale skill — regenerate with
+    // `Scripts/sync-agent-skills.swift`.
+    func testEverySkillMatchesItsRepositoryCopy() throws {
         let repositoryRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()  // SimToolCoreTests/
             .deletingLastPathComponent()  // Tests/
             .deletingLastPathComponent()  // Tool/
             .deletingLastPathComponent()  // repository root
-        let authored = repositoryRoot.appendingPathComponent("skills/simtool/SKILL.md")
-        guard let contents = try? String(contentsOf: authored, encoding: .utf8) else {
-            throw XCTSkip("no authoring copy at \(authored.path) (building outside a checkout)")
+        for skill in AgentSkill.all {
+            let authored = repositoryRoot.appendingPathComponent("skills/\(skill.name)/SKILL.md")
+            guard let contents = try? String(contentsOf: authored, encoding: .utf8) else {
+                throw XCTSkip("no authoring copy at \(authored.path) (building outside a checkout)")
+            }
+            XCTAssertEqual(contents, skill.markdown, "run Scripts/sync-agent-skills.swift for \(skill.name)")
         }
-        XCTAssertEqual(contents, AgentSkill.markdown, "regenerate AgentSkill.markdown from skills/simtool/SKILL.md")
     }
 }
