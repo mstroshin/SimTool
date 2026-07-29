@@ -312,6 +312,12 @@ final class SimToolCommandSurfaceTests: XCTestCase {
         XCTAssertNil(command.host)
         XCTAssertNil(command.port)
         XCTAssertNil(command.config)
+        XCTAssertFalse(command.noReclaim)
+    }
+
+    // Hidden, but a started-on-our-own-initiative server depends on it.
+    func testServeParsesNoReclaim() throws {
+        XCTAssertTrue(try Serve.parse(["--no-reclaim"]).noReclaim)
     }
 
     func testRunParsesDetachFlag() throws {

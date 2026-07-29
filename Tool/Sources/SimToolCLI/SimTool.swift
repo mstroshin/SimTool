@@ -125,22 +125,7 @@ struct Kill: AsyncParsableCommand {
             session = try SessionStore.shared.latest()
         }
         guard let session else { throw SimToolError("No matching session found") }
-
-        // SIGTERM lets the server run its own graceful cleanup (including powering
-        // down simulators it booted). Give it a moment; if it won't die, force it
-        // and power those simulators down ourselves so a wedged or detached server
-        // can't leak the simulator backend.
-        Darwin.kill(session.pid, SIGTERM)
-        for _ in 0..<60 where isProcessAlive(session.pid) {
-            try? await Task.sleep(for: .milliseconds(100))
-        }
-        if isProcessAlive(session.pid) {
-            Darwin.kill(session.pid, SIGKILL)
-            for udid in session.bootedDevices {
-                await SimulatorDeviceClient.shutdown(udid)
-            }
-        }
-        SessionStore.shared.remove(session.sessionId)
+        await SessionControl.stop(session)
         if common.json {
             try printJSON(["killed": session.sessionId])
         } else {
@@ -1355,6 +1340,9 @@ struct Serve: AsyncParsableCommand {
     @Flag(help: .hidden)
     var detachedChild = false
 
+    @Flag(name: .long, help: .hidden)
+    var noReclaim = false
+
     @OptionGroup var common: CommonJSON
 
     func run() async throws {
@@ -1384,6 +1372,7 @@ struct Serve: AsyncParsableCommand {
             printSessionJSON: common.json || detachedChild,
             openBrowser: shouldOpenBrowser(webRequested: web, json: common.json, detachedChild: detachedChild),
             sessionId: sessionId,
+            reclaimPort: !noReclaim,
             // Re-read rather than thread through ServeParameters: the viewer
             // needs the launch profiles, which are not part of the serve target.
             projectConfig: try? ProjectConfigLoader.loadIfPresent(explicitPath: config)
@@ -1403,7 +1392,17 @@ struct Serve: AsyncParsableCommand {
     }
 
     private func runDetached(_ parameters: ServeParameters) async throws {
-        try await launchDetachedServer(parameters: parameters, app: app, verbose: verbose, json: common.json)
+        let session = try await launchDetachedServer(
+            parameters: parameters,
+            app: app,
+            verbose: verbose,
+            reclaimPort: !noReclaim
+        )
+        if common.json {
+            try printJSON(session)
+        } else {
+            makeNoora().success(.alert("SimTool server started", takeaways: ["Open \(session.url)"]))
+        }
     }
 }
 
@@ -1424,9 +1423,18 @@ struct ServeParameters: Equatable {
 }
 
 /// Spawns a background `serve --detached-child` process (inheriting this
-/// process's environment, including the `SIMCTL_CHILD_` logger exports), waits
-/// for it to report a session, and prints the session with its viewer URL.
-func launchDetachedServer(parameters: ServeParameters, app: String?, verbose: Bool, json: Bool) async throws {
+/// process's environment, including the `SIMCTL_CHILD_` logger exports) and
+/// waits for it to report a session.
+///
+/// `reclaimPort: false` forwards `--no-reclaim`, so the child fails instead of
+/// killing whoever holds the port. Anything starting a server implicitly must
+/// pass that: the port belongs to whoever is already on it.
+func launchDetachedServer(
+    parameters: ServeParameters,
+    app: String?,
+    verbose: Bool,
+    reclaimPort: Bool = true
+) async throws -> SessionInfo {
     let id = UUID().uuidString
     try SessionStore.shared.ensureRoot()
     let logPath = SessionStore.shared.logPath(for: id)
@@ -1437,6 +1445,7 @@ func launchDetachedServer(parameters: ServeParameters, app: String?, verbose: Bo
     if let device = parameters.device { args += ["--device", device] }
     if let app, !app.isEmpty { args += ["--app", app] }
     if verbose { args += ["--verbose"] }
+    if !reclaimPort { args.append("--no-reclaim") }
     process.arguments = args
     let log = try FileHandle(forWritingTo: logPath.creatingFileIfNeeded())
     process.standardOutput = log
@@ -1447,11 +1456,7 @@ func launchDetachedServer(parameters: ServeParameters, app: String?, verbose: Bo
     // 300-second budget), so poll generously but fail as soon as it dies.
     let deadline = Date().addingTimeInterval(330)
     while Date() < deadline {
-        if let session = try SessionStore.shared.session(id: id) {
-            if json { try printJSON(session) }
-            else { makeNoora().success(.alert("SimTool server started", takeaways: ["Open \(session.url)"])) }
-            return
-        }
+        if let session = try SessionStore.shared.session(id: id) { return session }
         if !process.isRunning {
             throw SimToolError("Detached server exited before reporting a session. See \(logPath.path)")
         }
@@ -1481,6 +1486,7 @@ func runViewer(
     printSessionJSON: Bool,
     openBrowser: Bool,
     sessionId: String?,
+    reclaimPort: Bool = true,
     projectConfig: ProjectConfig? = nil
 ) async throws {
     let id = sessionId ?? UUID().uuidString
@@ -1501,7 +1507,7 @@ func runViewer(
         appFacingServerURL: projectConfig?.appFacingServerURL,
         projectRoot: projectConfig?.simtoolDirectory.deletingLastPathComponent()
     )
-    let server = try await startStreamServer(config: config)
+    let server = try await startStreamServer(config: config, reclaimPort: reclaimPort)
     let session = SessionInfo(
         sessionId: id,
         pid: getpid(),
@@ -1534,8 +1540,8 @@ func runViewer(
     }
 }
 
-func startStreamServer(config: StreamServerConfig) async throws -> StreamServer {
-    if let pids = try? await PortReclaimer.listeningPIDs(port: config.port), !pids.isEmpty {
+func startStreamServer(config: StreamServerConfig, reclaimPort: Bool = true) async throws -> StreamServer {
+    if reclaimPort, let pids = try? await PortReclaimer.listeningPIDs(port: config.port), !pids.isEmpty {
         emitPortReclaimMessage(port: config.port, pids: pids)
         let result = try await PortReclaimer.reclaim(port: config.port)
         cleanupSessions(for: result.pids)
@@ -1546,7 +1552,10 @@ func startStreamServer(config: StreamServerConfig) async throws -> StreamServer 
         try server.start()
         return server
     } catch {
-        guard PortReclaimer.isAddressInUse(error) else { throw error }
+        // Killing the listener is a thing a user asked for by naming a port; it
+        // is not a thing to do on someone's behalf, so a caller that opted out
+        // gets the bind error and can pick another port.
+        guard reclaimPort, PortReclaimer.isAddressInUse(error) else { throw error }
         let pids = (try? await PortReclaimer.listeningPIDs(port: config.port)) ?? []
         emitPortReclaimMessage(port: config.port, pids: pids)
         let result = try await PortReclaimer.reclaim(port: config.port)
@@ -1716,12 +1725,16 @@ struct Run: AsyncParsableCommand {
             // The device is already booted, so the child reports quickly. It
             // inherits the SIMCTL_CHILD_ logger exports set above, keeping the
             // Network/State panels armed across the stdout-capture relaunch.
-            try await launchDetachedServer(
+            let session = try await launchDetachedServer(
                 parameters: ServeParameters(device: booted.udid, host: projectConfig.server.host, port: projectConfig.server.port),
                 app: projectConfig.bundleId,
-                verbose: verbose,
-                json: common.json
+                verbose: verbose
             )
+            if common.json {
+                try printJSON(session)
+            } else {
+                makeNoora().success(.alert("SimTool server started", takeaways: ["Open \(session.url)"]))
+            }
             return
         }
         try await runViewer(
