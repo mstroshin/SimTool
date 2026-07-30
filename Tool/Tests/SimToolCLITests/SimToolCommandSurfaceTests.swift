@@ -345,6 +345,195 @@ final class SimToolCommandSurfaceTests: XCTestCase {
         XCTAssertNil(TestCommand.Run.unknownProfile(test: test, profiles: []))
     }
 
+    // The exit code is the whole interface for an agent, and `1` already means
+    // "the bug reproduced". A test that cannot run as written has to say
+    // `inconclusive` instead, which is what that verdict is for: the claim was
+    // never tested, so fix the test.
+    func testAnUndefinedVariableEndsTheRunAsInconclusive() {
+        let test = TestDefinition(
+            launch: TestLaunch(arguments: ["-AutoLogin", "${ACCOUNT}"]),
+            steps: [TestStep(action: .waitFor(TestTarget(kind: .id, query: "Main"), timeout: nil))]
+        )
+
+        XCTAssertThrowsError(try TestCommand.Run.preflight(test: test, profiles: [], environment: [:], overrides: [:])) {
+            guard let failure = $0 as? TestRunPreflightError else { return XCTFail("wrong error type: \($0)") }
+            XCTAssertEqual(failure.exitCode, TestVerdict.inconclusive.exitCode)
+            XCTAssertTrue(failure.message.contains("ACCOUNT"), failure.message)
+        }
+    }
+
+    func testATypodProfileEndsTheRunAsInconclusive() {
+        let test = TestDefinition(
+            launch: TestLaunch(profile: "staging-typo"),
+            steps: [TestStep(action: .waitFor(TestTarget(kind: .id, query: "Main"), timeout: nil))]
+        )
+
+        XCTAssertThrowsError(try TestCommand.Run.preflight(
+            test: test,
+            profiles: [LaunchProfile(name: "staging-account1")],
+            environment: [:],
+            overrides: [:]
+        )) {
+            guard let failure = $0 as? TestRunPreflightError else { return XCTFail("wrong error type: \($0)") }
+            XCTAssertEqual(failure.exitCode, TestVerdict.inconclusive.exitCode)
+            XCTAssertTrue(failure.message.contains("staging-typo"), failure.message)
+        }
+    }
+
+    func testARunnableTestPassesPreflight() throws {
+        let test = TestDefinition(
+            launch: TestLaunch(profile: "staging-account1"),
+            steps: [TestStep(action: .waitFor(TestTarget(kind: .id, query: "Main"), timeout: nil))]
+        )
+
+        XCTAssertNoThrow(try TestCommand.Run.preflight(
+            test: test,
+            profiles: [LaunchProfile(name: "staging-account1")],
+            environment: [:],
+            overrides: [:]
+        ))
+    }
+
+    // An environment that cannot host a run is `infra`, the verdict that says a
+    // result would not be trustworthy — never `1`.
+    func testAnEnvironmentThatCannotHostARunIsInfra() {
+        XCTAssertEqual(
+            TestRunPreflightError(cause: .environment, message: "no free port").exitCode,
+            TestVerdict.infra.exitCode
+        )
+    }
+
+    // `list` reads recorded sessions off a server. Taking whichever server
+    // happens to be running showed one checkout the *other* checkout's history,
+    // with nothing said about it — the same trap `run` closed by matching the
+    // project root.
+    func testListUsesAServerOfThisProject() {
+        let sessions = [
+            session(id: "mine", project: "/Users/x/Workspace/mine", at: 100),
+            session(id: "other", project: "/Users/x/Workspace/other", at: 300),
+        ]
+
+        XCTAssertEqual(
+            TestCommand.List.target(explicit: nil, sessions: sessions, projectRoot: "/Users/x/Workspace/mine", isAlive: { _ in true }),
+            .use("http://127.0.0.1:3200/api/v1")
+        )
+    }
+
+    func testListRefusesAServerOfAnotherProjectAndSaysWhose() {
+        let foreign = session(id: "other", project: "/Users/x/Workspace/other", at: 300)
+
+        XCTAssertEqual(
+            TestCommand.List.target(explicit: nil, sessions: [foreign], projectRoot: "/Users/x/Workspace/mine", isAlive: { _ in true }),
+            .noServer(foreign: foreign)
+        )
+        XCTAssertTrue(
+            TestCommand.List.noServerMessage(foreign: foreign).contains("/Users/x/Workspace/other"),
+            TestCommand.List.noServerMessage(foreign: foreign)
+        )
+    }
+
+    // An unlabelled server — one started before the project root was recorded —
+    // is the case that actually turns up in a slot pool, and saying nothing about
+    // it leaves "no server for this project" looking like a bug in simtool to
+    // anyone who just ran `simtool sessions`.
+    func testListMentionsAnUnlabelledForeignServerToo() {
+        let stray = session(id: "stray", project: nil, at: 300)
+
+        XCTAssertEqual(
+            TestCommand.List.target(explicit: nil, sessions: [stray], projectRoot: "/Users/x/Workspace/mine", isAlive: { _ in true }),
+            .noServer(foreign: stray)
+        )
+        let message = TestCommand.List.noServerMessage(foreign: stray)
+        XCTAssertTrue(message.contains("another checkout"), message)
+    }
+
+    func testTheNoServerMessageStaysShortWhenNothingElseIsRunning() {
+        let message = TestCommand.List.noServerMessage(foreign: nil)
+
+        XCTAssertFalse(message.contains("another"), message)
+        XCTAssertTrue(message.contains("simtool serve"), message)
+    }
+
+    func testListHonoursAnExplicitServerWhoeverItBelongsTo() {
+        let sessions = [session(id: "other", project: "/Users/x/Workspace/other", at: 300)]
+
+        XCTAssertEqual(
+            TestCommand.List.target(explicit: "http://127.0.0.1:9999", sessions: sessions, projectRoot: "/Users/x/Workspace/mine", isAlive: { _ in true }),
+            .use("http://127.0.0.1:9999")
+        )
+    }
+
+    func testListTreatsADeadSessionAsNoServer() {
+        let sessions = [session(id: "mine", project: "/Users/x/Workspace/mine", at: 100)]
+
+        XCTAssertEqual(
+            TestCommand.List.target(explicit: nil, sessions: sessions, projectRoot: "/Users/x/Workspace/mine", isAlive: { _ in false }),
+            .noServer(foreign: nil)
+        )
+    }
+
+    // A session file outlives the process that wrote it, and a dead one names no
+    // server anybody could be confused by.
+    func testListDoesNotMentionADeadForeignServer() {
+        let sessions = [session(id: "other", project: "/Users/x/Workspace/other", at: 300)]
+
+        XCTAssertEqual(
+            TestCommand.List.target(explicit: nil, sessions: sessions, projectRoot: "/Users/x/Workspace/mine", isAlive: { _ in false }),
+            .noServer(foreign: nil)
+        )
+    }
+
+    // A server that is up but unlabelled — started before this field existed, or
+    // outside any project — is still worth mentioning: "no server running" reads
+    // as a contradiction next to `simtool sessions` listing one.
+    func testTheForeignServerNoteSpeaksUpForAnUnlabelledServer() {
+        let note = TestCommand.ServerOptions.foreignServerNote(session(id: "stray", project: nil, at: 100))
+
+        XCTAssertEqual(note, "A SimTool server is running for another checkout — starting one for this project instead.")
+    }
+
+    func testTheForeignServerNoteNamesTheProjectWhenItKnowsIt() {
+        let note = TestCommand.ServerOptions.foreignServerNote(session(id: "other", project: "/Users/x/Workspace/other", at: 100))
+
+        XCTAssertEqual(note, "A SimTool server is running for another project (/Users/x/Workspace/other) — starting one for this project instead.")
+    }
+
+    func testNoForeignServerMeansNoNote() {
+        XCTAssertNil(TestCommand.ServerOptions.foreignServerNote(nil))
+    }
+
+    // "No SimTool server running" was false whenever one was up for another
+    // checkout, which is the common case in a slot pool.
+    func testTheAutostartNoteIsAboutThisProject() {
+        XCTAssertEqual(
+            ServerAutostart.startedNote(url: "http://127.0.0.1:3203"),
+            "No SimTool server for this project — started one on http://127.0.0.1:3203"
+        )
+    }
+
+    // Stopping the server the run started takes the viewer down with it: the
+    // page a person opened to watch the run goes dead the moment the run ends,
+    // which is exactly when they want to read it. The server stays; the note
+    // says how to stop it.
+    func testARunKeepsTheServerItStartedByDefault() throws {
+        XCTAssertFalse(try TestCommand.Run.parse(["a.yml"]).stopServer)
+        XCTAssertTrue(try TestCommand.Run.parse(["a.yml", "--stop-server"]).stopServer)
+    }
+
+    // A verdict is only about the build that produced it, so a run brings the
+    // app up to date first — unless the caller says they have handled it.
+    func testARunBuildsTheAppUnlessToldNotTo() throws {
+        XCTAssertFalse(try TestCommand.Run.parse(["a.yml"]).noBuild)
+        XCTAssertTrue(try TestCommand.Run.parse(["a.yml", "--no-build"]).noBuild)
+    }
+
+    func testTheKeptServerNoteSaysHowToStopIt() {
+        let note = ServerAutostart.keptNote(url: "http://127.0.0.1:3203", sessionId: "E0D12083-7907-400B-84FF-F9C8A5E658B2")
+
+        XCTAssertTrue(note.contains("http://127.0.0.1:3203"), note)
+        XCTAssertTrue(note.contains("simtool kill E0D12083"), note)
+    }
+
     func testServeParsesWithoutBuiltInPortAndHostDefaults() throws {
         let command = try Serve.parse([])
         XCTAssertNil(command.device)

@@ -114,15 +114,35 @@ swift run simtool test list --json
 ```
 
 A running server is not a prerequisite: when none is running, `test run` starts
-one on a free port and stops it again afterwards. One already running for this
-project is reused and left alone; one belonging to another checkout is not — the
-run says so and starts its own instead.
+one on a free port and leaves it running — it is what serves the viewer, and the
+run just recorded is what the viewer is opened to read. The run prints its address
+and how to stop it; `--stop-server` stops it automatically, which is what a CI job
+wants. One already running for this project is reused and left alone; one
+belonging to another checkout is not — the run says so and starts its own instead.
+`test list` applies the same rule without the autostart: it reads a server started
+for this project, or the one `--server` names, and never another checkout's
+history.
+
+A run started from the command line is visible in the viewer while it happens:
+its session carries the test file, so the Tests tab follows the run, streams its
+steps, and offers no Run button for a test that is already running.
+
+`setup:` commands are told where the run's server is — `{server}` in the command,
+`SIMTOOL_SERVER` and `SIMTOOL_SERVER_URL` in their environment — so a scenario
+that needs a second launch does not have to write a port into the test file.
 
 A test carries everything needed to stage its scenario, so it reproduces on
 another machine: `launch:` (a named profile from `.simtool/config.yml` plus
 inline argv/env), `reset:` (UserDefaults, data container, permission alerts,
 locale) and `mocks:` (backend answers, applied before launch). See
 `simtool test run --help` for the full file format.
+
+When the project config says how to build the app, a run rebuilds and reinstalls
+it first — only when the sources changed, since the checksum cache decides — and
+before the recorder starts, together with `reset:` and `setup:`. So the video
+holds the run itself rather than minutes of an Xcode build, while the staging
+still appears in the timeline and its logs are still captured. `--no-build`
+judges whatever is already installed.
 
 #### Verdicts
 
@@ -143,6 +163,11 @@ proves nothing: reporting it as "the bug reproduces" sends someone to fix the
 wrong thing. `infra` covers a run whose staging silently did not happen — a
 `strict:` mock that never intercepted a call, an app that never picked up its
 mock rules, a `reset:` that failed — and is never reported as a pass.
+
+A run that never started uses the same scale rather than a bare failure: a test
+that cannot run as written (unreadable file, parse error, unknown profile, a
+`${VAR}` nothing defines) exits `2`, and an environment with nowhere to run it
+exits `3`. So exit `1` always means a criterion did not hold.
 
 A `bug` run stops at the first unmet criterion; a `feature` run reports every
 criterion from one run. Tests with no `kind:` keep the old behaviour (0 or 1).

@@ -90,6 +90,10 @@ public struct TestSession: Codable, Equatable, Sendable, Identifiable {
     public var evidence: [String]
     /// Where the run came from: the test itself, the app, the device, the tool.
     public var provenance: TestRunProvenance?
+    /// The test file this session is running, as the viewer lists it. Without it
+    /// a run started from the CLI is a session the viewer cannot attribute to any
+    /// test, so it keeps offering to run that test again.
+    public var file: String?
 
     public init(
         id: String,
@@ -109,7 +113,8 @@ public struct TestSession: Codable, Equatable, Sendable, Identifiable {
         verdict: TestVerdict? = nil,
         mocks: [TestMockOutcome] = [],
         evidence: [String] = [],
-        provenance: TestRunProvenance? = nil
+        provenance: TestRunProvenance? = nil,
+        file: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -129,6 +134,7 @@ public struct TestSession: Codable, Equatable, Sendable, Identifiable {
         self.mocks = mocks
         self.evidence = evidence
         self.provenance = provenance
+        self.file = file
     }
 
     /// Decoding tolerates sessions recorded before these fields existed, so an
@@ -153,6 +159,7 @@ public struct TestSession: Codable, Equatable, Sendable, Identifiable {
         mocks = try container.decodeIfPresent([TestMockOutcome].self, forKey: .mocks) ?? []
         evidence = try container.decodeIfPresent([String].self, forKey: .evidence) ?? []
         provenance = try container.decodeIfPresent(TestRunProvenance.self, forKey: .provenance)
+        file = try container.decodeIfPresent(String.self, forKey: .file)
     }
 }
 
@@ -163,6 +170,9 @@ public struct TestSessionListPayload: Codable, Equatable, Sendable {
 
 public struct TestSessionStartRequest: Codable, Equatable, Sendable {
     public var title: String
+    /// The test file being run, so the viewer can show the run against the test
+    /// it belongs to even when the run was started from the CLI.
+    public var file: String?
     /// Record a screen video for the session; nil means yes (the default).
     public var video: Bool?
     public var kind: TestKind?
@@ -174,6 +184,7 @@ public struct TestSessionStartRequest: Codable, Equatable, Sendable {
 
     public init(
         title: String,
+        file: String? = nil,
         video: Bool? = nil,
         kind: TestKind? = nil,
         reference: String? = nil,
@@ -181,6 +192,7 @@ public struct TestSessionStartRequest: Codable, Equatable, Sendable {
         provenance: TestRunProvenance? = nil
     ) {
         self.title = title
+        self.file = file
         self.video = video
         self.kind = kind
         self.reference = reference

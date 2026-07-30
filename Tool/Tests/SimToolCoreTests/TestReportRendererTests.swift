@@ -117,6 +117,84 @@ final class TestReportRendererTests: XCTestCase {
         XCTAssertTrue(report.contains("starts a server itself when none is running"), report)
     }
 
+    // The prerequisites are a list, so an aside folded into one of the items came
+    // out as "…your own build, which is the point when verifying a fix and these
+    // variables exported: `ACCOUNT`" — a sentence that reads as nonsense to the
+    // one person the report is written for.
+    func testRerunPrerequisitesKeepTheBuildAsideOutOfTheList() {
+        let report = TestReportRenderer.render(
+            session: session(),
+            definition: definition(),
+            requiredVariables: ["ACCOUNT"]
+        )
+
+        XCTAssertFalse(report.contains("which is the point when verifying a fix and these variables exported"), report)
+        XCTAssertTrue(report.contains("Use your own build of the app"), report)
+    }
+
+    // "`simtool` 0.9.0-dev or newer" sends the receiver looking for a version no
+    // release ever carries. The requirement is the release it was built from; the
+    // fact that this run used a local build belongs next to it, not inside it.
+    func testADevBuildAsksForTheReleaseItIsBasedOn() {
+        var subject = session()
+        subject.provenance?.simtoolVersion = "0.9.0-dev"
+
+        let report = TestReportRenderer.render(session: subject, definition: definition())
+
+        XCTAssertTrue(report.contains("`simtool` 0.9.0 or newer"), report)
+        XCTAssertFalse(report.contains("0.9.0-dev or newer"), report)
+        XCTAssertTrue(report.contains("recorded with a 0.9.0-dev build"), report)
+    }
+
+    // A bare file name does not resolve from the project root, which is where
+    // whoever re-runs the test stands — the snippet has to be paste-ready.
+    func testRerunSnippetNamesTheTestWhereItLives() {
+        var subject = session()
+        subject.provenance?.testFile = ".simtool/tests/tab_order.yml"
+
+        let report = TestReportRenderer.render(session: subject, definition: definition())
+
+        XCTAssertTrue(report.contains("simtool test run .simtool/tests/tab_order.yml"), report)
+    }
+
+    // The truncation note used to send the reader to `logs.jsonl`, which holds
+    // the app's log lines and none of these notes. The screen dump at the failing
+    // step is in the ax file; every note is in the session.
+    func testTruncatedNotesPointAtWhereTheFullCaptureIs() {
+        var subject = session()
+        subject.evidence = ["logs.jsonl", "failure-step-6.png", "failure-step-6-ax.txt"]
+        subject.entries.append(TestSessionEntry(
+            kind: .log,
+            at: Date(timeIntervalSince1970: 1_785_000_017),
+            logs: (1...20).map { "On screen line \($0)" }
+        ))
+
+        let report = TestReportRenderer.render(session: subject, definition: definition())
+
+        XCTAssertTrue(report.contains("8 further note lines omitted here"), report)
+        XCTAssertTrue(report.contains("`failure-step-6-ax.txt`"), report)
+        XCTAssertTrue(report.contains("`session.json`"), report)
+        XCTAssertFalse(report.contains("the full capture is in the run's `logs.jsonl`"), report)
+    }
+
+    // With no failure dump to point at, the session file is still the honest
+    // answer — and it is never `logs.jsonl`.
+    func testTruncatedNotesWithoutAFailureDumpPointAtTheSession() {
+        var subject = session()
+        subject.evidence = ["logs.jsonl"]
+        subject.entries.append(TestSessionEntry(
+            kind: .log,
+            at: Date(timeIntervalSince1970: 1_785_000_017),
+            logs: (1...20).map { "note \($0)" }
+        ))
+
+        let report = TestReportRenderer.render(session: subject, definition: definition())
+
+        XCTAssertTrue(report.contains("8 further note lines omitted here"), report)
+        XCTAssertTrue(report.contains("`session.json`"), report)
+        XCTAssertFalse(report.contains("`logs.jsonl`._"), report)
+    }
+
     func testRerunSectionSaysWhatTheTestDefinesItself() {
         var subject = definition()
         subject.variables = ["ACCOUNT": "+34600000000"]

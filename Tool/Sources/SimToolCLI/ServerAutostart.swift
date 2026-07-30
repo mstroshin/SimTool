@@ -11,6 +11,22 @@ enum ServerAutostart {
     /// How many ports upward from the configured one to consider.
     static let portSearchLimit = 10
 
+    /// Said when a run starts its own server. Scoped to the project on purpose:
+    /// "No SimTool server running" was false whenever one was up for another
+    /// checkout — the common case in a pool of slots — and a caller who can see
+    /// that server in `simtool sessions` was being told it did not exist.
+    static func startedNote(url: String) -> String {
+        "No SimTool server for this project — started one on \(url)"
+    }
+
+    /// Said when the run leaves its server up. It stays because the viewer is
+    /// served by it: stopping it the moment the run ends kills the page someone
+    /// opened to watch that run, right when there is finally something to read.
+    static func keptNote(url: String, sessionId: String) -> String {
+        "The server it started is still running on \(url) — open it, "
+            + "or stop it with `simtool kill \(sessionId.prefix(8))`. `--stop-server` stops it automatically."
+    }
+
     static func freePort(
         startingAt start: UInt16,
         limit: Int = portSearchLimit,
@@ -65,7 +81,7 @@ enum ServerAutostart {
                     reclaimPort: false,
                     config: config
                 )
-                emitNote("No SimTool server running — started one on \(session.url)", json: json)
+                emitNote(startedNote(url: session.url), json: json)
                 return session
             } catch {
                 lastError = error

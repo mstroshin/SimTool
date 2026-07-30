@@ -58,6 +58,21 @@ final class AgentSkillTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: project.appendingPathComponent(".claude").path))
     }
 
+    // `HOME` is what every other tool on the machine means by "the home
+    // directory" — a container, a CI job or a test that sets it expects to be
+    // obeyed. `NSHomeDirectory()` reads the password database instead, so a
+    // `global` install used to write into the real home whatever the caller said.
+    func testHomeFollowsTheEnvironment() {
+        XCTAssertEqual(
+            AgentSkillInstaller.home(from: ["HOME": "/tmp/somewhere-else"]).standardizedFileURL.path,
+            URL(fileURLWithPath: "/tmp/somewhere-else").standardizedFileURL.path
+        )
+    }
+
+    func testHomeFallsBackWhenTheEnvironmentNamesNone() {
+        XCTAssertEqual(AgentSkillInstaller.home(from: [:]).path, NSHomeDirectory())
+    }
+
     // Same document, two layouts: the point of the agent axis is that nothing
     // about the skill itself differs.
     func testCodexGetsTheSameDocumentInItsOwnLayout() throws {

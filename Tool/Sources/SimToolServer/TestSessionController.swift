@@ -61,6 +61,14 @@ public final class TestSessionController: @unchecked Sendable {
     /// so the timeline points at the frame just before the action.
     private var pendingActionStartedAt: Date?
 
+    /// The session recording right now, whoever started it. The run-status route
+    /// reads it so a run driven from the CLI is visible in the viewer.
+    public var activeSession: TestSession? {
+        lock.lock()
+        defer { lock.unlock() }
+        return active
+    }
+
     public init(
         store: TestSessionStore,
         device: SimulatorDevice,
@@ -73,6 +81,7 @@ public final class TestSessionController: @unchecked Sendable {
 
     public func start(
         title: String,
+        file: String? = nil,
         video: Bool = true,
         kind: TestKind? = nil,
         reference: String? = nil,
@@ -96,7 +105,8 @@ public final class TestSessionController: @unchecked Sendable {
             // Seeded unchecked: the claim is worth showing while the run is
             // still in flight, not only once it has an answer.
             criteria: criteria.map { TestCriterionResult(label: $0, status: .unchecked) },
-            provenance: provenance
+            provenance: provenance,
+            file: file
         )
         try store.ensureDirectory(for: session.id)
         if video {

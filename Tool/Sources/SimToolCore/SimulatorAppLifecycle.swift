@@ -718,6 +718,59 @@ public enum SimulatorAppLifecycleClient {
         )
     }
 
+    /// Whether the bundle recorded as installed on this device is the one we are
+    /// about to run. `force` reinstalls regardless; a fresh `xcodebuild` means
+    /// whatever is on the device is stale even when the checksum matches, because
+    /// the record was written for the previous bundle.
+    public static func needsInstall(
+        checksum: String,
+        bundleIdentifier: String,
+        installed: SimulatorAppInstallRecord?,
+        xcodebuildRan: Bool,
+        force: Bool
+    ) -> Bool {
+        force
+            || xcodebuildRan
+            || installed?.checksum != checksum
+            || installed?.bundleIdentifier != bundleIdentifier
+    }
+
+    /// Brings the app on the device up to date without launching it — what a
+    /// test run needs before it stages anything, since the run launches the app
+    /// itself with the test's own arguments.
+    @discardableResult
+    public static func install(
+        build buildPayload: SimulatorAppBuildPayload,
+        device: SimulatorDevice,
+        force: Bool = false,
+        cache: SimulatorAppBuildCache = SimulatorAppBuildCache(simtoolDirectory: SimToolDirectory.resolve()),
+        timeoutSeconds: TimeInterval? = 1_800,
+        progress: (@Sendable (String) -> Void)? = nil
+    ) async throws -> Bool {
+        let installRecord = cache.readMetadata(for: buildPayload.identity)?.installRecords[device.udid]
+        guard needsInstall(
+            checksum: buildPayload.checksum,
+            bundleIdentifier: buildPayload.bundleIdentifier,
+            installed: installRecord,
+            xcodebuildRan: buildPayload.xcodebuildRan,
+            force: force
+        ) else { return false }
+
+        progress?("Installing…")
+        _ = try await installApp(
+            deviceUDID: device.udid,
+            appBundlePath: buildPayload.appBundlePath,
+            timeoutSeconds: timeoutSeconds
+        )
+        try cache.recordInstall(
+            identity: buildPayload.identity,
+            checksum: buildPayload.checksum,
+            bundleIdentifier: buildPayload.bundleIdentifier,
+            deviceUDID: device.udid
+        )
+        return true
+    }
+
     /// Installs (only when the cache's install record does not match the
     /// payload checksum, or `force` is set — `force` forces a reinstall, not a
     /// rebuild) and cold-launches the app, retrying install+launch once when
@@ -738,7 +791,13 @@ public enum SimulatorAppLifecycleClient {
         var installStep = SimulatorAppProcessStepSummary(name: "simctl install", ran: false)
         var installRan = false
 
-        let needsInstall = force || buildPayload.xcodebuildRan || installRecord?.checksum != buildPayload.checksum || installRecord?.bundleIdentifier != buildPayload.bundleIdentifier
+        let needsInstall = needsInstall(
+            checksum: buildPayload.checksum,
+            bundleIdentifier: buildPayload.bundleIdentifier,
+            installed: installRecord,
+            xcodebuildRan: buildPayload.xcodebuildRan,
+            force: force
+        )
         if needsInstall {
             progress?("Installing…")
             installStep = try await installApp(

@@ -45,11 +45,36 @@ final class TestRunController: @unchecked Sendable {
         TestListPayload(tests: TestDefinitionParser.summaries(in: testsRoot))
     }
 
-    func status() -> TestRunStatusPayload {
+    /// The run this server is showing. `activeSession` covers what this
+    /// controller cannot see: a run started from the CLI records its session
+    /// here, so the viewer is watching it happen while this controller holds
+    /// nothing — and used to answer "no run in progress", offering to start a
+    /// second one onto the same simulator.
+    func status(activeSession: TestSession? = nil) -> TestRunStatusPayload {
         lock.lock()
-        defer { lock.unlock() }
-        guard let run else { return TestRunStatusPayload() }
-        return TestRunStatusPayload(
+        let run = self.run
+        lock.unlock()
+
+        // A run this controller owns wins: it knows the step counts, and Stop can
+        // cancel it.
+        if let run, run.status == "running" { return Self.payload(run) }
+        // Otherwise a session recording here belongs to someone else — a
+        // `simtool test run` in a terminal. It is just as much a run in progress.
+        if let activeSession, activeSession.status == .running {
+            return TestRunStatusPayload(
+                active: true,
+                file: activeSession.file,
+                name: activeSession.title,
+                sessionId: activeSession.id,
+                status: "running",
+                stoppable: false
+            )
+        }
+        return run.map(Self.payload) ?? TestRunStatusPayload()
+    }
+
+    private static func payload(_ run: ActiveRun) -> TestRunStatusPayload {
+        TestRunStatusPayload(
             active: run.status == "running",
             file: run.file,
             name: run.name,
@@ -62,9 +87,14 @@ final class TestRunController: @unchecked Sendable {
         )
     }
 
-    func start(file: String, serverURL: URL, video: Bool = true) throws -> TestRunStatusPayload {
+    func start(file: String, serverURL: URL, video: Bool = true, activeSession: TestSession? = nil) throws -> TestRunStatusPayload {
         guard !file.contains("/"), !file.contains(".."), !file.isEmpty else {
             throw SimToolError("Invalid test file name: \(file)")
+        }
+        // A session recording here is a run in progress even when this controller
+        // did not start it — one simulator cannot serve two runs.
+        if let activeSession, activeSession.status == .running {
+            throw SimToolError("\(activeSession.file ?? activeSession.title) is already running on this server.")
         }
         let testURL = testsRoot.appendingPathComponent(file)
         let test = try TestDefinitionParser.load(contentsOf: testURL)

@@ -2375,10 +2375,16 @@ public enum WebViewer {
       const runButton = document.createElement("button");
       runButton.className = "tests-def-run";
       runButton.type = "button";
-      if (busy && isCurrent) {
+      // A run started from a terminal is just as much in flight, but this server
+      // holds no task to cancel — so it gets a label, not a button that lies.
+      const stoppable = !testRunStatus || testRunStatus.stoppable !== false;
+      if (busy && isCurrent && stoppable) {
         runButton.textContent = "Stop";
         runButton.classList.add("tests-def-stop");
         runButton.addEventListener("click", stopTest);
+      } else if (busy && isCurrent) {
+        runButton.textContent = "Running…";
+        runButton.disabled = true;
       } else {
         runButton.textContent = "Run";
         runButton.disabled = busy || Boolean(test.parseError);

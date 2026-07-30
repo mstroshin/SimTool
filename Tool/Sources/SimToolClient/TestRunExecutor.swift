@@ -33,6 +33,12 @@ public struct TestRunOptions: Sendable {
     public var variableOverrides: [String: String]
     /// How long to wait for the app to confirm it applied the run's mock rules.
     public var mockAckTimeoutSeconds: Double
+    /// Brings the app under test up to date — build if the sources changed,
+    /// install if the build did — before the scenario is staged and before the
+    /// recorder starts. Injected rather than done here because building is the
+    /// CLI's business and the executor must stay driveable from the viewer.
+    /// Nil takes whatever is installed on the device as the build to judge.
+    public var prepareApp: (@Sendable () async throws -> Void)?
 
     public init(
         title: String? = nil,
@@ -46,7 +52,8 @@ public struct TestRunOptions: Sendable {
         projectRoot: URL? = nil,
         variables: [String: String] = ProcessInfo.processInfo.environment,
         variableOverrides: [String: String] = [:],
-        mockAckTimeoutSeconds: Double = 20
+        mockAckTimeoutSeconds: Double = 20,
+        prepareApp: (@Sendable () async throws -> Void)? = nil
     ) {
         self.title = title
         self.testFile = testFile
@@ -60,6 +67,7 @@ public struct TestRunOptions: Sendable {
         self.variables = variables
         self.variableOverrides = variableOverrides
         self.mockAckTimeoutSeconds = mockAckTimeoutSeconds
+        self.prepareApp = prepareApp
     }
 }
 
@@ -146,6 +154,9 @@ public final class TestRunExecutor: @unchecked Sendable {
     /// after that launch. Nothing arriving afterwards means the capture is dead
     /// and `logs.jsonl` documents only the pre-launch window.
     private var logsCapturedBeforeLaunch: Int?
+    /// Timeline entries from the staging phase, which runs before the session
+    /// exists; replayed into it the moment it does.
+    private var stagedNotes: [TestSessionEntryRequest] = []
 
     public init(client: SimToolClient, options: TestRunOptions) {
         self.client = client
@@ -193,38 +204,29 @@ public final class TestRunExecutor: @unchecked Sendable {
             )
         }
 
-        // Session first: everything after this point is worth recording, and a
-        // failure that leaves no session is a failure nobody can review.
-        var session: TestSession?
-        if options.recordSession {
+        // 0 — the build to judge. A verdict is only meaningful next to the code
+        // that produced it, so the app is brought up to date first — and before
+        // the recorder starts, because a video of an Xcode build is not what
+        // anyone opens a test session to watch.
+        if let prepareApp = options.prepareApp {
             do {
-                session = try await client.startTestSession(TestSessionStartRequest(
-                    title: options.title ?? test.name ?? options.testFile?.deletingPathExtension().lastPathComponent ?? "test",
-                    video: options.video,
-                    kind: test.kind,
-                    reference: test.reference,
-                    criteria: test.criteria,
-                    provenance: await provenance(test, config: config, app: app, launch: recordedLaunch)
-                ))
-                sessionId = session?.id
-                if let session {
-                    onSessionStarted?(session)
-                    if let root = config.testSessionsPath {
-                        sessionDirectory = URL(fileURLWithPath: root).appendingPathComponent(session.id, isDirectory: true)
-                        if options.evidence != .none { evidenceDirectory = sessionDirectory }
-                    }
-                }
+                try await prepareApp()
             } catch {
-                // A busy session or a dead recorder must not swallow the run;
-                // report it and carry on without a timeline.
-                await narrate("Session not recorded: \(message(of: error))")
+                return TestRunResult(
+                    verdict: .infra,
+                    kind: test.kind,
+                    criteria: criteria,
+                    totalSteps: test.steps.count,
+                    infraReason: "Could not build the app under test: \(message(of: error))"
+                )
             }
         }
 
-        // Log capture is armed before launch and scoped to this run: the
+        // Log capture is armed before the staging and scoped to this run: the
         // capture buffer is reset by arming, so everything it holds afterwards
-        // belongs to the run. stdout is deliberately not captured — the server
-        // would have to relaunch the app to attach a console, and this run
+        // belongs to the run — including what a `setup:` launch logged, which is
+        // off camera but still evidence. stdout is deliberately not captured: the
+        // server would have to relaunch the app to attach a console, and this run
         // launches the app itself.
         if let app, options.evidence != .none {
             do {
@@ -247,7 +249,7 @@ public final class TestRunExecutor: @unchecked Sendable {
                     failures: failures,
                     mocks: [],
                     completedSteps: 0,
-                    session: session,
+                    session: nil,
                     infraReason: "`reset:` could not be applied: " + outcome.failures.joined(separator: "; ")
                 )
             }
@@ -270,7 +272,7 @@ public final class TestRunExecutor: @unchecked Sendable {
                     failures: failures,
                     mocks: [],
                     completedSteps: 0,
-                    session: session,
+                    session: nil,
                     infraReason: "Cannot clear existing mock rules: \(message(of: error))"
                 )
             }
@@ -283,7 +285,43 @@ public final class TestRunExecutor: @unchecked Sendable {
             await narrate("Setup \(index + 1)/\(test.setup.count) (\(status)): \(command.trimmingCharacters(in: .whitespacesAndNewlines))")
         }
 
-        // 4 — install the test's mock rules, after setup and before launch, so
+        // 4 — start recording. Deliberately after the staging: `setup:` is where
+        // a scenario is warmed up — a login, a first launch, a wait — and none of
+        // that is what someone opens the video to watch. The staging still shows
+        // up in the timeline: the notes above were buffered and are replayed into
+        // the session here, so a `Setup n/n (exit 1)` is still there to be read
+        // before a verdict is trusted.
+        var session: TestSession?
+        if options.recordSession {
+            do {
+                session = try await client.startTestSession(TestSessionStartRequest(
+                    title: options.title ?? test.name ?? options.testFile?.deletingPathExtension().lastPathComponent ?? "test",
+                    // The viewer keys its list on the file name, so this is what
+                    // lets it show the run against the test it belongs to.
+                    file: options.testFile?.lastPathComponent,
+                    video: options.video,
+                    kind: test.kind,
+                    reference: test.reference,
+                    criteria: test.criteria,
+                    provenance: await provenance(test, config: config, app: app, launch: recordedLaunch)
+                ))
+                sessionId = session?.id
+                if let session {
+                    onSessionStarted?(session)
+                    if let root = config.testSessionsPath {
+                        sessionDirectory = URL(fileURLWithPath: root).appendingPathComponent(session.id, isDirectory: true)
+                        if options.evidence != .none { evidenceDirectory = sessionDirectory }
+                    }
+                    await flushStagingNotes()
+                }
+            } catch {
+                // A busy session or a dead recorder must not swallow the run;
+                // report it and carry on without a timeline.
+                await narrate("Session not recorded: \(message(of: error))")
+            }
+        }
+
+        // 5 — install the test's mock rules, after setup and before launch, so
         // the app's very first poll already has them.
         var mockGeneration: Int?
         if !test.mocks.isEmpty {
@@ -308,7 +346,7 @@ public final class TestRunExecutor: @unchecked Sendable {
             }
         }
 
-        // 5 — launch.
+        // 6 — launch.
         if let app {
             do {
                 try await launchApp(app, launch: launch, udid: config.udid)
@@ -563,13 +601,62 @@ public final class TestRunExecutor: @unchecked Sendable {
         }
     }
 
+    /// `{udid}`, `{app}` and `{server}` filled in. `{server}` is left standing
+    /// when there is no address to put there, so a broken flag is visible in the
+    /// recorded command instead of silently becoming `--server ` with nothing
+    /// after it.
+    static func renderSetup(_ command: String, udid: String, app: String?, server: String?) -> String {
+        var rendered = command
+            .replacingOccurrences(of: "{udid}", with: udid)
+            .replacingOccurrences(of: "{app}", with: app ?? "")
+        if let server = address(server) {
+            rendered = rendered.replacingOccurrences(of: "{server}", with: server)
+        }
+        return rendered
+    }
+
+    /// One spelling for a server address. The client's root URL renders with a
+    /// trailing slash, which reads wrong in a command and breaks the moment
+    /// somebody appends a path to it.
+    private static func address(_ raw: String?) -> String? {
+        guard let raw, !raw.isEmpty else { return nil }
+        var trimmed = raw
+        while trimmed.hasSuffix("/") { trimmed.removeLast() }
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// The environment a setup command runs in: the test's own `variables:`, plus
+    /// where this run's server is.
+    ///
+    /// A scenario whose state changes inside one process needs two launches, and
+    /// the first one lives in `setup:`. Since a run may start its own server on a
+    /// port it picks, no port is knowable when the test is written — so without
+    /// these the only way to reach the server from `setup:` is to hardcode one,
+    /// which is what stops the file from travelling to another machine.
+    ///
+    /// `SIMTOOL_SERVER` is the address for `--server`; `SIMTOOL_SERVER_URL` is the
+    /// one the app must post to, which differs whenever the server binds a LAN
+    /// address. The test's own values win: a file that sets either name means it.
+    static func setupEnvironment(
+        variables: [String: String],
+        server: String?,
+        appFacingServer: String?
+    ) -> [String: String] {
+        var environment = variables
+        if let server = address(server), environment["SIMTOOL_SERVER"] == nil {
+            environment["SIMTOOL_SERVER"] = server
+        }
+        if let appFacingServer = address(appFacingServer), environment["SIMTOOL_SERVER_URL"] == nil {
+            environment["SIMTOOL_SERVER_URL"] = appFacingServer
+        }
+        return environment
+    }
+
     /// Setup commands reset persisted state before launch (delete a defaults
     /// key, clear a container), so a non-zero exit — the key not existing on a
     /// first run — is reported but never fails the test.
     private func runSetupCommand(_ command: String, udid: String, app: String?, variables: [String: String]) async -> String {
-        let rendered = command
-            .replacingOccurrences(of: "{udid}", with: udid)
-            .replacingOccurrences(of: "{app}", with: app ?? "")
+        let rendered = Self.renderSetup(command, udid: udid, app: app, server: client.rootURL.absoluteString)
         do {
             let output = try await ProcessRunner.run(
                 executable: URL(fileURLWithPath: "/bin/sh"),
@@ -577,7 +664,11 @@ public final class TestRunExecutor: @unchecked Sendable {
                 // The test's own `variables:` are exported to the shell too, so
                 // `$ACCOUNT` in a setup command means the same thing it means in
                 // a launch argument.
-                environment: variables,
+                environment: Self.setupEnvironment(
+                    variables: variables,
+                    server: client.rootURL.absoluteString,
+                    appFacingServer: options.appFacingServerURL
+                ),
                 timeoutSeconds: 60
             )
             return output.status == 0 ? "ok" : "exit \(output.status)"
@@ -767,7 +858,9 @@ public final class TestRunExecutor: @unchecked Sendable {
         launch: ResolvedLaunch
     ) async -> TestRunProvenance {
         var provenance = TestRunProvenance(
-            testFile: options.testFile?.lastPathComponent,
+            // Relative to the project, so the report's re-run snippet is one a
+            // receiver can paste from the project root.
+            testFile: options.testFile.map { TestFilePath.display(file: $0, projectRoot: options.projectRoot) },
             appBundleId: app,
             deviceName: config.device,
             runtime: (try? await client.devices())?.devices.first { $0.udid == config.udid }?.runtime,
@@ -884,14 +977,32 @@ public final class TestRunExecutor: @unchecked Sendable {
 
     private func narrate(_ text: String) async {
         onNarration?(text)
-        guard sessionId != nil else { return }
+        guard sessionId != nil else { return stage(TestSessionEntryRequest(kind: .step, text: text)) }
         _ = try? await client.appendTestSessionEntry(TestSessionEntryRequest(kind: .step, text: text))
     }
 
     private func note(_ logs: [String]) async {
         for line in logs { onNarration?(line) }
-        guard sessionId != nil, !logs.isEmpty else { return }
+        guard !logs.isEmpty else { return }
+        guard sessionId != nil else { return stage(TestSessionEntryRequest(kind: .log, logs: logs)) }
         _ = try? await client.appendTestSessionEntry(TestSessionEntryRequest(kind: .log, logs: logs))
+    }
+
+    /// Holds a staging note until there is a session to put it in. The staging
+    /// happens before the recorder starts — so it is off camera — but `Reset:`
+    /// and `Setup n/n (exit 1)` are exactly what has to be read before a verdict
+    /// is trusted, so they are not allowed to vanish with it.
+    private func stage(_ entry: TestSessionEntryRequest) {
+        guard options.recordSession else { return }
+        stagedNotes.append(entry)
+    }
+
+    private func flushStagingNotes() async {
+        let pending = stagedNotes
+        stagedNotes = []
+        for entry in pending {
+            _ = try? await client.appendTestSessionEntry(entry)
+        }
     }
 
     private func message(of error: Error) -> String {

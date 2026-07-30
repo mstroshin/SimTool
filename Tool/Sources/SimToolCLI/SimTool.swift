@@ -112,15 +112,36 @@ struct Status: AsyncParsableCommand {
 struct Kill: AsyncParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Stop a SimTool session by id, or the latest session.")
 
-    @Argument(help: "Session id. Defaults to latest session when omitted.")
+    @Argument(help: "Session id, or a unique prefix of one. Defaults to latest session when omitted.")
     var sessionId: String?
 
     @OptionGroup var common: CommonJSON
 
+    /// The session an id names. A prefix counts, because `simtool sessions`
+    /// prints ids truncated to the table width: the id a user can see is not one
+    /// they can paste, and "No matching session found" for a session listed a
+    /// line above is a lie about the state of the machine.
+    ///
+    /// An exact match wins over a prefix, and an ambiguous prefix names the
+    /// candidates rather than picking one — stopping the wrong server is worse
+    /// than stopping none.
+    static func select(id: String, among sessions: [SessionInfo]) throws -> SessionInfo {
+        if let exact = sessions.first(where: { $0.sessionId == id }) { return exact }
+        let matches = sessions.filter { $0.sessionId.hasPrefix(id) }
+        switch matches.count {
+        case 1: return matches[0]
+        case 0: throw SimToolError("No session matches \(id).")
+        default:
+            throw SimToolError(
+                "\(id) matches \(matches.count) sessions: \(matches.map(\.sessionId).joined(separator: ", ")). Name one of them."
+            )
+        }
+    }
+
     func run() async throws {
         let session: SessionInfo?
         if let sessionId {
-            session = try SessionStore.shared.session(id: sessionId)
+            session = try Self.select(id: sessionId, among: try SessionStore.shared.list())
         } else {
             session = try SessionStore.shared.latest()
         }
@@ -989,6 +1010,36 @@ extension AppCommand {
     }
 }
 
+/// A run that ended before it could produce a verdict, and the exit code that
+/// says which kind of ending it was.
+///
+/// Never `1`: that code means "a criterion did not hold", i.e. the bug
+/// reproduced, and an agent branches on the exit code without reading the text.
+/// A test that cannot run as written is `inconclusive` — the claim was never
+/// tested, so fix the test — and an environment that cannot host a run is
+/// `infra`, the code that says a result would not be trustworthy.
+struct TestRunPreflightError: Error, LocalizedError {
+    enum Cause {
+        /// The test itself: an unreadable file, a parse error, a typo'd profile,
+        /// a `${VAR}` nothing defines.
+        case test
+        /// The machine around it: no free port, a server that cannot be started.
+        case environment
+    }
+
+    let cause: Cause
+    let message: String
+
+    var errorDescription: String? { message }
+
+    var exitCode: Int32 {
+        switch cause {
+        case .test: return TestVerdict.inconclusive.exitCode
+        case .environment: return TestVerdict.infra.exitCode
+        }
+    }
+}
+
 struct TestCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "test",
@@ -1013,6 +1064,19 @@ struct TestCommand: AsyncParsableCommand {
                 throw SimToolError("No running SimTool server found. Start one with `simtool serve` or pass --server.")
             }
             return SimToolClient(baseURL: url)
+        }
+
+        /// What to say before autostarting while somebody else's server is up.
+        /// Nil when there is nothing to report.
+        ///
+        /// A server with no `projectRoot` — started before the field existed, or
+        /// outside any project — is still worth mentioning: staying silent about it
+        /// makes "no server for this project" read as a contradiction of
+        /// `simtool sessions`, which is listing one.
+        static func foreignServerNote(_ session: SessionInfo?) -> String? {
+            guard let session else { return nil }
+            let whose = session.projectRoot.map { "another project (\($0))" } ?? "another checkout"
+            return "A SimTool server is running for \(whose) — starting one for this project instead."
         }
 
         /// The newest running server that serves `projectRoot`, if any. Compared
@@ -1067,8 +1131,8 @@ struct TestCommand: AsyncParsableCommand {
             // Worth saying out loud: the reason a server is running and this run
             // still starts one is not obvious, and the alternative — driving
             // another checkout's simulator — is worse than a second server.
-            if let elsewhere = Self.foreignRunningSession(from: sessions, projectRoot: projectRoot)?.projectRoot {
-                emitNote("A SimTool server is running for another project (\(elsewhere)) — starting one for this project instead.", json: json)
+            if let note = Self.foreignServerNote(Self.foreignRunningSession(from: sessions, projectRoot: projectRoot)) {
+                emitNote(note, json: json)
             }
             let started = try await ServerAutostart.start(
                 parameters: ServeParameters.resolve(device: nil, host: nil, port: nil, config: config),
@@ -1115,7 +1179,7 @@ struct TestCommand: AsyncParsableCommand {
                   body: { items: [] }         #   YAML or a JSON string (or `error: unavailable`)
                   strict: true                #   must fire, or the run is reported as infra
               setup:                          # optional; shell commands run before launch,
-                - xcrun simctl spawn {udid} … #   {udid}/{app} substituted, failures recorded
+                - xcrun simctl spawn {udid} … #   {udid}/{app}/{server} substituted, exits recorded
               timeout: 10                     # default per-step wait, seconds
               steps:
                 - waitFor: { id: settingsButton, timeout: 20 }
@@ -1130,11 +1194,16 @@ struct TestCommand: AsyncParsableCommand {
             Every step polls the accessibility tree until its target appears (or
             disappears for assertHidden), so tests need no explicit sleeps.
             Setup commands reset persisted state; their exit codes are recorded
-            in the session but never fail the test.
+            in the session but never fail the test. They also learn where this
+            run's server is — `{server}` in the command, and `SIMTOOL_SERVER`
+            (for `--server`) plus `SIMTOOL_SERVER_URL` (what the app posts to)
+            in their environment — so a setup launch needs no hardcoded port.
 
             A running SimTool server is not a prerequisite: when there is none,
-            the run starts one on a free port and stops it again afterwards. A
-            server that was already running is reused and left alone.
+            the run starts one on a free port and leaves it running, because that
+            server is what serves the viewer — and the run just recorded is what
+            the viewer is opened to read. `--stop-server` stops it instead. A
+            server that was already running is reused and left alone either way.
 
             `${VAR}` in a launch profile, in this test's own arguments or in a
             setup command is resolved from `variables:` first, then from the
@@ -1162,6 +1231,11 @@ struct TestCommand: AsyncParsableCommand {
             A `kind: bug` run stops at the first unmet criterion; a
             `kind: feature` run reports all of them. Tests with no `kind:` keep
             the old behaviour: pass (0) or fail (1).
+
+            A run that never starts exits by the same scale, never 1: a test that
+            cannot run as written — unreadable file, parse error, unknown profile,
+            a `${VAR}` nothing defines — is `inconclusive` (2), and an environment
+            with nowhere to run it is `infra` (3).
             """
         )
 
@@ -1186,49 +1260,75 @@ struct TestCommand: AsyncParsableCommand {
         @Option(name: .customLong("var"), help: "Override a ${VAR} as NAME=value. Wins over the test's `variables:` and over the environment; repeatable.")
         var variables: [String] = []
 
+        @Flag(help: "Stop a server this run started once it finishes. Off by default: the viewer is served by it, and the run is what you want to look at.")
+        var stopServer = false
+
+        @Flag(help: "Skip the build: judge whatever is installed on the device. By default the run rebuilds and reinstalls when the sources changed, before it records anything.")
+        var noBuild = false
+
         @OptionGroup var serverOptions: ServerOptions
         @OptionGroup var common: CommonJSON
 
         func run() async throws {
-            guard repeatCount >= 1 else { throw SimToolError("--repeat must be at least 1.") }
+            do {
+                try await runOrThrow()
+            } catch let failure as TestRunPreflightError {
+                // Printed here rather than left to ArgumentParser, which would
+                // exit 1 and so report a broken test as a reproduced bug.
+                FileHandle.standardError.write(Data("Error: \(failure.message)\n".utf8))
+                throw ExitCode(failure.exitCode)
+            }
+        }
+
+        private func runOrThrow() async throws {
+            guard repeatCount >= 1 else {
+                throw TestRunPreflightError(cause: .test, message: "--repeat must be at least 1.")
+            }
             let overrides = try Self.parseVariableOverrides(variables)
             let projectConfig = try ProjectConfigLoader.loadIfPresent(explicitPath: config)
             let testURL = URL(fileURLWithPath: test)
-            let parsed = try TestDefinitionParser.load(contentsOf: testURL)
-            // Same reason as the unresolved-variable check below: a typo'd
-            // profile name must fail here, not after the executor has already
-            // started a server and booted a simulator to discover it.
-            if let profileError = Self.unknownProfile(test: parsed, profiles: projectConfig?.profiles ?? []) {
-                throw SimToolError(profileError)
+            let parsed: TestDefinition
+            do {
+                parsed = try TestDefinitionParser.load(contentsOf: testURL)
+            } catch {
+                throw TestRunPreflightError(cause: .test, message: Self.message(of: error))
             }
-            let missing = Self.unresolvedVariables(
+            try Self.preflight(
                 test: parsed,
                 profiles: projectConfig?.profiles ?? [],
                 environment: ProcessInfo.processInfo.environment,
                 overrides: overrides
             )
-            if !missing.isEmpty {
-                let one = missing.count == 1
-                throw SimToolError("""
-                    This test refers to \(missing.joined(separator: ", ")) without defining \(one ? "it" : "them") — \
-                    usually the account it runs as. Export \(one ? "it" : "them"), pass `--var \(missing[0])=…`, \
-                    or add \(one ? "it" : "them") under `variables:` in the test.
-                    """)
-            }
             if !common.json, let description = parsed.description {
                 print(description)
             }
-            let (client, ownedServer) = try await serverOptions.resolveClient(config: projectConfig, configPath: config, json: common.json)
+            let client: SimToolClient
+            let ownedServer: SessionInfo?
+            do {
+                (client, ownedServer) = try await serverOptions.resolveClient(config: projectConfig, configPath: config, json: common.json)
+            } catch {
+                // Nothing about the test is wrong here — there is nowhere to run
+                // it — so the code has to be `infra`, not `inconclusive`.
+                throw TestRunPreflightError(cause: .environment, message: Self.message(of: error))
+            }
             var stopOwnedServer: (@Sendable () async -> Void)?
             if let ownedServer {
                 let json = common.json
-                stopOwnedServer = {
-                    await SessionControl.stop(ownedServer)
-                    emitNote("Stopped the server it started.", json: json)
+                if stopServer {
+                    stopOwnedServer = {
+                        await SessionControl.stop(ownedServer)
+                        emitNote("Stopped the server it started.", json: json)
+                    }
+                    // Ctrl-C must not leave behind a server and a simulator the
+                    // caller asked to have stopped.
+                    SignalTrap.shared.installCleanup { await SessionControl.stop(ownedServer) }
+                } else {
+                    // Left running on purpose: it serves the viewer, and the run
+                    // just recorded is what someone opens the viewer to read.
+                    stopOwnedServer = {
+                        emitNote(ServerAutostart.keptNote(url: ownedServer.url, sessionId: ownedServer.sessionId), json: json)
+                    }
                 }
-                // Ctrl-C during a run must not leave a server and a simulator
-                // behind that the user never started and cannot see.
-                SignalTrap.shared.installCleanup { await SessionControl.stop(ownedServer) }
             }
 
             let report: TestRunReport
@@ -1282,7 +1382,8 @@ struct TestCommand: AsyncParsableCommand {
                         defaultApp: projectConfig?.bundleId,
                         appFacingServerURL: projectConfig?.appFacingServerURL,
                         projectRoot: projectConfig.map { URL(fileURLWithPath: $0.projectRoot) },
-                        variableOverrides: overrides
+                        variableOverrides: overrides,
+                        prepareApp: options.appPreparation(config: projectConfig, client: client)
                     )
                 )
                 if !options.common.json {
@@ -1307,6 +1408,81 @@ struct TestCommand: AsyncParsableCommand {
                 overrides[String(entry[entry.startIndex..<separator])] = String(entry[entry.index(after: separator)...])
             }
             return overrides
+        }
+
+        static func message(of error: Error) -> String {
+            (error as? LocalizedError)?.errorDescription ?? "\(error)"
+        }
+
+        /// Rebuilds and reinstalls the app before the run stages anything, when
+        /// the project says how to build it. Nil when it does not, or when
+        /// `--no-build` says the caller has handled it: a verdict is about the
+        /// build that produced it, and silently judging a stale bundle is the
+        /// mistake this closes.
+        ///
+        /// It runs before the recorder starts — a video of an Xcode build is not
+        /// what anyone opens a session to watch.
+        func appPreparation(config: ProjectConfig?, client: SimToolClient) -> (@Sendable () async throws -> Void)? {
+            guard !noBuild, let config else { return nil }
+            let build = config.build
+            let json = common.json
+            // Paths in the config are already resolved against the project root
+            // by the loader. A config that names no scheme or no project is one
+            // that cannot build, which is not an error: the device's build is
+            // then taken as given, exactly as before.
+            let selection = try? SimulatorAppBuildSelection.validated(
+                workspacePath: build.workspace,
+                projectPath: build.project,
+                scheme: build.scheme,
+                configuration: build.configuration,
+                derivedDataPath: build.derivedDataPath
+            )
+            guard let selection else { return nil }
+            return {
+                let device = try await SimulatorDeviceClient.resolve((try? await client.config())?.udid)
+                let cache = SimulatorAppBuildCache(simtoolDirectory: SimToolDirectory.resolve())
+                let payload = try await SimulatorAppLifecycleClient.build(selection: selection, cache: cache)
+                let installed = try await SimulatorAppLifecycleClient.install(
+                    build: payload,
+                    device: device,
+                    cache: cache
+                )
+                if payload.xcodebuildRan || installed {
+                    emitNote(
+                        "Built \(build.scheme) and installed it on \(device.name) — the run judges this build.",
+                        json: json
+                    )
+                }
+            }
+        }
+
+        /// Everything that can be known to be wrong before a server is started or
+        /// a simulator is touched. Throws `.test`, so a caller that cannot run the
+        /// test as written hears `inconclusive` rather than a reproduced bug.
+        static func preflight(
+            test: TestDefinition,
+            profiles: [LaunchProfile],
+            environment: [String: String],
+            overrides: [String: String]
+        ) throws {
+            // A typo'd profile must fail here, not after the executor has already
+            // started a server and booted a simulator to discover it.
+            if let profileError = unknownProfile(test: test, profiles: profiles) {
+                throw TestRunPreflightError(cause: .test, message: profileError)
+            }
+            let missing = unresolvedVariables(
+                test: test,
+                profiles: profiles,
+                environment: environment,
+                overrides: overrides
+            )
+            guard !missing.isEmpty else { return }
+            let one = missing.count == 1
+            throw TestRunPreflightError(cause: .test, message: """
+                This test refers to \(missing.joined(separator: ", ")) without defining \(one ? "it" : "them") — \
+                usually the account it runs as. Export \(one ? "it" : "them"), pass `--var \(missing[0])=…`, \
+                or add \(one ? "it" : "them") under `variables:` in the test.
+                """)
         }
 
         /// `${VAR}` the test refers to and nothing supplies: not its own
@@ -1413,8 +1589,67 @@ struct TestCommand: AsyncParsableCommand {
         @OptionGroup var serverOptions: ServerOptions
         @OptionGroup var common: CommonJSON
 
+        @Option(help: "Path to .simtool/config.yml, naming the project whose sessions to list.")
+        var config: String?
+
+        /// Which server's recorded sessions to list.
+        enum Target: Equatable {
+            case use(String)
+            /// Nothing to list from, plus the running server that is not ours —
+            /// carried whole, because one without a `projectRoot` is still worth
+            /// mentioning and a bare path cannot express that.
+            case noServer(foreign: SessionInfo?)
+        }
+
+        /// Why there is nothing to list, and what is running instead.
+        static func noServerMessage(foreign: SessionInfo?) -> String {
+            var message = "No SimTool server for this project is running. Start one with `simtool serve`, or pass --server."
+            guard let foreign else { return message }
+            let whose = foreign.projectRoot.map { "for \($0)" } ?? "for another checkout"
+            message += " A server is running \(whose) — its recorded sessions are that project's history, not this one's."
+            return message
+        }
+
+        /// Deliberately not "the newest server running": a server records sessions
+        /// into the project it was started for, so listing whichever one is up
+        /// showed this checkout another checkout's history and said nothing about
+        /// it. `run` matches on the project root for the same reason; `list` reads
+        /// the same state and has to agree.
+        static func target(
+            explicit: String?,
+            sessions: [SessionInfo],
+            projectRoot: String?,
+            isAlive: (Int32) -> Bool = { isProcessAlive($0) }
+        ) -> Target {
+            if let explicit, !explicit.isEmpty { return .use(explicit) }
+            if let mine = ServerOptions.reusableSession(from: sessions, projectRoot: projectRoot, isAlive: isAlive) {
+                return .use(mine.api)
+            }
+            return .noServer(
+                foreign: ServerOptions.foreignRunningSession(from: sessions, projectRoot: projectRoot, isAlive: isAlive)
+            )
+        }
+
+        /// Unlike `run`, this never starts a server: listing recorded sessions must
+        /// not boot a simulator.
+        private func client() throws -> SimToolClient {
+            let projectConfig = try ProjectConfigLoader.loadIfPresent(explicitPath: config)
+            let sessions = (try? SessionStore.shared.list()) ?? []
+            switch Self.target(
+                explicit: serverOptions.server,
+                sessions: sessions,
+                projectRoot: projectConfig?.projectRoot
+            ) {
+            case .use(let api):
+                guard let url = URL(string: api) else { throw SimToolError("Invalid server URL: \(api)") }
+                return SimToolClient(baseURL: url)
+            case .noServer(let foreign):
+                throw SimToolError(Self.noServerMessage(foreign: foreign))
+            }
+        }
+
         func run() async throws {
-            let payload = try await serverOptions.client().testSessions()
+            let payload = try await client().testSessions()
             if common.json {
                 try printJSON(payload)
             } else if payload.sessions.isEmpty {
@@ -1985,7 +2220,9 @@ struct Init: ParsableCommand {
         )
 
         let result = InitResult(
-            configPath: configURL.standardizedFileURL.path,
+            // Normalized the same way the skill paths are, so one list of
+            // takeaways does not print `/tmp/x` next to `/private/tmp/y`.
+            configPath: FilePathDisplay.normalized(configURL),
             workspace: detected.workspace,
             project: detected.project,
             scheme: detected.scheme,

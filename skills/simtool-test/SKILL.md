@@ -131,21 +131,30 @@ Three things, and no more:
   names one, a server started for the run boots that one. With nothing named,
   simtool drives whichever simulator is booted, and refuses to guess when
   several are.)
-- **The app installed — the build you intend to judge.** A test run does not
-  build and does not install: it relaunches what is already on the device. Build
-  and install first (`simtool app launch …`, see the `simtool` skill). A verdict
-  is only meaningful next to the build that produced it, which is why a repro
-  re-run against different code and pronounced fixed is the classic mistake.
+- **The build you intend to judge.** When `.simtool/config.yml` says how to build
+  the app (`build:`), the run rebuilds and reinstalls it first — only when the
+  sources changed, since the checksum cache decides — and does so *before* the
+  recorder starts, so no video is minutes of an Xcode build. `--no-build` skips
+  that and judges whatever is installed. A verdict is only meaningful next to the
+  build that produced it, which is why a repro re-run against different code and
+  pronounced fixed is the classic mistake.
 - **`.simtool/config.yml`** — `simtool init` scaffolds one. It supplies the
   simulator, the default bundle id, the launch profiles a test may name, and the
   server address the app posts its network and state events to (which is what
   makes mocks and network evidence work at all).
 
 **No `serve` step is needed.** With no server running, `simtool test run` starts
-one on a free port and stops it again when the run ends. A server already
-running *for this project* is reused and left alone. One belonging to another
+one on a free port and **leaves it running** — that server is what serves the
+viewer, and the run it just recorded is what you open the viewer to read. The run
+prints its address and how to stop it (`simtool kill <id>`); `--stop-server` stops
+it automatically instead, which is what a CI job wants. A server already running
+*for this project* is reused and left alone either way. One belonging to another
 checkout is not reused — the run says so and starts its own, because driving
 another checkout's simulator is worse than a second server.
+
+A run started this way is visible in the viewer while it happens: the Tests tab
+follows it, shows its steps live, and offers no Run button for a test already
+running.
 
 ## The file
 
@@ -180,8 +189,8 @@ mocks:                         # backend answers, applied before launch
   - method: "*/GetSettings"    #   gRPC full-method or HTTP path, `*` globs
     body: { items: [] }        #   YAML or a JSON string (or `error: unavailable`)
     strict: true               #   must fire, or the run is reported as infra
-setup:                         # escape hatch: shell before launch; {udid} and {app}
-  - xcrun simctl spawn {udid} defaults delete …  # substituted; failures recorded, never fatal
+setup:                         # escape hatch: shell before launch
+  - xcrun simctl spawn {udid} defaults delete …  # {udid} {app} {server} substituted; exits recorded, never fatal
 timeout: 10                    # default per-step wait, seconds
 steps:
   - waitFor: { id: settingsButton, timeout: 20 }
@@ -267,7 +276,31 @@ that fails for a reason you did not intend — a mistyped flag, a missing `--` �
 stages nothing, and the run carries on against state nobody set up. Read the
 `Setup n/n (ok)` lines in the run's timeline before trusting a verdict that used
 `setup:`. An absolute path or a personal account in there is what stops a test
-from travelling — keep it to `{udid}` and `{app}`.
+from travelling — keep it to `{udid}`, `{app}` and `{server}`.
+
+**Staging happens off camera.** The build, `reset:` and `setup:` all run before
+the recorder starts, so the video holds the run and nothing else. Their timeline
+entries are kept — `Setup n/n (exit 1)` is still there to read before trusting a
+verdict — and their logs are still captured; only the footage begins later.
+
+**A `setup:` command knows where this run's server is.** `{server}` is
+substituted with it, and the commands run with `SIMTOOL_SERVER` (the address for
+`--server`) and `SIMTOOL_SERVER_URL` (the address the app posts to) exported. That
+is what lets a scenario needing **two launches** travel: the run may start its own
+server on a port it picked, so a port written into the file would be a guess.
+
+```yaml
+setup:
+  # launch 1 stages the state the run's own launch then changes
+  - >-
+    simtool app launch --device {udid} --workspace MyApp.xcworkspace --scheme MyApp
+    --env SIMTOOL_SERVER_URL={server} --env SIMTOOL_NETWORK_LOGGER=1
+    -- -AutoLogin "${ACCOUNT}"
+```
+
+Prefer to need neither: `mocks:` are installed **after** `setup:` and before the
+run's own launch, so a setup launch can warm state against the real backend and
+the mocked answer can still belong to the run under test.
 
 ## Finding the ids
 
@@ -338,6 +371,11 @@ The exit code is the answer, so an agent can branch without parsing output:
   that never intercepted a call, an app that never picked up its mock rules, a
   `reset:` that failed. It is never reported as a pass — that is the direction
   that would tell a fixing agent the bug is gone.
+- **A run that never started uses the same scale, never `1`.** A test that cannot
+  run as written — unreadable file, parse error, unknown profile, a `${VAR}`
+  nothing defines — exits `2`, and an environment with nowhere to run it exits
+  `3`. So exit `1` always means a criterion did not hold, and a broken test is
+  never reported as a reproduced bug.
 - **`--repeat N` for an intermittent claim.** The report says how many runs held
   it, and flags a split as intermittent. A defect that passes once looks fixed,
   which is the whole reason the flag exists.
@@ -372,7 +410,10 @@ log-cursor range covering it, which is how the logs, requests and state changes
 belonging to **one** step get sliced out of those files instead of read whole.
 
 `simtool test list` prints the recorded sessions with their verdicts. Unlike
-`run` it does not start a server: it needs one running, or `--server <url>`.
+`run` it does not start a server: it needs one running **for this project**, or
+`--server <url>`. A server belonging to another checkout is not read — its
+sessions are that project's history, and reading them here would answer "did my
+test pass?" with somebody else's run.
 
 The viewer (`simtool serve --web`) has a **Tests** tab with two subtabs: *Tests*
 lists the YAML tests with Run buttons and live progress, *History* lists the

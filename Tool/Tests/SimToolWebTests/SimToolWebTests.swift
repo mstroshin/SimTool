@@ -285,6 +285,16 @@ final class SimToolWebTests: XCTestCase {
         XCTAssertTrue(html.contains("tests-status-interrupted"), "missing interrupted badge styling")
     }
 
+    // A run started with `simtool test run` in a terminal records its session on
+    // this server, so the viewer is watching it — and must not offer to start it
+    // again, nor a Stop it cannot honour (the server holds no task to cancel).
+    func testViewerShowsARunItCannotStopAsRunning() {
+        let html = WebViewer.html()
+
+        XCTAssertTrue(html.contains("stoppable"), "run status must carry whether Stop applies")
+        XCTAssertTrue(html.contains("Running…"), "a run the viewer cannot stop needs a non-actionable label")
+    }
+
     func testViewerEmbedsTestsContextMenuWithDelete() {
         let html = WebViewer.html()
 

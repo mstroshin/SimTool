@@ -438,6 +438,10 @@ public struct TestRunStatusPayload: Codable, Equatable, Sendable {
     /// inconclusive | infra. Nil for plain tests and runs still in flight.
     public var verdict: String?
     public var error: String?
+    /// Whether the viewer's Stop can end this run. False for a run started from
+    /// the CLI: the server holds no task to cancel, so a Stop button there would
+    /// be one that does nothing.
+    public var stoppable: Bool
 
     public init(
         active: Bool = false,
@@ -448,7 +452,8 @@ public struct TestRunStatusPayload: Codable, Equatable, Sendable {
         totalSteps: Int = 0,
         status: String? = nil,
         verdict: String? = nil,
-        error: String? = nil
+        error: String? = nil,
+        stoppable: Bool = true
     ) {
         self.active = active
         self.file = file
@@ -459,6 +464,7 @@ public struct TestRunStatusPayload: Codable, Equatable, Sendable {
         self.status = status
         self.verdict = verdict
         self.error = error
+        self.stoppable = stoppable
     }
 }
 

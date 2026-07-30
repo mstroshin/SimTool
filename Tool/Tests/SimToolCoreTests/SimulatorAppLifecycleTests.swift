@@ -96,6 +96,35 @@ final class SimulatorAppLifecycleTests: XCTestCase {
         XCTAssertNotEqual(before.checksum, afterTrackedChange.checksum, "tracked source changes must change the checksum")
     }
 
+    // What a test run asks before it records anything: is the build on the
+    // device the one we are about to judge?
+    func testInstallIsNeededOnlyWhenTheDeviceHasSomethingElse() {
+        let record = SimulatorAppInstallRecord(
+            deviceUDID: "UDID",
+            checksum: "abc",
+            bundleIdentifier: "com.example.app"
+        )
+
+        XCTAssertFalse(SimulatorAppLifecycleClient.needsInstall(
+            checksum: "abc", bundleIdentifier: "com.example.app", installed: record, xcodebuildRan: false, force: false
+        ))
+        XCTAssertTrue(SimulatorAppLifecycleClient.needsInstall(
+            checksum: "def", bundleIdentifier: "com.example.app", installed: record, xcodebuildRan: false, force: false
+        ), "a changed checksum is a different build")
+        XCTAssertTrue(SimulatorAppLifecycleClient.needsInstall(
+            checksum: "abc", bundleIdentifier: "com.example.other", installed: record, xcodebuildRan: false, force: false
+        ), "a different bundle id is a different app")
+        XCTAssertTrue(SimulatorAppLifecycleClient.needsInstall(
+            checksum: "abc", bundleIdentifier: "com.example.app", installed: record, xcodebuildRan: true, force: false
+        ), "a fresh xcodebuild means the bundle on the device is stale")
+        XCTAssertTrue(SimulatorAppLifecycleClient.needsInstall(
+            checksum: "abc", bundleIdentifier: "com.example.app", installed: SimulatorAppInstallRecord?.none, xcodebuildRan: false, force: false
+        ), "nothing recorded means nothing installed")
+        XCTAssertTrue(SimulatorAppLifecycleClient.needsInstall(
+            checksum: "abc", bundleIdentifier: "com.example.app", installed: record, xcodebuildRan: false, force: true
+        ))
+    }
+
     func testCacheMetadataReadWriteValidationCorruptMissesAndInstallRecords() throws {
         let root = try makeTempDirectory()
         defer { try? FileManager.default.removeItem(at: root) }

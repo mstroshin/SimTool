@@ -82,6 +82,18 @@ final class TestSessionControllerTests: XCTestCase {
         }
     }
 
+    // The viewer lists tests by file name and shows the run against the one it
+    // belongs to. Without the file on the session, a run started from the CLI is
+    // a session nobody can attribute to a test.
+    func testStartRecordsWhichTestFileIsRunning() throws {
+        let controller = makeController(recorder: { MockRecorder() })
+
+        let session = try controller.start(title: "Tab order", file: "tab-order.yml")
+
+        XCTAssertEqual(session.file, "tab-order.yml")
+        XCTAssertEqual(try store.session(id: session.id)?.file, "tab-order.yml")
+    }
+
     func testStartWithoutVideoSkipsRecorderAndAllowsInterruptedStop() async throws {
         let recorder = MockRecorder()
         let controller = makeController(recorder: { recorder })

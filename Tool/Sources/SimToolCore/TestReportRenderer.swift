@@ -148,7 +148,14 @@ public enum TestReportRenderer {
         }
         if truncated > 0 {
             out.blank()
-            out.paragraph("_\(truncated) further note line\(truncated == 1 ? "" : "s") omitted here; the full capture is in the run's `logs.jsonl`._")
+            // Not `logs.jsonl`: that holds the app's own log lines, and these
+            // notes — the accessibility dump at the failing step among them — are
+            // not in it. Sending the reader there is sending them to a file that
+            // does not contain what they were promised.
+            let dump = session.evidence.first { $0.hasSuffix("-ax.txt") }
+            let elsewhere = dump.map { "the screen at that step is in `\($0)`, and every note in `session.json`" }
+                ?? "every note is in `session.json`"
+            out.paragraph("_\(truncated) further note line\(truncated == 1 ? "" : "s") omitted here; \(elsewhere)._")
         } else {
             out.blank()
         }
@@ -173,14 +180,31 @@ public enum TestReportRenderer {
     ) {
         out.heading(2, "Re-running this")
         var needs: [String] = []
-        if let simtool = session.provenance?.simtoolVersion { needs.append("`simtool` \(simtool) or newer") }
+        // The requirement is the release, not the build that happened to record
+        // this: `0.9.0-dev or newer` sends the reader hunting a version no release
+        // carries. Which build it was still matters, so it gets its own sentence
+        // below.
+        var localBuild: String?
+        if let simtool = session.provenance?.simtoolVersion {
+            let release = simtool.split(separator: "-").first.map(String.init) ?? simtool
+            needs.append("`simtool` \(release) or newer")
+            if release != simtool { localBuild = simtool }
+        }
         if let app = session.provenance?.appBundleId {
-            needs.append("`\(app)` installed on a booted simulator — your own build, which is the point when verifying a fix")
+            needs.append("`\(app)` installed on a booted simulator")
         }
         if !requiredVariables.isEmpty {
             needs.append("these variables exported: " + requiredVariables.map { "`\($0)`" }.joined(separator: ", "))
         }
         out.paragraph(needs.isEmpty ? "Needs `simtool` and a booted simulator." : "You need " + sentence(needs) + ".")
+        // Its own sentence: folded into the list above as an aside, it ran into
+        // whatever item came next and the paragraph stopped parsing as English.
+        if session.provenance?.appBundleId != nil {
+            out.paragraph("Use your own build of the app — a verdict says something about the code that produced it and nothing about anyone else's.")
+        }
+        if let localBuild {
+            out.paragraph("(This run was recorded with a \(localBuild) build of simtool — one built from a source tree, not the release.)")
+        }
 
         let defined = (definition?.variables ?? [:]).keys.sorted()
         if !defined.isEmpty {

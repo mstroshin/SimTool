@@ -39,7 +39,11 @@ mkdir -p "$STAGE_DIR/bin" "$UNPACK_DIR"
 
 # The simtool CLI lives in the Tool/ subdirectory package (the repo root vends only
 # the embeddable logger libraries).
-swift build --package-path Tool -c release --product simtool
+#
+# SIMTOOL_RELEASE is what makes the binary report the bare version: a build from a
+# working tree reports `<version>-dev`, so a session recorded against a local build
+# is never mistaken for one recorded against the published release.
+swift build --package-path Tool -c release --product simtool -Xswiftc -DSIMTOOL_RELEASE
 
 cp "Tool/.build/release/simtool" "$STAGE_DIR/bin/simtool"
 chmod 755 "$STAGE_DIR/bin/simtool"

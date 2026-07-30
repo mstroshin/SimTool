@@ -61,6 +61,15 @@ public enum AgentSkillInstaller {
         public var path: String
     }
 
+    /// The home directory a `global` install writes into. `HOME` first, because
+    /// that is what every other tool on the machine means by the home directory —
+    /// a container, a CI job or a test that sets it expects to be obeyed, and
+    /// `NSHomeDirectory()` reads the password database instead and ignores it.
+    public static func home(from environment: [String: String] = ProcessInfo.processInfo.environment) -> URL {
+        let path = environment["HOME"].flatMap { $0.isEmpty ? nil : $0 } ?? NSHomeDirectory()
+        return URL(fileURLWithPath: path, isDirectory: true)
+    }
+
     /// Directory the skill is written into, or `nil` for `.none`. `home` is
     /// injectable so tests never touch the real `$HOME`.
     public static func directory(
@@ -68,7 +77,7 @@ public enum AgentSkillInstaller {
         agent: Agent,
         scope: Scope,
         projectDirectory: URL,
-        home: URL = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+        home: URL = home()
     ) -> URL? {
         let root: URL
         switch scope {
@@ -93,7 +102,7 @@ public enum AgentSkillInstaller {
         agents: [Agent],
         scope: Scope,
         projectDirectory: URL,
-        home: URL = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true),
+        home: URL = home(),
         force: Bool = false
     ) throws -> [Installation] {
         var installations: [Installation] = []
@@ -104,7 +113,10 @@ public enum AgentSkillInstaller {
                     projectDirectory: projectDirectory, home: home
                 ) else { continue }
                 let destination = directory.appendingPathComponent(AgentSkill.fileName)
-                let path = destination.standardizedFileURL.path
+                // Normalized rather than merely standardized: this path is
+                // computed before the file exists, and `standardizedFileURL`
+                // spells such a path differently from one that does.
+                let path = FilePathDisplay.normalized(destination)
                 let existing = try? String(contentsOf: destination, encoding: .utf8)
                 func installation(_ outcome: Outcome) -> Installation {
                     Installation(skill: skill.name, agent: agent.rawValue, scope: scope.rawValue, outcome: outcome, path: path)
