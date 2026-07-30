@@ -6,7 +6,7 @@ import Foundation
 public enum SimToolVersion {
     /// The released version this source tree is based on. Kept in sync with
     /// `Formula/simtool.rb`; a test fails when the two drift.
-    public static let base = "0.9.0"
+    public static let base = "0.10.0"
 
     /// Whether this binary came out of the release packaging, which compiles with
     /// `SIMTOOL_RELEASE` defined. A build from a working tree does not.
