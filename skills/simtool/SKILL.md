@@ -296,18 +296,28 @@ so tests need no sleeps. A test carries everything needed to stage its scenario,
 so it reproduces on another machine: `launch:` (a named profile from
 `.simtool/config.yml` plus inline argv/env), `reset:` (UserDefaults, data
 container, permission alerts, locale) and `mocks:` (backend answers, applied
-before launch). A running server is not a prerequisite — with none, the run
-starts one on a free port and stops it again afterwards.
+before launch).
+
+A run needs no `serve` step and no build of your own: with `build:` in
+`.simtool/config.yml` it rebuilds and reinstalls the app when the sources
+changed, and with no server running it starts one on a free port. Both happen
+*before* the recorder starts — together with `reset:` and `setup:` — so the video
+holds the test rather than an Xcode build, while the staging still appears in the
+timeline. The server it started is **left running**, because it is what serves
+the viewer showing that run.
 
 Every run is recorded as a reviewable test session — timestamped steps, a screen
 recording and the run's evidence — under `.simtool/test-sessions/<id>/`, where a
 `report.md` written for a person sits next to `video.mp4`; the viewer's Tests tab
 lists the tests with Run buttons and live progress, and its History subtab the
-recorded sessions with the timeline synced to the video. Commands:
+recorded sessions with the timeline synced to the video — including a run started
+from the command line, which the tab follows as it happens. Commands:
 `simtool test run <file>` (`--json` for the machine-readable report, `--repeat N`
 to check an intermittent claim, `--evidence none|failure|full`, `--no-session` to
-skip recording) and `simtool test list` (recorded sessions with their verdicts).
-One test runs at a time.
+skip recording, `--no-build` to judge what is installed, `--stop-server` to stop
+a server the run started) and `simtool test list` (this project's recorded
+sessions with their verdicts; it needs a server started for this project, or
+`--server`). One test runs at a time.
 
 **To write one, or to run the bug/feature loop, use the `simtool-test` skill** —
 it owns the file format, the criteria and the verdicts.
