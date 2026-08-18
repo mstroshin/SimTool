@@ -73,6 +73,8 @@ public final class StreamServer: @unchecked Sendable {
     /// Agent test sessions: timeline + screen recording, persisted on disk.
     private let testSessions: TestSessionController
     private let testRuns: TestRunController
+    /// Картограф: crawls the app's screens and persists the map it draws.
+    private let explorer: ExploreController
     /// OSLog category that, by convention, carries a crash summary of the previous run (apps can
     /// only write it after relaunching - crash handlers cannot safely log at crash time).
     private static let crashReportCategory = "Crash"
@@ -112,6 +114,14 @@ public final class StreamServer: @unchecked Sendable {
             appFacingServerURL: config.appFacingServerURL,
             projectRoot: config.projectRoot
         )
+        self.explorer = ExploreController(configuration: ExploreController.Configuration(
+            device: config.device,
+            defaultApp: config.defaultLogApp,
+            profiles: config.profiles,
+            appFacingServerURL: config.appFacingServerURL,
+            // Sibling of test-sessions: runs land in the project's `.simtool/explore`.
+            root: config.testSessionsRoot.deletingLastPathComponent().appendingPathComponent("explore", isDirectory: true)
+        ))
     }
 
     public func start() throws {
@@ -126,6 +136,7 @@ public final class StreamServer: @unchecked Sendable {
     }
 
     public func stop() {
+        explorer.shutdown()
         shutdownTestSessions()
         stopLogCapture()
         frameCapture.stop()
@@ -146,6 +157,36 @@ public final class StreamServer: @unchecked Sendable {
 
         server["/"] = { _ in
             .ok(.html(WebViewer.html()))
+        }
+
+        server["/cartographer"] = { _ in
+            .ok(.html(CartographerViewer.html()))
+        }
+
+        server.GET["/api/v1/explore/status"] = { _ in
+            do { return try self.jsonEncodedResponse(self.explorer.status()) }
+            catch { return self.errorResponse(error) }
+        }
+
+        server.POST["/api/v1/explore/start"] = { request in
+            do {
+                let body = (try? self.decodeJSON(ExploreStartRequest.self, from: request)) ?? ExploreStartRequest()
+                return try self.jsonEncodedResponse(try self.explorer.start(body))
+            } catch {
+                return self.errorResponse(error, statusCode: 409, reason: "Conflict")
+            }
+        }
+
+        server.POST["/api/v1/explore/stop"] = { _ in
+            do { return try self.jsonEncodedResponse(self.explorer.stop()) }
+            catch { return self.errorResponse(error) }
+        }
+
+        server.GET["/api/v1/explore/shot"] = { request in
+            guard let node = request.queryValue("node"), let data = self.explorer.shotData(node: node) else {
+                return self.errorResponse(SimToolError("No screenshot for that node"), statusCode: 404, reason: "Not Found")
+            }
+            return self.dataResponse(data, contentType: "image/png")
         }
 
         server["/health"] = { _ in

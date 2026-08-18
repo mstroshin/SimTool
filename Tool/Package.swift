@@ -44,7 +44,9 @@ let package = Package(
         .library(name: "SimToolClient", targets: ["SimToolClient"]),
     ],
     dependencies: [
-        .package(path: ".."),
+        // Explicit name: path-based identity defaults to the directory name,
+        // which in a git worktree is the branch's checkout name, not "SimTool".
+        .package(name: "SimTool", path: ".."),
         .package(url: "https://github.com/apple/swift-argument-parser", .upToNextMajor(from: "1.8.1")),
         .package(url: "https://github.com/tuist/Noora", .upToNextMajor(from: "0.15.0")),
         .package(url: "https://github.com/httpswift/swifter.git", from: "1.5.0"),

@@ -24,6 +24,7 @@ public enum WebViewer {
                   <button id="shake" class="icon-btn" type="button" title="Shake">📳</button>
                   <button id="terminate" class="icon-btn" type="button" title="Terminate app">⏹️</button>
                   <button id="relaunch" class="icon-btn" type="button" title="Relaunch app">▶️</button>
+                  <a id="cartographerLink" class="map-link" href="/cartographer" title="Карта приложения">🗺️ Картограф</a>
                   <button id="inspectToggle" class="inspect-toggle" type="button" aria-pressed="false">
                     <span class="dot"></span><span>Inspect</span>
                   </button>
@@ -182,6 +183,8 @@ public enum WebViewer {
     .toolrow { display: flex; align-items: center; gap: 8px; padding: 4px 14px 10px; }
     .icon-btn { appearance: none; width: 30px; height: 30px; display: grid; place-items: center; border: 1px solid rgba(255,255,255,0.14); border-radius: 9px; background: rgba(255,255,255,0.06); color: #cdd6e6; font-size: 14px; cursor: pointer; }
     .icon-btn:hover { background: rgba(255,255,255,0.10); }
+    .map-link { display: flex; align-items: center; gap: 6px; border: 1px solid rgba(255,255,255,0.14); border-radius: 10px; background: rgba(255,255,255,0.06); color: rgba(244,247,251,0.72); padding: 6px 12px; font: 12px ui-sans-serif, system-ui, sans-serif; text-decoration: none; }
+    .map-link:hover { background: rgba(125,211,252,0.14); color: #bae6fd; }
     .inspect-toggle { margin-left: auto; display: flex; align-items: center; gap: 7px; appearance: none; border: 1px solid rgba(255,255,255,0.14); border-radius: 10px; background: rgba(255,255,255,0.06); color: rgba(244,247,251,0.72); padding: 6px 12px; font: 12px ui-sans-serif, system-ui, sans-serif; cursor: pointer; }
     .inspect-toggle:hover { background: rgba(255,255,255,0.10); }
     .inspect-toggle .dot { width: 8px; height: 8px; border-radius: 999px; background: #4b5366; }
