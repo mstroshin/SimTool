@@ -34,3 +34,22 @@ header { flex: 0 0 auto; display: flex; align-items: center; gap: 14px; padding:
 .details .muted { font-size: 12px; color: rgba(244,247,251,0.4); }
 .details .close { float: right; appearance: none; border: 0; background: none; color: rgba(244,247,251,0.5); font-size: 16px; cursor: pointer; }
 .details .close:hover { color: #f4f7fb; }
+/* Node search */
+.search { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-radius: 11px; background: rgba(13,20,40,0.94); border: 1px solid rgba(255,255,255,0.12); box-shadow: 0 8px 22px rgba(0,0,0,0.45); }
+.search-icon { font-size: 11px; opacity: 0.65; }
+.search-input { width: 300px; appearance: none; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); border-radius: 7px; color: #f4f7fb; font-size: 12px; padding: 5px 8px; outline: none; }
+.search-input::placeholder { color: rgba(244,247,251,0.35); }
+.search-input:focus { border-color: #7dd3fc; background: rgba(125,211,252,0.08); }
+.search-count { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; color: #fde68a; min-width: 36px; text-align: center; }
+.search-count.none { color: #f87171; }
+.search-step { appearance: none; border: 0; border-radius: 6px; width: 22px; height: 22px; background: rgba(255,255,255,0.07); color: rgba(244,247,251,0.75); font-size: 11px; line-height: 1; cursor: pointer; }
+.search-step:hover:not(:disabled) { background: rgba(125,211,252,0.2); color: #f4f7fb; }
+.search-step:disabled { opacity: 0.3; cursor: default; }
+.search-hint { font-size: 11px; color: rgba(244,247,251,0.5); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A query rules a card out (dimmed), keeps it (match), or is parked on it (current) */
+.react-flow__node.dimmed { opacity: 0.2; }
+.react-flow__node.match .screen-node { border-color: rgba(251,191,36,0.55); box-shadow: 0 10px 26px rgba(0,0,0,0.45); }
+.react-flow__node.match.current .screen-node { border-color: #fbbf24; box-shadow: 0 0 0 4px rgba(251,191,36,0.55), 0 12px 30px rgba(0,0,0,0.5); }
+.details h2.hit, .details .mono.hit { background: rgba(251,191,36,0.16); border-radius: 4px; box-shadow: 0 0 0 3px rgba(251,191,36,0.16); color: #fde68a; }
+.details .match-group { margin-bottom: 8px; }
+.details .match-label { font-size: 11px; color: rgba(244,247,251,0.5); margin-bottom: 2px; }

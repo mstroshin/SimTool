@@ -381,7 +381,8 @@ extension AgentSkill {
         ### Картограф — the screen map
         The viewer's Картограф tab renders the app as a map: one node per screen (its
         screenshot, deeplinks found in the source, localization keys), arrows for
-        forward navigation only. A map can be produced by the built-in robot
+        forward navigation only, and a search box that filters the cards by any field a
+        node carries. A map can be produced by the built-in robot
         (`POST /api/v1/explore/start`) or by the agent walking the app itself — the full
         pass algorithm (settle-wait, screen identity and dedup, deeplinks from source
         without opening them, edge rules, the `graph.json` format) is in
@@ -434,7 +435,10 @@ extension AgentSkill {
         The Картограф tab of the simtool viewer (`simtool serve` → 🗺️ Картограф) draws a
         map of the app: one card per screen with its screenshot, arrows for forward
         navigation, and a details drawer with the screen's deeplinks and localization
-        keys. The project has **one** map — a single store under `.simtool/explore/`:
+        keys. The search box (`/` or ⌘F) filters the cards by anything a node carries —
+        title, deeplinks, localization keys, tried actions, ids, transition labels —
+        dimming what does not match and jumping between hits with ⏎. The project has
+        **one** map — a single store under `.simtool/explore/`:
 
         ```
         .simtool/explore/
