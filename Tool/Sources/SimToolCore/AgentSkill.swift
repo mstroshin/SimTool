@@ -9,10 +9,29 @@ public struct AgentSkill: Sendable, Equatable {
     /// not load.
     public let name: String
     public let markdown: String
+    /// Reference documents installed next to SKILL.md and linked from it —
+    /// e.g. `cartograph.md`. Plain Markdown, no frontmatter of their own.
+    public let companions: [Companion]
 
-    public init(name: String, markdown: String) {
+    public struct Companion: Sendable, Equatable {
+        public let fileName: String
+        public let markdown: String
+
+        public init(fileName: String, markdown: String) {
+            self.fileName = fileName
+            self.markdown = markdown
+        }
+    }
+
+    public init(name: String, markdown: String, companions: [Companion] = []) {
         self.name = name
         self.markdown = markdown
+        self.companions = companions
+    }
+
+    /// Every file the skill installs, SKILL.md first.
+    public var files: [(fileName: String, markdown: String)] {
+        [(Self.fileName, markdown)] + companions.map { ($0.fileName, $0.markdown) }
     }
 
     public static let all: [AgentSkill] = [.simtool, .simtoolTest]
@@ -112,28 +131,30 @@ public enum AgentSkillInstaller {
                     skill: skill, agent: agent, scope: scope,
                     projectDirectory: projectDirectory, home: home
                 ) else { continue }
-                let destination = directory.appendingPathComponent(AgentSkill.fileName)
-                // Normalized rather than merely standardized: this path is
-                // computed before the file exists, and `standardizedFileURL`
-                // spells such a path differently from one that does.
-                let path = FilePathDisplay.normalized(destination)
-                let existing = try? String(contentsOf: destination, encoding: .utf8)
-                func installation(_ outcome: Outcome) -> Installation {
-                    Installation(skill: skill.name, agent: agent.rawValue, scope: scope.rawValue, outcome: outcome, path: path)
-                }
-                if let existing {
-                    if existing == skill.markdown {
-                        installations.append(installation(.upToDate))
-                        continue
+                for file in skill.files {
+                    let destination = directory.appendingPathComponent(file.fileName)
+                    // Normalized rather than merely standardized: this path is
+                    // computed before the file exists, and `standardizedFileURL`
+                    // spells such a path differently from one that does.
+                    let path = FilePathDisplay.normalized(destination)
+                    let existing = try? String(contentsOf: destination, encoding: .utf8)
+                    func installation(_ outcome: Outcome) -> Installation {
+                        Installation(skill: skill.name, agent: agent.rawValue, scope: scope.rawValue, outcome: outcome, path: path)
                     }
-                    guard force else {
-                        installations.append(installation(.conflict))
-                        continue
+                    if let existing {
+                        if existing == file.markdown {
+                            installations.append(installation(.upToDate))
+                            continue
+                        }
+                        guard force else {
+                            installations.append(installation(.conflict))
+                            continue
+                        }
                     }
+                    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                    try Data(file.markdown.utf8).write(to: destination, options: [.atomic])
+                    installations.append(installation(existing == nil ? .created : .updated))
                 }
-                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-                try Data(skill.markdown.utf8).write(to: destination, options: [.atomic])
-                installations.append(installation(existing == nil ? .created : .updated))
             }
         }
         return installations

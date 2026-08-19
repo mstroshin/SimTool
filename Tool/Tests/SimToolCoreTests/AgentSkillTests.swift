@@ -34,7 +34,7 @@ final class AgentSkillTests: XCTestCase {
             projectDirectory: project, home: try home()
         )
 
-        XCTAssertEqual(installed.count, 1)
+        XCTAssertEqual(installed.count, AgentSkill.simtool.files.count)
         XCTAssertEqual(installed[0].outcome, .created)
         XCTAssertEqual(installed[0].skill, "simtool")
         XCTAssertEqual(installed[0].agent, "claude")
@@ -42,6 +42,26 @@ final class AgentSkillTests: XCTestCase {
         let expected = project.appendingPathComponent(".claude/skills/simtool/SKILL.md")
         XCTAssertEqual(installed[0].path, expected.standardizedFileURL.path)
         XCTAssertEqual(try String(contentsOf: expected, encoding: .utf8), AgentSkill.simtool.markdown)
+    }
+
+    // SKILL.md links to its companions ("see cartograph.md"), so they must land
+    // in the same directory — a skill whose references dangle teaches nothing.
+    func testCompanionsInstallNextToTheSkill() throws {
+        let project = try project()
+        let installed = try AgentSkillInstaller.install(
+            skills: [.simtool], agents: [.claude], scope: .local,
+            projectDirectory: project, home: try home()
+        )
+
+        XCTAssertFalse(AgentSkill.simtool.companions.isEmpty, "simtool ships cartograph.md")
+        for companion in AgentSkill.simtool.companions {
+            let expected = project.appendingPathComponent(".claude/skills/simtool/\(companion.fileName)")
+            XCTAssertTrue(
+                installed.contains { $0.path == expected.standardizedFileURL.path && $0.outcome == .created },
+                "\(companion.fileName) was not installed"
+            )
+            XCTAssertEqual(try String(contentsOf: expected, encoding: .utf8), companion.markdown)
+        }
     }
 
     // `global` must land in $HOME, not in whatever directory `init` happened to
@@ -96,7 +116,7 @@ final class AgentSkillTests: XCTestCase {
             projectDirectory: project, home: try home()
         )
 
-        XCTAssertEqual(installed.count, AgentSkill.all.count * 2)
+        XCTAssertEqual(installed.count, AgentSkill.all.reduce(0) { $0 + $1.files.count } * 2)
         for skill in AgentSkill.all {
             for agent in ["claude", "codex"] {
                 XCTAssertTrue(
@@ -146,6 +166,9 @@ final class AgentSkillTests: XCTestCase {
         let kept = try AgentSkillInstaller.install(skills: [.simtool], agents: [.claude], scope: .local, projectDirectory: project, home: home)
         XCTAssertEqual(kept[0].outcome, .conflict)
         XCTAssertEqual(try String(contentsOf: destination, encoding: .utf8), "edited by the user\n")
+        // Per file: the user's edited SKILL.md must not hold back its pristine
+        // companions.
+        XCTAssertTrue(kept.dropFirst().allSatisfy { $0.outcome == .upToDate }, "\(kept)")
 
         let forced = try AgentSkillInstaller.install(skills: [.simtool], agents: [.claude], scope: .local, projectDirectory: project, home: home, force: true)
         XCTAssertEqual(forced[0].outcome, .updated)
@@ -159,7 +182,9 @@ final class AgentSkillTests: XCTestCase {
                 "\(skill.name): frontmatter must open the file, and its `name` must match the directory"
             )
             XCTAssertTrue(skill.markdown.contains("\ndescription: "), "\(skill.name): no description")
-            XCTAssertTrue(skill.markdown.hasSuffix("\n"), "\(skill.name): installed files end with a newline")
+            for file in skill.files {
+                XCTAssertTrue(file.markdown.hasSuffix("\n"), "\(skill.name)/\(file.fileName): installed files end with a newline")
+            }
         }
     }
 
@@ -167,11 +192,13 @@ final class AgentSkillTests: XCTestCase {
     // so a stray identifier from the project one was authored against would leak.
     func testNoSkillCarriesProjectSpecificIdentifiers() {
         for skill in AgentSkill.all {
-            for needle in ["diftech", "platamator", "/Users/", "xcworkspace --scheme App "] {
-                XCTAssertFalse(
-                    skill.markdown.lowercased().contains(needle.lowercased()),
-                    "\(skill.name) must not mention \(needle)"
-                )
+            for file in skill.files {
+                for needle in ["diftech", "platamator", "/Users/", "xcworkspace --scheme App "] {
+                    XCTAssertFalse(
+                        file.markdown.lowercased().contains(needle.lowercased()),
+                        "\(skill.name)/\(file.fileName) must not mention \(needle)"
+                    )
+                }
             }
         }
     }
@@ -186,11 +213,13 @@ final class AgentSkillTests: XCTestCase {
             .deletingLastPathComponent()  // Tool/
             .deletingLastPathComponent()  // repository root
         for skill in AgentSkill.all {
-            let authored = repositoryRoot.appendingPathComponent("skills/\(skill.name)/SKILL.md")
-            guard let contents = try? String(contentsOf: authored, encoding: .utf8) else {
-                throw XCTSkip("no authoring copy at \(authored.path) (building outside a checkout)")
+            for file in skill.files {
+                let authored = repositoryRoot.appendingPathComponent("skills/\(skill.name)/\(file.fileName)")
+                guard let contents = try? String(contentsOf: authored, encoding: .utf8) else {
+                    throw XCTSkip("no authoring copy at \(authored.path) (building outside a checkout)")
+                }
+                XCTAssertEqual(contents, file.markdown, "run Scripts/sync-agent-skills.swift for \(skill.name)/\(file.fileName)")
             }
-            XCTAssertEqual(contents, skill.markdown, "run Scripts/sync-agent-skills.swift for \(skill.name)")
         }
     }
 }

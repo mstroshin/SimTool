@@ -483,7 +483,9 @@ public final class ExploreController: @unchecked Sendable {
     private var message: String?
     private var lastError: String?
     private var task: Task<Void, Never>?
-    private var loadedPreviousRun = false
+    /// `<directory>|<graph.json mtime>` of the run `loadNewestRunLocked` last
+    /// decoded, so the tab's 3-second poll does not re-decode an unchanged file.
+    private var loadedRunSignature: String?
 
     public init(configuration: Configuration) {
         self.configuration = configuration
@@ -494,7 +496,7 @@ public final class ExploreController: @unchecked Sendable {
     public func status() -> ExploreStatusPayload {
         lock.lock()
         defer { lock.unlock() }
-        loadPreviousRunLocked()
+        loadNewestRunLocked()
         return ExploreStatusPayload(
             running: running,
             runId: runId,
@@ -574,7 +576,7 @@ public final class ExploreController: @unchecked Sendable {
     public func shotData(node: String) -> Data? {
         guard node.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }), !node.isEmpty else { return nil }
         lock.lock()
-        loadPreviousRunLocked()
+        loadNewestRunLocked()
         let directory = runDirectory
         lock.unlock()
         guard let directory else { return nil }
@@ -616,23 +618,36 @@ public final class ExploreController: @unchecked Sendable {
         ISO8601DateFormatter().string(from: Date())
     }
 
-    /// Shows the newest finished run when the server (re)starts, so the map
-    /// survives a restart instead of greeting the tab with an empty canvas.
-    private func loadPreviousRunLocked() {
-        guard graph == nil, !running, !loadedPreviousRun else { return }
-        loadedPreviousRun = true
+    /// Shows the newest run on disk whenever no crawl of our own is in flight:
+    /// the map survives a server restart, and a run someone else is writing —
+    /// an agent performing the cartograph.md pass — grows on the canvas live
+    /// instead of appearing after a restart.
+    private func loadNewestRunLocked() {
+        guard !running else { return }
         let directories = (try? FileManager.default.contentsOfDirectory(
             at: configuration.root,
             includingPropertiesForKeys: nil
         )) ?? []
         for directory in directories.sorted(by: { $0.lastPathComponent > $1.lastPathComponent }) {
             let file = directory.appendingPathComponent("graph.json")
+            guard let modified = (try? FileManager.default.attributesOfItem(atPath: file.path))?[.modificationDate] as? Date else {
+                continue
+            }
+            let signature = "\(directory.lastPathComponent)|\(modified.timeIntervalSince1970)"
+            if signature == loadedRunSignature { return }
+            // A decode failure here is a run mid-write (a torn graph.json):
+            // keep showing what we have — falling through to an older run
+            // would flash the previous map — and retry on the next poll.
             guard let data = try? Data(contentsOf: file),
-                  let loaded = try? JSON.decoder.decode(ExploreGraph.self, from: data) else { continue }
+                  let loaded = try? JSON.decoder.decode(ExploreGraph.self, from: data) else { return }
+            loadedRunSignature = signature
+            // Re-reading the run we just finished must not clobber its
+            // closing note ("Готово: … экранов …").
+            let isNewRun = loaded.run.id != runId
             graph = loaded
             runId = loaded.run.id
             runDirectory = directory
-            message = "Показан прошлый прогон \(loaded.run.id)"
+            if isNewRun { message = "Показан прогон \(loaded.run.id)" }
             return
         }
     }

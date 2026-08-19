@@ -1,6 +1,6 @@
 ---
 name: simtool
-description: Build an iOS app and install + launch it on an iOS Simulator via the simtool CLI, then drive and inspect it (input, accessibility tree, logs, network, viewer), mock backend gRPC responses (simtool mock — errors, custom bodies, delays for corner cases), and run declarative YAML UI tests (simtool test run; writing one, and the bug/feature loop, belong to the `simtool-test` skill). Optionally launch with the app's own debug/test arguments — environment switch, jump to a screen, clean state, locale, deeplink, config overrides. Use when asked to "build and run", "запусти app", "rebuild", "пересобери", "build-only", to launch with specific arguments, switch environment, open a screen on launch, reset app state, tap/type/swipe on the simulator, read the accessibility tree, tail app logs (OSLog/stdout), inspect network traffic, mock a backend response ("замокай ответ", "верни ошибку на этот запрос"), open the live viewer, run a YAML UI test ("запусти ui тест", "прогони тест"), or review recorded test sessions.
+description: Build an iOS app and install + launch it on an iOS Simulator via the simtool CLI, then drive and inspect it (input, accessibility tree, logs, network, viewer), mock backend gRPC responses (simtool mock — errors, custom bodies, delays for corner cases), and run declarative YAML UI tests (simtool test run; writing one, and the bug/feature loop, belong to the `simtool-test` skill). Optionally launch with the app's own debug/test arguments — environment switch, jump to a screen, clean state, locale, deeplink, config overrides. Use when asked to "build and run", "запусти app", "rebuild", "пересобери", "build-only", to launch with specific arguments, switch environment, open a screen on launch, reset app state, tap/type/swipe on the simulator, read the accessibility tree, tail app logs (OSLog/stdout), inspect network traffic, mock a backend response ("замокай ответ", "верни ошибку на этот запрос"), open the live viewer, run a YAML UI test ("запусти ui тест", "прогони тест"), review recorded test sessions, or map the app's screens into the Картограф canvas ("составь карту приложения", "запусти картографа" — the pass algorithm lives in cartograph.md next to this file).
 argument-hint: [simtool args like app build / app launch --configuration Debug -- -MyAppFlag …]
 allowed-tools: [Bash, Read, AskUserQuestion]
 ---
@@ -142,6 +142,9 @@ Trigger phrases (EN/RU):
   logs", "inspect the network", "open the live viewer"
 - "mock/stub a backend response", "замокай ответ", "верни ошибку на этот
   запрос", "подмени ответ бэкенда", "протестируй корнер-кейс с моком"
+- "map the app's screens", "составь карту приложения", "запусти картографа",
+  "пройди по приложению и нарисуй карту экранов" → follow
+  [cartograph.md](cartograph.md)
 
 Do NOT invoke for:
 - Test-scheme orchestration — that belongs to your CI / UI-testing skill.
@@ -362,6 +365,15 @@ invisible here — grab it from OSLog.
 `--app <bundle>` captures that app's OSLog **and** stdout and auto-opens the Logs
 panel. `simtool run` reads `.simtool/config.yml` and does build → launch → viewer
 in one step. Flags: `simtool serve --help` / `simtool run --help`.
+
+### Картограф — the screen map
+The viewer's Картограф tab renders the app as a map: one node per screen (its
+screenshot, deeplinks found in the source, localization keys), arrows for
+forward navigation only. A map can be produced by the tab's built-in robot
+(«Сканировать приложение») or by the agent walking the app itself — the full
+pass algorithm (settle-wait, screen identity and dedup, deeplinks from source
+without opening them, edge rules, the `graph.json` format) is in
+**[cartograph.md](cartograph.md)**, installed next to this file.
 
 ## Workflow
 
