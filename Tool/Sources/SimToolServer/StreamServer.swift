@@ -28,6 +28,8 @@ public struct StreamServerConfig: Sendable {
     public var appFacingServerURL: String?
     /// The project checkout, for a run's provenance commit.
     public var projectRoot: URL?
+    /// Named deeplinks from the project config, probed by exploration runs.
+    public var deeplinks: [ProjectConfig.Deeplink]
 
     public init(
         host: String = "127.0.0.1",
@@ -39,7 +41,8 @@ public struct StreamServerConfig: Sendable {
         testsRoot: URL = SimToolDirectory.testsDirectory(in: SimToolDirectory.resolve()),
         profiles: [LaunchProfile] = [],
         appFacingServerURL: String? = nil,
-        projectRoot: URL? = nil
+        projectRoot: URL? = nil,
+        deeplinks: [ProjectConfig.Deeplink] = []
     ) {
         self.host = host
         self.port = port
@@ -51,6 +54,7 @@ public struct StreamServerConfig: Sendable {
         self.profiles = profiles
         self.appFacingServerURL = appFacingServerURL
         self.projectRoot = projectRoot
+        self.deeplinks = deeplinks
     }
 }
 
@@ -118,7 +122,9 @@ public final class StreamServer: @unchecked Sendable {
             device: config.device,
             defaultApp: config.defaultLogApp,
             profiles: config.profiles,
+            deeplinks: config.deeplinks,
             appFacingServerURL: config.appFacingServerURL,
+            projectRoot: config.projectRoot,
             // Sibling of test-sessions: runs land in the project's `.simtool/explore`.
             root: config.testSessionsRoot.deletingLastPathComponent().appendingPathComponent("explore", isDirectory: true)
         ))

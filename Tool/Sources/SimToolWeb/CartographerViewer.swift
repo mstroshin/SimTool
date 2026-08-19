@@ -39,16 +39,20 @@ public enum CartographerViewer {
             /* Screen node cards */
             .screen-node { width: 168px; border: 1px solid rgba(255,255,255,0.14); border-radius: 12px; background: #101830; overflow: hidden; box-shadow: 0 10px 26px rgba(0,0,0,0.45); }
             .screen-node.selected { border-color: #7dd3fc; box-shadow: 0 0 0 2px rgba(125,211,252,0.35), 0 10px 26px rgba(0,0,0,0.45); }
-            .screen-node img { display: block; width: 100%; height: 120px; object-fit: cover; object-position: top; background: #05070d; }
+            /* Full-height screenshot: the natural ratio once loaded, a phone-ish
+               placeholder ratio before, so the layout does not jump. */
+            .screen-node img { display: block; width: 100%; height: auto; aspect-ratio: auto 9 / 19.5; background: #05070d; }
             .screen-title { padding: 6px 8px 2px; font-size: 11px; font-weight: 600; color: #e8eefb; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
             .screen-meta { padding: 0 8px 7px; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; color: rgba(244,247,251,0.5); }
             .react-flow__attribution { display: none; }
             /* Details drawer */
             .details { flex: 0 0 320px; border-left: 1px solid rgba(255,255,255,0.10); background: #0d1428; overflow: auto; padding: 14px; }
-            .details h2 { margin: 0 0 4px; font-size: 14px; color: #e8eefb; }
-            .details .fp { font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; color: rgba(244,247,251,0.4); word-break: break-all; margin-bottom: 10px; }
+            .details h2 { margin: 0 0 10px; font-size: 14px; color: #e8eefb; }
             .details img { width: 100%; border-radius: 10px; border: 1px solid rgba(255,255,255,0.12); }
-            .details .kv { margin-top: 10px; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: rgba(244,247,251,0.75); line-height: 1.8; }
+            .details .section { margin-top: 14px; }
+            .details .section-title { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: rgba(244,247,251,0.45); margin-bottom: 6px; }
+            .details .mono { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: #bae6fd; line-height: 1.7; word-break: break-all; }
+            .details .muted { font-size: 12px; color: rgba(244,247,251,0.4); }
             .details .close { float: right; appearance: none; border: 0; background: none; color: rgba(244,247,251,0.5); font-size: 16px; cursor: pointer; }
             .details .close:hover { color: #f4f7fb; }
           </style>
@@ -79,7 +83,7 @@ public enum CartographerViewer {
                 <${Handle} type="target" position=${Position.Left} style=${{ opacity: 0 }} />
                 <img src=${"/api/v1/explore/shot?node=" + data.id} loading="lazy" alt="" />
                 <div class="screen-title" title=${data.title}>${data.title}</div>
-                <div class="screen-meta">${data.actionsTried}/${data.actionsTotal} действий · ${data.visits}×</div>
+                <div class="screen-meta">${data.actionsTried}/${data.actionsTotal} действий</div>
                 <${Handle} type="source" position=${Position.Right} style=${{ opacity: 0 }} />
               </div>`;
             }
@@ -96,13 +100,16 @@ public enum CartographerViewer {
               const positions = new Map();
               for (const [depth, list] of byDepth) {
                 list.forEach((node, index) => {
-                  positions.set(node.id, { x: depth * 320, y: index * 300 });
+                  // Row height fits a full-height screenshot card (~410px at
+                  // 168px width) plus room for edge labels.
+                  positions.set(node.id, { x: depth * 320, y: index * 480 });
                 });
               }
               return positions;
             }
 
             function edgeLabel(action) {
+              if (action.kind === "scroll") return "scroll";
               const target = action.targetLabel || action.targetId || "";
               return target ? `tap «${target}»` : "tap";
             }
@@ -245,13 +252,18 @@ public enum CartographerViewer {
                 ${selectedNode && html`<aside class="details">
                   <button class="close" onClick=${() => setSelected(null)}>✕</button>
                   <h2>${selectedNode.title}</h2>
-                  <div class="fp">${selectedNode.fingerprint}</div>
                   <img src=${"/api/v1/explore/shot?node=" + selectedNode.id} alt="" />
-                  <div class="kv">
-                    глубина: ${selectedNode.depth}<br/>
-                    визитов: ${selectedNode.visits}<br/>
-                    действий испробовано: ${selectedNode.actionsTried}/${selectedNode.actionsTotal}<br/>
-                    впервые увиден: ${selectedNode.firstSeenAt}
+                  <div class="section">
+                    <div class="section-title">Диплинки</div>
+                    ${(selectedNode.deeplinks || []).length
+                      ? selectedNode.deeplinks.map((url) => html`<div class="mono" key=${url}>${url}</div>`)
+                      : html`<div class="muted">не найдены</div>`}
+                  </div>
+                  <div class="section">
+                    <div class="section-title">Ключи локализации</div>
+                    ${(selectedNode.localizationKeys || []).length
+                      ? selectedNode.localizationKeys.map((key) => html`<div class="mono" key=${key}>${key}</div>`)
+                      : html`<div class="muted">не найдены</div>`}
                   </div>
                 <//>`}
               `;

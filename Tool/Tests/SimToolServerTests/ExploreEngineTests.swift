@@ -83,6 +83,175 @@ final class ExploreEngineTests: XCTestCase {
         XCTAssertEqual(actions.map(\.isBack), [true, false])
     }
 
+    // MARK: screen identity across states
+
+    // One screen in different states (spinner, loaded list) changes its
+    // structural fingerprint but keeps its dominant prefix — the key that
+    // holds the canvas at one card per screen.
+    func testScreenKeyIsStableAcrossStatesOfOneScreen() {
+        let loading = [
+            node(id: "MainScreen-Spinner", type: "Other", depth: 3),
+            node(id: "MainScreen-Balance", type: "StaticText", depth: 3),
+            node(id: "MainScreen-TransferButton", type: "Button", depth: 3),
+        ]
+        let loaded = [
+            node(id: "MainScreen-Balance", type: "StaticText", depth: 3),
+            node(id: "MainScreen-TransferButton", type: "Button", depth: 3),
+            node(id: "MainScreen-HistoryCell", type: "Cell", depth: 4),
+        ]
+        XCTAssertNotEqual(ExploreEngine.fingerprint(of: loading), ExploreEngine.fingerprint(of: loaded))
+        XCTAssertEqual(ExploreEngine.screenKey(of: loading), "MainScreen")
+        XCTAssertEqual(ExploreEngine.screenKey(of: loaded), "MainScreen")
+    }
+
+    // Without a dominant prefix there is no safe way to say "same screen",
+    // so the caller falls back to the fingerprint and nothing merges.
+    func testScreenKeyIsNilWithoutADominantPrefix() {
+        XCTAssertNil(ExploreEngine.screenKey(of: [
+            node(id: "com.apple.settings.general", type: "Cell", depth: 3),
+            node(id: "chevron.right", type: "Image", depth: 4),
+            node(id: "OneOff-Button", type: "Button", depth: 3),
+        ]))
+        XCTAssertNil(ExploreEngine.screenKey(of: []))
+    }
+
+    // A unique near-full-screen identifier is the screen's own container and
+    // beats every other heuristic: the passcode screen has no dominant prefix
+    // (Digit1…Digit0 share nothing), yet must be one node in every state.
+    func testScreenKeyPrefersTheUniqueRootContainerId() {
+        var snapshot = [
+            node(id: nil, type: "Application", depth: 0, frame: [0, 0, 402, 874]),
+            node(id: "MSMCheckPasscodeScreen", type: "Group", depth: 6, frame: [0, 0, 402, 874]),
+        ]
+        for digit in 0...9 {
+            snapshot.append(node(id: "Digit\(digit)", type: "Button", depth: 8, frame: [61, 380 + digit * 40, 72, 72]))
+        }
+        XCTAssertEqual(ExploreEngine.screenKey(of: snapshot), "MSMCheckPasscodeScreen")
+        // A later state (delete button appeared) keeps the key.
+        snapshot.append(node(id: "DeleteButton", type: "Button", depth: 8, frame: [269, 692, 72, 72]))
+        XCTAssertEqual(ExploreEngine.screenKey(of: snapshot), "MSMCheckPasscodeScreen")
+    }
+
+    // Generic wrappers (TouchRecognizingView) stretch full-screen on every
+    // screen of the app — but they repeat, and a repeated id is one design
+    // element, not a screen name. Gluing screens together by it would fold
+    // the whole app into one node.
+    func testScreenKeyRejectsRepeatedFullScreenWrappers() {
+        let snapshot = [
+            node(id: nil, type: "Application", depth: 0, frame: [0, 0, 402, 874]),
+            node(id: "TouchRecognizingView", type: "Group", depth: 2, frame: [0, 0, 402, 874]),
+            node(id: "TouchRecognizingView", type: "Group", depth: 3, frame: [0, 0, 402, 874]),
+            node(id: "TouchRecognizingView", type: "Group", depth: 4, frame: [0, 100, 402, 700]),
+            node(id: "OneOff-Button", type: "Button", depth: 5, frame: [20, 300, 100, 44]),
+        ]
+        XCTAssertNil(ExploreEngine.screenKey(of: snapshot))
+    }
+
+    // A form with no identifiers of its own must not split into a node per
+    // keyboard/validation state: the navigation-bar title is static per
+    // screen and holds it together.
+    func testScreenKeyFallsBackToTheNavbarTitle() {
+        let base = [
+            node(id: nil, type: "Application", depth: 0, frame: [0, 0, 402, 874]),
+            node(id: nil, label: "Create link", type: "StaticText", depth: 2, frame: [150, 60, 100, 24]),
+        ]
+        let withKeyboard = base + [
+            node(id: "KeyboardKey-a", type: "Button", depth: 7, frame: [10, 700, 30, 40]),
+        ]
+        XCTAssertEqual(ExploreEngine.screenKey(of: base), "navbar:Create link")
+        XCTAssertEqual(ExploreEngine.screenKey(of: withKeyboard), "navbar:Create link")
+    }
+
+    // Custom tab bars read as RadioButton groups, and app widgets as Groups
+    // with an identifier — both are doors, not decoration. Screen-sized
+    // containers and anonymous groups stay out.
+    func testActionsIncludeTabBarRadioButtonsAndIdentifiedGroups() {
+        let snapshot = [
+            node(id: nil, type: "Other", depth: 0, frame: [0, 0, 402, 874]),
+            node(id: "platform_tabbar_invite", type: "RadioButton", depth: 3, frame: [206, 700, 101, 54]),
+            node(id: "TouchRecognizingView", type: "Group", depth: 4, frame: [20, 300, 171, 116]),
+            node(id: "FullscreenContainer", type: "Group", depth: 2, frame: [0, 0, 402, 874]),
+            node(id: nil, type: "Group", depth: 5, frame: [30, 500, 100, 50]),
+        ]
+        let actions = ExploreEngine.actions(from: snapshot)
+        XCTAssertEqual(actions.map(\.targetId), ["platform_tabbar_invite", "TouchRecognizingView"])
+    }
+
+    // The tree lists content far below the fold, but only what is on screen
+    // can be tapped: overflow earns the state a pair of scroll probes.
+    func testActionsAppendScrollProbesWhenContentOverflows() {
+        let overflowing = [
+            node(id: nil, type: "Other", depth: 0, frame: [0, 0, 402, 874]),
+            node(id: "MainScreen-TransferButton", type: "Button", depth: 3, frame: [20, 300, 100, 44]),
+            node(id: "Ids.cell-99", type: "Cell", depth: 4, frame: [20, 980, 362, 86]),
+        ]
+        let actions = ExploreEngine.actions(from: overflowing)
+        XCTAssertEqual(actions.filter(\.isScroll).map(\.key), ["scroll:1", "scroll:2"])
+        XCTAssertTrue(actions.filter(\.isScroll).allSatisfy { $0.endY < $0.y })
+
+        let fitting = Array(overflowing.prefix(2))
+        XCTAssertTrue(ExploreEngine.actions(from: fitting).filter(\.isScroll).isEmpty)
+    }
+
+    // A grid of dozens of distinct tappables (avatar pickers, option lists)
+    // is capped so one screen cannot eat the whole step budget — and the tab
+    // bar jumps the queue: tabs are the widest doors in the app.
+    func testActionsCapGridsAndPutTabsFirst() {
+        var snapshot = [node(id: nil, type: "Other", depth: 0, frame: [0, 0, 402, 874])]
+        for first in "abcde" {
+            for second in "abcdefgh" {
+                snapshot.append(node(id: "avatar-\(first)\(second)", type: "Group", depth: 5, frame: [20, 100, 44, 44]))
+            }
+        }
+        snapshot.append(node(id: "platform_tabbar_pay", type: "RadioButton", depth: 3, frame: [116, 795, 101, 54]))
+        let actions = ExploreEngine.actions(from: snapshot)
+        XCTAssertEqual(actions.count, ExploreEngine.maxActionsPerState)
+        XCTAssertEqual(actions.first?.targetId, "platform_tabbar_pay")
+    }
+
+    // The bottom edge belongs to the home-indicator gesture: a tap there
+    // opens the app switcher, and the crawler leaves the app entirely.
+    func testActionsSkipTheHomeIndicatorZone() {
+        let snapshot = [
+            node(id: nil, type: "Other", depth: 0, frame: [0, 0, 402, 874]),
+            node(id: "TabBar-Home", type: "Button", depth: 3, frame: [20, 800, 60, 40]),
+            node(id: "EdgeButton", type: "Button", depth: 3, frame: [150, 850, 100, 20]),
+        ]
+        let actions = ExploreEngine.actions(from: snapshot)
+        XCTAssertEqual(actions.map(\.targetId), ["TabBar-Home"])
+    }
+
+    // The ax tree carries lower window layers (the presenting screen behind
+    // a sheet); the screen's own strings live in its container's DFS subtree.
+    func testContentLabelsComeFromTheRootContainerSubtree() {
+        let withContainer = [
+            node(id: nil, type: "Application", depth: 0, frame: [0, 0, 402, 874]),
+            node(id: "ProfileScreen", type: "Group", depth: 2, frame: [0, 0, 402, 874]),
+            node(id: nil, label: "Personal details", type: "StaticText", depth: 3),
+            node(id: nil, label: "Balance behind the sheet", type: "StaticText", depth: 1),
+        ]
+        XCTAssertEqual(ExploreEngine.contentLabels(of: withContainer), ["Personal details"])
+        // No container — every visible string counts.
+        let flat = [node(id: nil, label: "Hello", type: "StaticText", depth: 1)]
+        XCTAssertEqual(ExploreEngine.contentLabels(of: flat), ["Hello"])
+    }
+
+    // MARK: loading detection
+
+    // Skeletons settle structurally long before the backend answers; the
+    // crawler must keep waiting instead of screenshotting placeholders.
+    func testIsLoadingSpotsSkeletonsAndSpinners() {
+        XCTAssertTrue(ExploreEngine.isLoading([
+            node(id: "HolaSkeleton", type: "Group", depth: 4),
+        ]))
+        XCTAssertTrue(ExploreEngine.isLoading([
+            node(id: nil, type: "ActivityIndicator", depth: 3),
+        ]))
+        XCTAssertFalse(ExploreEngine.isLoading([
+            node(id: "MainScreen-Balance", label: "Loading history", type: "StaticText", depth: 3),
+        ]))
+    }
+
     // MARK: naming
 
     func testTitlePrefersTheDominantIdentifierPrefix() {

@@ -1916,7 +1916,8 @@ func runViewer(
         // server needs the same launch profiles and logger wiring.
         profiles: projectConfig?.profiles ?? [],
         appFacingServerURL: projectConfig?.appFacingServerURL,
-        projectRoot: projectConfig?.simtoolDirectory.deletingLastPathComponent()
+        projectRoot: projectConfig?.simtoolDirectory.deletingLastPathComponent(),
+        deeplinks: projectConfig?.deeplinks ?? []
     )
     let server = try await startStreamServer(config: config, reclaimPort: reclaimPort)
     let session = SessionInfo(
