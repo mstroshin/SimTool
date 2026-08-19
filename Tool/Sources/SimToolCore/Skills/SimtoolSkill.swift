@@ -381,8 +381,8 @@ extension AgentSkill {
         ### Картограф — the screen map
         The viewer's Картограф tab renders the app as a map: one node per screen (its
         screenshot, deeplinks found in the source, localization keys), arrows for
-        forward navigation only. A map can be produced by the tab's built-in robot
-        («Сканировать приложение») or by the agent walking the app itself — the full
+        forward navigation only. A map can be produced by the built-in robot
+        (`POST /api/v1/explore/start`) or by the agent walking the app itself — the full
         pass algorithm (settle-wait, screen identity and dedup, deeplinks from source
         without opening them, edge rules, the `graph.json` format) is in
         **[cartograph.md](cartograph.md)**, installed next to this file.
@@ -453,8 +453,8 @@ extension AgentSkill {
 
         Two ways to grow the map:
 
-        - **The built-in robot** — the tab's «Сканировать приложение» button (or
-          `POST /api/v1/explore/start`). Fully automatic; it taps everything reachable
+        - **The built-in robot** — `POST /api/v1/explore/start` (stop it with
+          `POST /api/v1/explore/stop`). Fully automatic; it taps everything reachable
           and needs no agent. It resumes from `graph.json` on its own: known screens
           are matched by their structural key, and their persisted `triedActionKeys`
           keep it from re-tapping what previous runs already tried. Deeplinks it

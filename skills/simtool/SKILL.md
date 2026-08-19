@@ -369,8 +369,8 @@ in one step. Flags: `simtool serve --help` / `simtool run --help`.
 ### Картограф — the screen map
 The viewer's Картограф tab renders the app as a map: one node per screen (its
 screenshot, deeplinks found in the source, localization keys), arrows for
-forward navigation only. A map can be produced by the tab's built-in robot
-(«Сканировать приложение») or by the agent walking the app itself — the full
+forward navigation only. A map can be produced by the built-in robot
+(`POST /api/v1/explore/start`) or by the agent walking the app itself — the full
 pass algorithm (settle-wait, screen identity and dedup, deeplinks from source
 without opening them, edge rules, the `graph.json` format) is in
 **[cartograph.md](cartograph.md)**, installed next to this file.

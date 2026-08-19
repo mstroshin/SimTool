@@ -27,10 +27,6 @@ public enum CartographerViewer {
             .grow { flex: 1; }
             .msg { font-size: 12px; color: rgba(244,247,251,0.65); max-width: 40vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
             .msg.err { color: #f87171; }
-            button.scan { appearance: none; border: 1px solid rgba(125,211,252,0.55); border-radius: 10px; background: rgba(125,211,252,0.12); color: #bae6fd; padding: 7px 16px; font-size: 13px; cursor: pointer; }
-            button.scan:hover:not(:disabled) { background: rgba(125,211,252,0.22); }
-            button.scan:disabled { opacity: 0.45; cursor: default; }
-            button.scan.stop { border-color: rgba(248,113,113,0.55); background: rgba(248,113,113,0.10); color: #fca5a5; }
             #root { flex: 1; min-height: 0; display: flex; }
             .canvas { flex: 1; min-width: 0; position: relative; }
             .empty { position: absolute; inset: 0; display: grid; place-items: center; color: rgba(244,247,251,0.45); font-size: 14px; text-align: center; line-height: 1.7; pointer-events: none; }
@@ -65,7 +61,6 @@ public enum CartographerViewer {
             <span id="stats" class="stats"></span>
             <span class="grow"></span>
             <span id="message" class="msg"></span>
-            <button id="scanButton" class="scan" type="button">Сканировать приложение</button>
           </header>
           <div id="root"></div>
           <script type="module">
@@ -118,7 +113,6 @@ public enum CartographerViewer {
               const [status, setStatus] = useState(null);
               const [flow, setFlow] = useState({ nodes: [], edges: [] });
               const [selected, setSelected] = useState(null);
-              const [busy, setBusy] = useState(false);
               const [error, setError] = useState(null);
               // Node id -> position, both what the user dragged this session and
               // what earlier sessions saved on the server. A local drag always
@@ -221,27 +215,6 @@ public enum CartographerViewer {
                 return () => clearInterval(timer);
               }, [poll, status && status.running]);
 
-              const start = useCallback(async () => {
-                setBusy(true); setError(null);
-                try {
-                  const response = await fetch("/api/v1/explore/start", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: "{}",
-                  });
-                  if (!response.ok) {
-                    const body = await response.json().catch(() => ({}));
-                    setError(body.error || response.statusText);
-                  }
-                } finally { setBusy(false); poll(); }
-              }, [poll]);
-
-              const stop = useCallback(async () => {
-                setBusy(true);
-                try { await fetch("/api/v1/explore/stop", { method: "POST", body: "{}" }); }
-                finally { setBusy(false); poll(); }
-              }, [poll]);
-
               const onNodesChange = useCallback((changes) => {
                 setFlow((previous) => {
                   const nodes = applyNodeChanges(changes, previous.nodes);
@@ -265,12 +238,7 @@ public enum CartographerViewer {
                 const message = document.getElementById("message");
                 message.textContent = error || (status && (status.error || status.message)) || "";
                 message.className = "msg" + ((error || (status && status.error)) ? " err" : "");
-                const button = document.getElementById("scanButton");
-                button.textContent = running ? "⏹ Остановить" : "Сканировать приложение";
-                button.className = "scan" + (running ? " stop" : "");
-                button.disabled = busy;
-                button.onclick = running ? stop : start;
-              }, [status, stats, error, running, busy, start, stop]);
+              }, [status, stats, error]);
 
               const selectedNode = selected && graph ? graph.nodes.find((node) => node.id === selected) : null;
 
@@ -294,7 +262,7 @@ public enum CartographerViewer {
                     <${MiniMap} pannable zoomable nodeColor=${() => "#31436e"} maskColor="rgba(5,7,13,0.7)" style=${{ background: "#0d1428" }} />
                   <//>
                   ${flow.nodes.length === 0 && html`<div class="empty">
-                    Карта пуста.<br/>Нажмите «Сканировать приложение» — робот запустит приложение,<br/>пройдёт по экранам и нарисует их здесь.
+                    Карта пуста.<br/>Запустите обход приложения — экраны появятся здесь<br/>по мере того, как их проходят.
                     ${running && html`<div><span class="spin"></span>сканирую…</div>`}
                   </div>`}
                 </div>
