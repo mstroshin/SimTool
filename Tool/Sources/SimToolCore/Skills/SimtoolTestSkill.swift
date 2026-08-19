@@ -1,8 +1,8 @@
 extension AgentSkill {
     public static let simtoolTest = AgentSkill(name: "simtool-test", markdown: simtoolTestMarkdown)
 
-    /// Mirrored by `skills/simtool-test/SKILL.md`, which is the copy to edit;
-    /// regenerate this with `Scripts/sync-agent-skills.swift`.
+    /// The document `simtool init` installs as `skills/simtool-test/SKILL.md`.
+    /// This literal is the only copy — edit it here.
     static let simtoolTestMarkdown = #"""
         ---
         name: simtool-test

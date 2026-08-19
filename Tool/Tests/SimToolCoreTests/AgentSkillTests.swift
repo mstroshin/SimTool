@@ -202,24 +202,4 @@ final class AgentSkillTests: XCTestCase {
             }
         }
     }
-
-    // `skills/<name>/SKILL.md` is the copy you edit by hand; the literal is what
-    // ships. Drift means users get a stale skill — regenerate with
-    // `Scripts/sync-agent-skills.swift`.
-    func testEverySkillMatchesItsRepositoryCopy() throws {
-        let repositoryRoot = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()  // SimToolCoreTests/
-            .deletingLastPathComponent()  // Tests/
-            .deletingLastPathComponent()  // Tool/
-            .deletingLastPathComponent()  // repository root
-        for skill in AgentSkill.all {
-            for file in skill.files {
-                let authored = repositoryRoot.appendingPathComponent("skills/\(skill.name)/\(file.fileName)")
-                guard let contents = try? String(contentsOf: authored, encoding: .utf8) else {
-                    throw XCTSkip("no authoring copy at \(authored.path) (building outside a checkout)")
-                }
-                XCTAssertEqual(contents, file.markdown, "run Scripts/sync-agent-skills.swift for \(skill.name)/\(file.fileName)")
-            }
-        }
-    }
 }

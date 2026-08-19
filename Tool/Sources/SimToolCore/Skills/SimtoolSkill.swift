@@ -7,8 +7,8 @@ extension AgentSkill {
         ]
     )
 
-    /// Mirrored by `skills/simtool/SKILL.md`, which is the copy to edit;
-    /// regenerate this with `Scripts/sync-agent-skills.swift`.
+    /// The document `simtool init` installs as `skills/simtool/SKILL.md`.
+    /// This literal is the only copy — edit it here.
     static let simtoolMarkdown = #"""
         ---
         name: simtool
@@ -426,8 +426,8 @@ extension AgentSkill {
 
         """#
 
-    /// Mirrored by `skills/simtool/cartograph.md`, which is the copy to edit;
-    /// regenerate this with `Scripts/sync-agent-skills.swift`.
+    /// The companion `simtool init` installs next to SKILL.md as `cartograph.md`.
+    /// This literal is the only copy — edit it here.
     static let simtoolCartographMarkdown = #"""
         # Картограф: crawl an app into a screen map (via simtool)
 
