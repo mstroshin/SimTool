@@ -84,7 +84,17 @@ let package = Package(
         ),
         .target(
             name: "SimToolWeb",
-            dependencies: []
+            dependencies: [],
+            // Embedded in code, not bundled: a release ships the bare `simtool`
+            // binary, so a Bundle.module resource bundle would not travel with it.
+            resources: [
+                .embedInCode("Resources/viewer.html"),
+                .embedInCode("Resources/viewer.css"),
+                .embedInCode("Resources/viewer.js"),
+                .embedInCode("Resources/cartographer.html"),
+                .embedInCode("Resources/cartographer.css"),
+                .embedInCode("Resources/cartographer.js"),
+            ]
         ),
         .target(
             name: "SimToolServer",

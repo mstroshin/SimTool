@@ -1,0 +1,36 @@
+:root { color-scheme: dark; font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; }
+* { box-sizing: border-box; }
+body { margin: 0; height: 100vh; display: flex; flex-direction: column; background: #0b1020; color: #f4f7fb; }
+header { flex: 0 0 auto; display: flex; align-items: center; gap: 14px; padding: 10px 16px; border-bottom: 1px solid rgba(255,255,255,0.10); background: rgba(255,255,255,0.03); }
+.brand { color: #7dd3fc; font-size: 13px; letter-spacing: 0.14em; text-transform: uppercase; font-weight: 700; }
+.backlink { color: rgba(244,247,251,0.55); text-decoration: none; font-size: 12px; }
+.backlink:hover { color: #bae6fd; }
+.app-name { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: rgba(244,247,251,0.6); }
+.stats { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: #bae6fd; }
+.grow { flex: 1; }
+.msg { font-size: 12px; color: rgba(244,247,251,0.65); max-width: 40vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.msg.err { color: #f87171; }
+#root { flex: 1; min-height: 0; display: flex; }
+.canvas { flex: 1; min-width: 0; position: relative; }
+.empty { position: absolute; inset: 0; display: grid; place-items: center; color: rgba(244,247,251,0.45); font-size: 14px; text-align: center; line-height: 1.7; pointer-events: none; }
+.spin { display: inline-block; width: 11px; height: 11px; border: 2px solid rgba(125,211,252,0.3); border-top-color: #7dd3fc; border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: -1px; margin-right: 6px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+/* Screen node cards */
+.screen-node { width: 168px; border: 1px solid rgba(255,255,255,0.14); border-radius: 12px; background: #101830; overflow: hidden; box-shadow: 0 10px 26px rgba(0,0,0,0.45); }
+.screen-node.selected { border-color: #7dd3fc; box-shadow: 0 0 0 2px rgba(125,211,252,0.35), 0 10px 26px rgba(0,0,0,0.45); }
+/* Full-height screenshot: the natural ratio once loaded, a phone-ish
+   placeholder ratio before, so the layout does not jump. */
+.screen-node img { display: block; width: 100%; height: auto; aspect-ratio: auto 9 / 19.5; background: #05070d; }
+.screen-title { padding: 6px 8px 2px; font-size: 11px; font-weight: 600; color: #e8eefb; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.screen-meta { padding: 0 8px 7px; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; color: rgba(244,247,251,0.5); }
+.react-flow__attribution { display: none; }
+/* Details drawer */
+.details { flex: 0 0 320px; border-left: 1px solid rgba(255,255,255,0.10); background: #0d1428; overflow: auto; padding: 14px; }
+.details h2 { margin: 0 0 10px; font-size: 14px; color: #e8eefb; }
+.details img { width: 100%; border-radius: 10px; border: 1px solid rgba(255,255,255,0.12); }
+.details .section { margin-top: 14px; }
+.details .section-title { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: rgba(244,247,251,0.45); margin-bottom: 6px; }
+.details .mono { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: #bae6fd; line-height: 1.7; word-break: break-all; }
+.details .muted { font-size: 12px; color: rgba(244,247,251,0.4); }
+.details .close { float: right; appearance: none; border: 0; background: none; color: rgba(244,247,251,0.5); font-size: 16px; cursor: pointer; }
+.details .close:hover { color: #f4f7fb; }

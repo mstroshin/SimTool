@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{title}}</title>
+  <style>{{css}}</style>
+</head>
+<body>
+  <main>
+    <section id="viewerCard" class="viewer-card">
+      <div id="cardResizeLeft" class="card-resize-handle left" title="Drag to resize"></div>
+      <div id="cardResizeRight" class="card-resize-handle right" title="Drag to resize"></div>
+      <header class="appbar">
+        <div class="brandrow"><p class="brand">SIMTOOL</p></div>
+        <div class="toolrow">
+          <button id="home" class="icon-btn" type="button" title="Home">🏠</button>
+          <button id="shot" class="icon-btn" type="button" title="Screenshot">📸</button>
+          <button id="shake" class="icon-btn" type="button" title="Shake">📳</button>
+          <button id="terminate" class="icon-btn" type="button" title="Terminate app">⏹️</button>
+          <button id="relaunch" class="icon-btn" type="button" title="Relaunch app">▶️</button>
+          <a id="cartographerLink" class="map-link" href="/cartographer" title="Карта приложения">🗺️ Картограф</a>
+          <button id="inspectToggle" class="inspect-toggle" type="button" aria-pressed="false">
+            <span class="dot"></span><span>Inspect</span>
+          </button>
+        </div>
+      </header>
+      <div id="stage" class="stage">
+        <div id="screenWrap" class="screen-wrap fit">
+          <div id="surface" class="surface">
+            <canvas id="screen" aria-label="Simulator stream"></canvas>
+            <div id="axOverlay" class="ax-overlay" hidden></div>
+            <div id="testPlayback" class="test-playback" hidden>
+              <button id="testBackLive" class="test-back-live" type="button">← Live</button>
+              <!-- Custom controls: Orca's embedded browser drops clicks on the
+                   <video> element itself, so native controls are unreachable. -->
+              <video id="testVideo" class="test-video" playsinline></video>
+              <div id="testVideoNote" class="test-video-note" hidden>video unavailable</div>
+              <div id="testControls" class="test-controls">
+                <button id="testPlayPause" class="test-ctl-btn" type="button" title="Play/Pause">▶</button>
+                <span id="testTime" class="test-ctl-time">0:00 / 0:00</span>
+                <input id="testSeek" class="test-ctl-seek" type="range" min="0" max="1000" value="0" step="1">
+              </div>
+            </div>
+          </div>
+          <div id="placeholder">connecting…</div>
+          <div class="statusbar">
+            <span id="statusDot" class="status-dot idle"></span>
+            <span id="statusText">opening stream</span>
+            <span id="fps">-- fps</span>
+            <span id="deviceName" class="device-name">—</span>
+          </div>
+        </div>
+        <aside id="inspector" class="inspector" hidden>
+          <div id="drawerHandle" class="drawer-handle" title="Drag to resize"><span class="grab"></span></div>
+          <div id="inspectorListView" class="inspector-list-view">
+            <div class="inspector-tabs">
+              <button id="tabNetwork" class="insp-tab active" type="button" data-tab="network">Network <span id="networkCount" class="tab-count">0</span></button>
+              <button id="tabLogs" class="insp-tab" type="button" data-tab="logs">Logs <span id="logsCount" class="tab-count">0</span></button>
+              <button id="tabState" class="insp-tab" type="button" data-tab="state">State <span id="stateCount" class="tab-count">0</span></button>
+              <button id="tabAx" class="insp-tab insp-tab-soon" type="button" data-tab="ax">AX</button>
+              <button id="tabTests" class="insp-tab" type="button" data-tab="tests">Tests <span id="testsCount" class="tab-count">0</span></button>
+            </div>
+            <div class="filter-row">
+              <div id="filterField" class="filter-field">
+                <span id="filterChips" class="filter-chips"></span>
+                <input id="inspectorFilter" class="inspector-filter" type="search" placeholder="filter service / status / host" />
+              </div>
+              <button id="filterHelp" class="filter-help" type="button" title="Filter help">?</button>
+            </div>
+            <div id="inspectorNotice" class="inspector-notice" hidden>
+              <b>No app attached</b> — Network, Logs and State need the app relaunched by simtool.
+              Restart the server as
+              <code id="inspectorNoticeCmd" title="Click to copy">simtool serve --app &lt;bundle-id&gt;</code>
+              or run <code id="inspectorNoticeRunCmd" title="Click to copy">simtool run --web</code> from your project.
+            </div>
+            <div id="logsControls" class="logs-controls" hidden>
+              <span id="logsStatus">idle</span>
+            </div>
+            <ul id="networkList" class="network-list scroll-pane"></ul>
+            <ul id="logsList" class="logs-list scroll-pane" hidden></ul>
+            <div id="axPane" class="ax-pane" hidden>
+              <div class="ax-toolbar">
+                <button id="axRefresh" class="ax-refresh" type="button" title="Refresh tree">⟳</button>
+                <span id="axStatus" class="ax-status">—</span>
+              </div>
+              <div id="axSelectedBar" class="ax-selected-bar" hidden>
+                <span id="axSelectedLabel" class="ax-selected-label">—</span>
+                <button id="axCopy" class="ax-copy" type="button" title="Copy this element's full JSON. Right-click any element on screen or row in the tree for a Copy menu.">Copy JSON</button>
+              </div>
+              <div id="axTree" class="ax-tree"></div>
+            </div>
+            <div id="statePane" class="state-pane" hidden>
+              <div id="stateModels" class="state-models"></div>
+              <div id="stateHistory" class="state-history"></div>
+            </div>
+            <div id="testsPane" class="tests-pane" hidden>
+              <div class="tests-subtabs">
+                <button id="testsSubtabTests" class="tests-subtab active" type="button">Tests</button>
+                <button id="testsSubtabHistory" class="tests-subtab" type="button">History</button>
+              </div>
+              <div id="testsDefinitions" class="tests-defs"></div>
+              <div id="testsSteps" class="tests-steps scroll-pane"></div>
+              <div id="testsHistory" class="tests-history" hidden>
+                <div id="testsSessions" class="tests-sessions"></div>
+                <div id="testsTimeline" class="tests-timeline scroll-pane"></div>
+              </div>
+            </div>
+          </div>
+          <div id="inspectorDetailView" class="inspector-detail-view" hidden>
+            <button id="detailBack" class="detail-back" type="button">‹ <span id="detailBackLabel">Network</span></button>
+            <div id="detailBody" class="network-detail scroll-pane"></div>
+          </div>
+        </aside>
+      </div>
+    </section>
+    <div id="axMenu" class="ax-menu" hidden>
+      <button id="axMenuCopy" class="ax-menu-item" type="button">Copy element</button>
+    </div>
+    <div id="networkMenu" class="ax-menu" hidden>
+      <button id="networkMenuExclude" class="ax-menu-item" type="button">Exclude</button>
+      <button id="networkMenuInclude" class="ax-menu-item" type="button">Include</button>
+    </div>
+    <div id="networkLaunchMenu" class="ax-menu" hidden>
+      <button id="networkLaunchMenuDelete" class="ax-menu-item tests-menu-delete" type="button">Delete section</button>
+    </div>
+    <div id="logsMenu" class="ax-menu" hidden>
+      <button id="logsMenuCopy" class="ax-menu-item" type="button">Copy entry</button>
+      <button id="logsMenuCopySel" class="ax-menu-item" type="button">Copy Selected</button>
+      <button id="logsMenuIncludeSel" class="ax-menu-item" type="button">Include Selected</button>
+      <button id="logsMenuExcludeSel" class="ax-menu-item" type="button">Exclude Selected</button>
+    </div>
+    <div id="logsLaunchMenu" class="ax-menu" hidden>
+      <button id="logsLaunchMenuDelete" class="ax-menu-item tests-menu-delete" type="button">Delete section</button>
+    </div>
+    <div id="testsMenu" class="ax-menu" hidden>
+      <button id="testsMenuDelete" class="ax-menu-item tests-menu-delete" type="button">Delete</button>
+    </div>
+    <div id="filterHelpPop" class="filter-help-pop" hidden>
+      <p><b>type text</b> — live substring filter over the current tab's fields</p>
+      <p><b>Enter</b> — turn the text into an include chip (show only matches)</p>
+      <p><b>-text + Enter</b> — exclude chip (hide matches)</p>
+      <p data-tab="logs"><b>subsystem:text</b> — match that field only; also message / category / process / level</p>
+      <p data-tab="network"><b>right-click a request</b> — include/exclude its path</p>
+      <p data-tab="logs"><b>right-click selected text</b> — copy / include / exclude it</p>
+    </div>
+  </main>
+  <script>{{js}}</script>
+</body>
+</html>
