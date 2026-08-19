@@ -125,7 +125,8 @@ public final class StreamServer: @unchecked Sendable {
             deeplinks: config.deeplinks,
             appFacingServerURL: config.appFacingServerURL,
             projectRoot: config.projectRoot,
-            // Sibling of test-sessions: runs land in the project's `.simtool/explore`.
+            // Sibling of test-sessions: the project's single map store lives in
+            // `.simtool/explore` (`graph.json` + `shots/`), shared by all runs.
             root: config.testSessionsRoot.deletingLastPathComponent().appendingPathComponent("explore", isDirectory: true)
         ))
     }
@@ -186,6 +187,15 @@ public final class StreamServer: @unchecked Sendable {
         server.POST["/api/v1/explore/stop"] = { _ in
             do { return try self.jsonEncodedResponse(self.explorer.stop()) }
             catch { return self.errorResponse(error) }
+        }
+
+        server.POST["/api/v1/explore/layout"] = { request in
+            do {
+                let body = try self.decodeJSON(ExploreLayoutRequest.self, from: request)
+                return try self.jsonEncodedResponse(try self.explorer.saveLayout(body.positions))
+            } catch {
+                return self.errorResponse(error, statusCode: 400, reason: "Bad Request")
+            }
         }
 
         server.GET["/api/v1/explore/shot"] = { request in

@@ -120,7 +120,13 @@ public enum CartographerViewer {
               const [selected, setSelected] = useState(null);
               const [busy, setBusy] = useState(false);
               const [error, setError] = useState(null);
-              const draggedPositions = useRef(new Map());
+              // Node id -> position, both what the user dragged this session and
+              // what earlier sessions saved on the server. A local drag always
+              // wins over a polled value, so a save in flight never snaps a
+              // card back.
+              const placedPositions = useRef(new Map());
+              const pendingSaves = useRef(new Map());
+              const saveTimer = useRef(null);
               const flowInstance = useRef(null);
 
               // Re-center as the map grows: a scan adds nodes outside the
@@ -132,13 +138,16 @@ public enum CartographerViewer {
                 return () => clearTimeout(timer);
               }, [flow.nodes.length]);
 
-              const rebuild = useCallback((graph) => {
+              const rebuild = useCallback((graph, layout) => {
                 if (!graph) { setFlow({ nodes: [], edges: [] }); return; }
+                for (const [id, position] of Object.entries((layout && layout.positions) || {})) {
+                  if (!placedPositions.current.has(id)) placedPositions.current.set(id, position);
+                }
                 const auto = autoLayout(graph.nodes);
                 const nodes = graph.nodes.map((node) => ({
                   id: node.id,
                   type: "screen",
-                  position: draggedPositions.current.get(node.id) || auto.get(node.id),
+                  position: placedPositions.current.get(node.id) || auto.get(node.id),
                   data: node,
                 }));
                 const edges = graph.edges.map((edge) => ({
@@ -154,12 +163,52 @@ public enum CartographerViewer {
                 setFlow({ nodes, edges });
               }, []);
 
+              // One POST per burst of dragging: React Flow emits a position
+              // change per mouse move, and only where the card came to rest
+              // matters. `keepalive` lets the last save outlive the tab.
+              const flushLayout = useCallback(async () => {
+                const pending = pendingSaves.current;
+                if (pending.size === 0) return;
+                pendingSaves.current = new Map();
+                const positions = {};
+                for (const [id, position] of pending) {
+                  positions[id] = { x: Math.round(position.x), y: Math.round(position.y) };
+                }
+                try {
+                  await fetch("/api/v1/explore/layout", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ positions }),
+                    keepalive: true,
+                  });
+                } catch (saveError) {
+                  // Re-queue, unless a newer drag already superseded the card:
+                  // the next drag retries instead of losing the arrangement.
+                  for (const [id, position] of pending) {
+                    if (!pendingSaves.current.has(id)) pendingSaves.current.set(id, position);
+                  }
+                }
+              }, []);
+
+              const scheduleSave = useCallback((id, position) => {
+                pendingSaves.current.set(id, position);
+                clearTimeout(saveTimer.current);
+                saveTimer.current = setTimeout(flushLayout, 400);
+              }, [flushLayout]);
+
+              // A tab closed mid-debounce would otherwise drop the last drag.
+              useEffect(() => {
+                const flush = () => flushLayout();
+                window.addEventListener("pagehide", flush);
+                return () => { window.removeEventListener("pagehide", flush); flush(); };
+              }, [flushLayout]);
+
               const poll = useCallback(async () => {
                 try {
                   const response = await fetch("/api/v1/explore/status");
                   const payload = await response.json();
                   setStatus(payload);
-                  rebuild(payload.graph);
+                  rebuild(payload.graph, payload.layout);
                 } catch (fetchError) {
                   setError("Сервер недоступен: " + fetchError.message);
                 }
@@ -184,7 +233,6 @@ public enum CartographerViewer {
                     const body = await response.json().catch(() => ({}));
                     setError(body.error || response.statusText);
                   }
-                  draggedPositions.current = new Map();
                 } finally { setBusy(false); poll(); }
               }, [poll]);
 
@@ -199,12 +247,13 @@ public enum CartographerViewer {
                   const nodes = applyNodeChanges(changes, previous.nodes);
                   for (const change of changes) {
                     if (change.type === "position" && change.position) {
-                      draggedPositions.current.set(change.id, change.position);
+                      placedPositions.current.set(change.id, change.position);
+                      scheduleSave(change.id, change.position);
                     }
                   }
                   return { nodes, edges: previous.edges };
                 });
-              }, []);
+              }, [scheduleSave]);
 
               const running = status && status.running;
               const graph = status && status.graph;

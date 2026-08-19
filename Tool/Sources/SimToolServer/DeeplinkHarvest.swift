@@ -15,7 +15,7 @@ enum DeeplinkHarvest {
         ".git", ".build", "DerivedData", "Pods", "Carthage", "checkouts", "node_modules",
     ]
 
-    /// Routes not worth probing blindly: destructive or service-only by name.
+    /// Routes not worth putting on a map: destructive or service-only by name.
     static let denylist = ["delete", "remove", "clear", "reset", "logout", "log_out", "sign_out"]
 
     /// `CFBundleURLTypes` → the custom schemes the app answers to.
@@ -64,8 +64,8 @@ enum DeeplinkHarvest {
     }
 
     /// Scans the checkout. Unique URLs, shortest paths first — top-level
-    /// routes are the likeliest to open without runtime arguments — capped,
-    /// because every probe costs a relaunch.
+    /// routes are the likeliest to name a screen outright — capped, so one
+    /// route-happy codebase does not flood every node's annotations.
     static func harvest(projectRoot: URL, schemes: [String], limit: Int = 40) -> [String] {
         guard !schemes.isEmpty else { return [] }
         var found: [String] = []
@@ -96,5 +96,45 @@ enum DeeplinkHarvest {
 
     private static func pathDepth(_ url: String) -> Int {
         url.filter { $0 == "/" }.count
+    }
+
+    /// The meaningful tokens of a route: host and path segments, lowercased,
+    /// with `_`/`-` squeezed out. `plata://payments/top_up` →
+    /// `["payments", "topup"]`.
+    static func routeTokens(of url: String) -> [String] {
+        guard let schemeEnd = url.range(of: "://") else { return [] }
+        return url[schemeEnd.upperBound...]
+            .split(separator: "/")
+            .map { $0.lowercased().filter { $0 != "_" && $0 != "-" } }
+            .filter { !$0.isEmpty }
+    }
+
+    /// The screen a route names, or nil — attribution without ever opening
+    /// the URL (a probe perturbs the app and mints orphan nodes for screens
+    /// no tap reaches). Every token must appear in the screen's normalized
+    /// name (`plata://invest` → `InvestMainScreen`); of several candidates
+    /// the shortest name wins — the more general screen for the more general
+    /// route — and a tie is ambiguity: a deeplink pinned on the wrong screen
+    /// is worse than one left unattributed.
+    static func screenIndex(for url: String, inNames names: [String]) -> Int? {
+        let tokens = routeTokens(of: url)
+        guard !tokens.isEmpty else { return nil }
+        var best: (index: Int, length: Int)?
+        var tied = false
+        for (index, name) in names.enumerated() {
+            let normalized = name.lowercased().filter { !"_- ".contains($0) }
+            guard !normalized.isEmpty, tokens.allSatisfy({ normalized.contains($0) }) else { continue }
+            if let current = best {
+                if normalized.count < current.length {
+                    best = (index, normalized.count)
+                    tied = false
+                } else if normalized.count == current.length {
+                    tied = true
+                }
+            } else {
+                best = (index, normalized.count)
+            }
+        }
+        return tied ? nil : best?.index
     }
 }

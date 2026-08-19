@@ -434,27 +434,35 @@ extension AgentSkill {
         The Картограф tab of the simtool viewer (`simtool serve` → 🗺️ Картограф) draws a
         map of the app: one card per screen with its screenshot, arrows for forward
         navigation, and a details drawer with the screen's deeplinks and localization
-        keys. A map is a *run* — a directory under `.simtool/explore/`:
+        keys. The project has **one** map — a single store under `.simtool/explore/`:
 
         ```
-        .simtool/explore/2026-08-19T14-03-00/
+        .simtool/explore/
         ├── graph.json          # the map: nodes (screens) + edges (transitions)
         └── shots/
             ├── s-main.png      # one screenshot per node, named `<node id>.png`
             └── s-profile.png
         ```
 
-        The tab always shows the newest run (directories sort by name — the run id is a
-        timestamp) and re-reads it every few seconds, so nodes appear on the canvas as
-        they are written.
+        Every run — robot or agent — opens this store and modifies it: attaches to the
+        screens it already holds, adds the new ones, retakes the screenshots of the
+        screens it reaches. Runs never create a second copy. (`run` in `graph.json`
+        describes the *latest* run; `stats.steps`/`stats.relaunches` accumulate across
+        runs.) The tab re-reads the store every few seconds, so nodes appear on the
+        canvas as they are written.
 
-        Two ways to produce a run:
+        Two ways to grow the map:
 
         - **The built-in robot** — the tab's «Сканировать приложение» button (or
           `POST /api/v1/explore/start`). Fully automatic; it taps everything reachable
-          and needs no agent.
+          and needs no agent. It resumes from `graph.json` on its own: known screens
+          are matched by their structural key, and their persisted `triedActionKeys`
+          keep it from re-tapping what previous runs already tried. Deeplinks it
+          annotates the way this pass does — mined from the source and matched to
+          screen names, never opened — so a screen enters the map only when a tap
+          reaches it.
         - **The agent pass** — this document. *You* drive the app with simtool
-          primitives and write the run artifact yourself. Use it when the blind crawl
+          primitives and modify the store yourself. Use it when the blind crawl
           is not enough: you can name screens properly, attribute deeplinks by reading
           the source instead of probing, and judge what is worth tapping.
 
@@ -467,13 +475,17 @@ extension AgentSkill {
         mapped or the budget is spent.
 
         **0. Preflight.** Start the viewer (`simtool serve --detach --json`), make sure
-        a simulator is booted, create the run directory
-        (`.simtool/explore/$(date +%Y-%m-%dT%H-%M-%S)/shots/`) and write an initial
-        `graph.json` with empty `nodes`/`edges`. Cold-launch the app with the project's
-        usual options (`simtool app launch … -- <args>`); if `.simtool/config.yml` has a
-        launch profile named `explore` (mock backend, auto-login), use its argv — the
-        map must not depend on backend luck. Do not run the pass while the built-in
-        robot is scanning: one run owns the simulator at a time.
+        a simulator is booted. Open the store: read `.simtool/explore/graph.json` if it
+        exists — its nodes are your dedup base and its `run.app` must match the app you
+        are about to map (a different app means the store is another app's map: start
+        it over). If there is no store yet, create `.simtool/explore/shots/` and write
+        an initial `graph.json` with empty `nodes`/`edges`. Update `run` to describe
+        your pass (fresh `id` timestamp, `startedAt`, `finishedAt: null`). Cold-launch
+        the app with the project's usual options (`simtool app launch … -- <args>`); if
+        `.simtool/config.yml` has a launch profile named `explore` (mock backend,
+        auto-login), use its argv — the map must not depend on backend luck. Do not run
+        the pass while the built-in robot is scanning: one run owns the simulator (and
+        the store) at a time.
 
         **1. Wait until the screen is truly loaded.** Read the accessibility tree
         (`simtool ax tree --json`) every second or so until two consecutive reads are
@@ -498,10 +510,12 @@ extension AgentSkill {
         states differ structurally, screens differ by identity). Content — balances,
         names, dates — never distinguishes screens.
 
-        **4. Screenshot and node.** On first sighting only: capture
-        `xcrun simctl io <udid> screenshot`, downscale (`sips -Z 700 <png>`), save as
-        `shots/<nodeId>.png`. Node ids may contain only letters, digits, `-` and `_` —
-        they become file names and the shot URL (`/api/v1/explore/shot?node=<id>`).
+        **4. Screenshot and node.** Capture `xcrun simctl io <udid> screenshot`,
+        downscale (`sips -Z 700 <png>`), save as `shots/<nodeId>.png` — on first
+        sighting of a new screen, and once per pass for a known screen you reach
+        (overwrite its old shot: the store's pictures must show the app as it is now).
+        Node ids may contain only letters, digits, `-` and `_` — they become file
+        names and the shot URL (`/api/v1/explore/shot?node=<id>`).
 
         **5. Deeplinks — from the source code, never by opening them.** In the project
         checkout, find out whether a deeplink opens this screen: URL literals
@@ -557,14 +571,13 @@ extension AgentSkill {
 
         ## `graph.json` — the format
 
-        Top level: `schemaVersion` (currently 1), `run`, `stats`, `nodes`, `edges`.
-        Keys are camelCase, timestamps ISO 8601. The run id doubles as the directory
-        name and is a `2026-08-19T14-03-00`-style timestamp (dashes, not colons, in the
-        time — it is a file name; lexicographic order must equal recency).
+        Top level: `schemaVersion` (currently 2), `run`, `stats`, `nodes`, `edges`.
+        Keys are camelCase, timestamps ISO 8601. The run id is a
+        `2026-08-19T14-03-00`-style timestamp naming the latest pass over the store.
 
         ```json
         {
-          "schemaVersion": 1,
+          "schemaVersion": 2,
           "run": {
             "id": "2026-08-19T14-03-00",
             "app": "com.example.myapp",
@@ -578,6 +591,7 @@ extension AgentSkill {
               "id": "s-main",
               "title": "MainScreen",
               "fingerprint": "s-main",
+              "key": "s-main",
               "screenshot": "shots/s-main.png",
               "depth": 0,
               "visits": 3,
@@ -615,9 +629,12 @@ extension AgentSkill {
         Field notes:
 
         - Node — required: `id`, `title`, `fingerprint`, `screenshot`, `depth`,
-          `visits`, `actionsTotal`, `actionsTried`, `firstSeenAt`; optional: `states`,
-          `deeplinks`, `localizationKeys`. `fingerprint` is the robot's structural
-          hash; in an agent pass any stable unique string works — reuse the node id.
+          `visits`, `actionsTotal`, `actionsTried`, `firstSeenAt`; optional: `key`,
+          `states`, `triedActionKeys`, `deeplinks`, `localizationKeys`. `fingerprint`
+          is the robot's structural hash and `key` its screen-identity hash — the
+          robot resumes by them; in an agent pass any stable unique string works for
+          both — reuse the node id. `triedActionKeys` is the robot's persisted
+          frontier; leave it alone if you did not compute it.
         - `depth` is the shortest observed distance from the launch screen; the canvas
           lays columns out by depth, so keep it honest (shrink it if you rediscover a
           screen closer to the root — and re-check the depth rule for its edges).

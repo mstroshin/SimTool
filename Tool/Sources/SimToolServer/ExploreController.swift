@@ -36,7 +36,11 @@ public struct ExploreScreenNode: Codable, Sendable {
     public var id: String
     public var title: String
     public var fingerprint: String
-    /// Relative to the run directory, e.g. `shots/s-ab12cd34.png`.
+    /// Structural screen key — what makes a later run's snapshot of this screen
+    /// land on this node instead of minting a duplicate. Nil in graphs recorded
+    /// before runs merged into one store (then the fingerprint stands in).
+    public var key: String?
+    /// Relative to the store root, e.g. `shots/s-ab12cd34.png`.
     public var screenshot: String
     /// Shortest observed distance from the screen the app launches into.
     public var depth: Int
@@ -47,7 +51,11 @@ public struct ExploreScreenNode: Codable, Sendable {
     public var actionsTotal: Int
     public var actionsTried: Int
     public var firstSeenAt: String
-    /// Deeplinks observed to land on this screen when probed after the crawl.
+    /// Action keys already tried on this screen, persisted so the next run
+    /// continues the frontier instead of re-tapping everything from scratch.
+    public var triedActionKeys: [String]?
+    /// Routes mined from the project source whose tokens name this screen.
+    /// Attributed statically — the crawl never opens a deeplink.
     public var deeplinks: [String]?
     /// Localization keys whose values match this screen's visible strings,
     /// reverse-looked-up in the project checkout.
@@ -68,6 +76,35 @@ public struct ExploreTransitionEdge: Codable, Sendable {
     public var to: String
     public var action: ExploreTransitionAction
     public var count: Int
+}
+
+// MARK: - Canvas layout (persisted as layout.json next to graph.json)
+
+/// Where the user dragged one screen card on the Картограф canvas, in canvas
+/// points.
+public struct ExploreNodePosition: Codable, Sendable, Equatable {
+    public var x: Double
+    public var y: Double
+
+    public init(x: Double, y: Double) {
+        self.x = x
+        self.y = y
+    }
+}
+
+/// The hand-made canvas arrangement, kept in its own `layout.json` rather than
+/// inside `graph.json`: the crawler rewrites the graph after every step, so a
+/// placement saved from the tab would race that write and lose.
+public struct ExploreLayout: Codable, Sendable {
+    public var schemaVersion: Int
+    /// Node id → where the user put that card. Nodes absent here fall back to
+    /// the canvas' automatic depth layout.
+    public var positions: [String: ExploreNodePosition]
+
+    public init(schemaVersion: Int = 1, positions: [String: ExploreNodePosition] = [:]) {
+        self.schemaVersion = schemaVersion
+        self.positions = positions
+    }
 }
 
 // MARK: - HTTP payloads
@@ -94,6 +131,16 @@ public struct ExploreStartRequest: Codable, Sendable {
     }
 }
 
+/// Positions the tab reports after a drag. A partial map: only the cards that
+/// moved travel over the wire, and the server merges them into what it has.
+public struct ExploreLayoutRequest: Codable, Sendable {
+    public var positions: [String: ExploreNodePosition]
+
+    public init(positions: [String: ExploreNodePosition] = [:]) {
+        self.positions = positions
+    }
+}
+
 public struct ExploreStatusPayload: Codable, Sendable {
     public var running: Bool
     public var runId: String?
@@ -101,6 +148,9 @@ public struct ExploreStatusPayload: Codable, Sendable {
     public var message: String?
     public var error: String?
     public var graph: ExploreGraph?
+    /// The saved canvas arrangement, so opening the tab restores the map the
+    /// way the user left it without a second request.
+    public var layout: ExploreLayout?
 }
 
 // MARK: - Engine (pure, unit-testable)
@@ -431,8 +481,8 @@ public final class ExploreController: @unchecked Sendable {
         public var device: SimulatorDevice
         public var defaultApp: String?
         public var profiles: [LaunchProfile]
-        /// Named deeplinks from the project config, probed after the crawl to
-        /// annotate which screens they land on.
+        /// Named deeplinks from the project config, matched after the crawl
+        /// to the discovered screens' names — never opened.
         public var deeplinks: [ProjectConfig.Deeplink]
         public var appFacingServerURL: String?
         /// The project checkout, searched for localization tables.
@@ -486,6 +536,11 @@ public final class ExploreController: @unchecked Sendable {
     /// `<directory>|<graph.json mtime>` of the run `loadNewestRunLocked` last
     /// decoded, so the tab's 3-second poll does not re-decode an unchanged file.
     private var loadedRunSignature: String?
+    /// The hand-made canvas arrangement, and the `layout.json` mtime it was
+    /// decoded from — same reason as the graph: the tab polls, the file rarely
+    /// changes.
+    private var layout = ExploreLayout()
+    private var layoutSignature: String?
 
     public init(configuration: Configuration) {
         self.configuration = configuration
@@ -497,13 +552,15 @@ public final class ExploreController: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         loadNewestRunLocked()
+        loadLayoutLocked()
         return ExploreStatusPayload(
             running: running,
             runId: runId,
             app: graph?.run.app ?? configuration.defaultApp,
             message: message,
             error: lastError,
-            graph: graph
+            graph: graph,
+            layout: layout
         )
     }
 
@@ -519,7 +576,7 @@ public final class ExploreController: @unchecked Sendable {
             throw SimToolError("An exploration run is already in progress.")
         }
         let id = Self.runIdFormatter.string(from: Date())
-        let directory = configuration.root.appendingPathComponent(id, isDirectory: true)
+        let directory = configuration.root
         let budgets = Budgets(
             maxScreens: max(1, request.maxScreens ?? 40),
             maxSteps: max(1, request.maxSteps ?? 200),
@@ -529,21 +586,33 @@ public final class ExploreController: @unchecked Sendable {
         runId = id
         runDirectory = directory
         lastError = nil
-        message = "Запускаю \(app)…"
-        graph = ExploreGraph(
-            schemaVersion: 1,
-            run: ExploreRunMeta(
-                id: id,
-                app: app,
-                device: configuration.device.name,
-                profile: profile?.name,
-                startedAt: Self.timestamp(),
-                finishedAt: nil
-            ),
-            stats: ExploreStats(screens: 0, transitions: 0, steps: 0, relaunches: 0),
-            nodes: [],
-            edges: []
+        let meta = ExploreRunMeta(
+            id: id,
+            app: app,
+            device: configuration.device.name,
+            profile: profile?.name,
+            startedAt: Self.timestamp(),
+            finishedAt: nil
         )
+        // One store per project: a new run resumes the existing map — same
+        // nodes, same shots — and only extends and refreshes it. A map of a
+        // different app is stale territory, not something to merge into.
+        migrateLegacyRunsLocked()
+        if let existing = Self.loadGraph(at: directory), existing.run.app == app {
+            graph = existing
+            graph?.run = meta
+            graph?.schemaVersion = 2
+            message = "Продолжаю карту: \(existing.nodes.count) экранов…"
+        } else {
+            graph = ExploreGraph(
+                schemaVersion: 2,
+                run: meta,
+                stats: ExploreStats(screens: 0, transitions: 0, steps: 0, relaunches: 0),
+                nodes: [],
+                edges: []
+            )
+            message = "Запускаю \(app)…"
+        }
         // Convention: `explore-resume` relaunches after the first one. A fresh
         // full login on every relaunch hammers the auth backend into
         // throttling; the resume profile reuses the session instead.
@@ -583,6 +652,30 @@ public final class ExploreController: @unchecked Sendable {
         return try? Data(contentsOf: directory.appendingPathComponent("shots/\(node).png"))
     }
 
+    /// Records where the user dragged screen cards. Merges rather than
+    /// replaces: only the cards that moved arrive, and two open tabs must not
+    /// wipe each other's placements. Positions of screens the store no longer
+    /// knows are dropped so the file cannot grow forever.
+    @discardableResult
+    public func saveLayout(_ positions: [String: ExploreNodePosition]) throws -> ExploreLayout {
+        lock.lock()
+        defer { lock.unlock() }
+        loadNewestRunLocked()
+        loadLayoutLocked()
+        var merged = layout.positions
+        for (id, position) in positions { merged[id] = position }
+        if let known = graph?.nodes, !known.isEmpty {
+            let ids = Set(known.map(\.id))
+            merged = merged.filter { ids.contains($0.key) }
+        }
+        let next = ExploreLayout(schemaVersion: 1, positions: merged)
+        try FileManager.default.createDirectory(at: configuration.root, withIntermediateDirectories: true)
+        try JSON.encoder.encode(next).write(to: layoutFile, options: [.atomic])
+        layout = next
+        layoutSignature = layoutFileSignature()
+        return next
+    }
+
     /// Stops the crawler when the server shuts down.
     public func shutdown() {
         lock.lock()
@@ -618,38 +711,77 @@ public final class ExploreController: @unchecked Sendable {
         ISO8601DateFormatter().string(from: Date())
     }
 
-    /// Shows the newest run on disk whenever no crawl of our own is in flight:
-    /// the map survives a server restart, and a run someone else is writing —
-    /// an agent performing the cartograph.md pass — grows on the canvas live
+    /// Shows the store on disk whenever no crawl of our own is in flight: the
+    /// map survives a server restart, and a store someone else is writing — an
+    /// agent performing the cartograph.md pass — grows on the canvas live
     /// instead of appearing after a restart.
     private func loadNewestRunLocked() {
         guard !running else { return }
-        let directories = (try? FileManager.default.contentsOfDirectory(
-            at: configuration.root,
-            includingPropertiesForKeys: nil
-        )) ?? []
-        for directory in directories.sorted(by: { $0.lastPathComponent > $1.lastPathComponent }) {
-            let file = directory.appendingPathComponent("graph.json")
-            guard let modified = (try? FileManager.default.attributesOfItem(atPath: file.path))?[.modificationDate] as? Date else {
-                continue
-            }
-            let signature = "\(directory.lastPathComponent)|\(modified.timeIntervalSince1970)"
-            if signature == loadedRunSignature { return }
-            // A decode failure here is a run mid-write (a torn graph.json):
-            // keep showing what we have — falling through to an older run
-            // would flash the previous map — and retry on the next poll.
-            guard let data = try? Data(contentsOf: file),
-                  let loaded = try? JSON.decoder.decode(ExploreGraph.self, from: data) else { return }
-            loadedRunSignature = signature
-            // Re-reading the run we just finished must not clobber its
-            // closing note ("Готово: … экранов …").
-            let isNewRun = loaded.run.id != runId
-            graph = loaded
-            runId = loaded.run.id
-            runDirectory = directory
-            if isNewRun { message = "Показан прогон \(loaded.run.id)" }
+        migrateLegacyRunsLocked()
+        let file = configuration.root.appendingPathComponent("graph.json")
+        guard let modified = (try? FileManager.default.attributesOfItem(atPath: file.path))?[.modificationDate] as? Date else {
             return
         }
+        let signature = "graph|\(modified.timeIntervalSince1970)"
+        if signature == loadedRunSignature { return }
+        // A decode failure here is a run mid-write (a torn graph.json): keep
+        // showing what we have and retry on the next poll.
+        guard let loaded = Self.loadGraph(at: configuration.root) else { return }
+        loadedRunSignature = signature
+        // Re-reading the store we just finished writing must not clobber the
+        // closing note ("Готово: … экранов …").
+        let isNewRun = loaded.run.id != runId
+        graph = loaded
+        runId = loaded.run.id
+        runDirectory = configuration.root
+        if isNewRun { message = "Показана карта: \(loaded.nodes.count) экранов" }
+    }
+
+    private var layoutFile: URL {
+        configuration.root.appendingPathComponent("layout.json")
+    }
+
+    private func layoutFileSignature() -> String? {
+        guard let modified = (try? FileManager.default.attributesOfItem(atPath: layoutFile.path))?[.modificationDate] as? Date else {
+            return nil
+        }
+        return "layout|\(modified.timeIntervalSince1970)"
+    }
+
+    /// Decodes `layout.json` when it changed on disk. A missing file is the
+    /// normal state of a map nobody rearranged yet, and a torn read (a save in
+    /// flight) keeps the arrangement we already hold.
+    private func loadLayoutLocked() {
+        guard let signature = layoutFileSignature(), signature != layoutSignature else { return }
+        guard let data = try? Data(contentsOf: layoutFile),
+              let decoded = try? JSON.decoder.decode(ExploreLayout.self, from: data) else { return }
+        layoutSignature = signature
+        layout = decoded
+    }
+
+    private static func loadGraph(at directory: URL) -> ExploreGraph? {
+        guard let data = try? Data(contentsOf: directory.appendingPathComponent("graph.json")) else { return nil }
+        return try? JSON.decoder.decode(ExploreGraph.self, from: data)
+    }
+
+    /// The store used to be one directory per run. Adopt the newest run as the
+    /// single store (its map is the freshest picture of the app) and drop the
+    /// rest — they are regenerable crawl artifacts, not history worth keeping.
+    private func migrateLegacyRunsLocked() {
+        let manager = FileManager.default
+        let store = configuration.root.appendingPathComponent("graph.json")
+        let legacyRuns = ((try? manager.contentsOfDirectory(at: configuration.root, includingPropertiesForKeys: nil)) ?? [])
+            .filter { manager.fileExists(atPath: $0.appendingPathComponent("graph.json").path) }
+            .sorted { $0.lastPathComponent > $1.lastPathComponent }
+        guard !legacyRuns.isEmpty else { return }
+        if !manager.fileExists(atPath: store.path), let newest = legacyRuns.first {
+            try? manager.moveItem(
+                at: newest.appendingPathComponent("shots", isDirectory: true),
+                to: configuration.root.appendingPathComponent("shots", isDirectory: true)
+            )
+            try? manager.moveItem(at: newest.appendingPathComponent("graph.json"), to: store)
+        }
+        for legacy in legacyRuns { try? manager.removeItem(at: legacy) }
     }
 
     // MARK: crawl loop
@@ -669,22 +801,44 @@ public final class ExploreController: @unchecked Sendable {
             return
         }
 
+        // Resume from the store: previous runs' nodes and edges are the
+        // starting map; their persisted screen keys and tried actions let this
+        // run attach to known screens and continue the frontier instead of
+        // re-mapping from scratch.
+        lock.lock()
+        let resumed = graph
+        lock.unlock()
         var screens: [String: ScreenState] = [:]
-        var nodes: [ExploreScreenNode] = []
+        var nodes: [ExploreScreenNode] = resumed?.nodes ?? []
         /// Fingerprint → index in `nodes`. Many-to-one: every structural state
         /// of a screen points at the screen's single canvas node.
         var nodeIndex: [String: Int] = [:]
         /// Screen key → index in `nodes` — what makes a later state of a known
         /// screen land on the existing node instead of minting a duplicate.
         var nodeIndexByKey: [String: Int] = [:]
-        var edges: [ExploreTransitionEdge] = []
+        for (index, node) in nodes.enumerated() {
+            nodeIndex[node.fingerprint] = index
+            nodeIndexByKey[node.key ?? node.fingerprint] = index
+        }
+        var edges: [ExploreTransitionEdge] = resumed?.edges ?? []
         var edgeIndex: [String: Int] = [:]
+        for (index, edge) in edges.enumerated() {
+            edgeIndex["\(edge.from)→\(edge.to)→\(edge.action.kind)|\(edge.action.targetId ?? edge.action.targetLabel ?? "")"] = index
+        }
         /// The node each node was first reached from (node-id space, so any
         /// state of the origin screen counts). A tap that lands back on it is
         /// a return, whatever the button was called.
         var arrivedFrom: [String: String] = [:]
         var steps = 0
         var relaunches = 0
+        /// Published stats stay cumulative across runs; budgets meter this run.
+        let priorSteps = resumed?.stats.steps ?? 0
+        let priorRelaunches = resumed?.stats.relaunches ?? 0
+        let priorScreens = nodes.count
+        /// Node ids whose screenshot was already retaken this run: every screen
+        /// the run reaches gets one fresh shot, so the store's pictures track
+        /// the app as it is now.
+        var refreshedShots: Set<String> = []
         /// The launched app's own accessibility label, captured at launch:
         /// a snapshot rooted in anything else means a tap left the app.
         var expectedApp: String?
@@ -709,17 +863,33 @@ public final class ExploreController: @unchecked Sendable {
             if let text { message = text }
             graph?.nodes = nodes
             graph?.edges = descents
-            graph?.stats = ExploreStats(screens: nodes.count, transitions: descents.count, steps: steps, relaunches: relaunches)
+            graph?.stats = ExploreStats(
+                screens: nodes.count,
+                transitions: descents.count,
+                steps: priorSteps + steps,
+                relaunches: priorRelaunches + relaunches
+            )
             let snapshot = graph
             lock.unlock()
             guard let snapshot, let data = try? JSON.data(snapshot, pretty: true) else { return }
             try? data.write(to: directory.appendingPathComponent("graph.json"), options: [.atomic])
         }
 
-        /// Records the screen a snapshot shows, screenshotting it on first
-        /// sight, and returns its fingerprint. A new state of a known screen
-        /// (same screen key, different structure) joins the existing node —
-        /// only its actions extend the crawl frontier.
+        /// Retakes a node's screenshot once per run, so the store's pictures
+        /// track the app as it is now instead of freezing at first discovery.
+        func refreshShot(_ nodeId: String) async {
+            guard !refreshedShots.contains(nodeId) else { return }
+            refreshedShots.insert(nodeId)
+            if let png = try? await SimulatorScreenshotClient.png(deviceUDID: configuration.device.udid, maxDimension: 700) {
+                try? png.write(to: directory.appendingPathComponent("shots/\(nodeId).png"), options: [.atomic])
+            }
+        }
+
+        /// Records the screen a snapshot shows and returns its fingerprint. A
+        /// new state of a known screen (same screen key, different structure)
+        /// joins the existing node — only its actions extend the crawl
+        /// frontier. Screens persisted by previous runs attach the same way,
+        /// seeded with the actions they already tried.
         func record(_ snapshot: [AccessibilityFlatNode], depth: Int) async -> String {
             let fingerprint = ExploreEngine.fingerprint(of: snapshot)
             if var known = screens[fingerprint] {
@@ -728,29 +898,47 @@ public final class ExploreController: @unchecked Sendable {
                 if let index = nodeIndex[fingerprint] {
                     nodes[index].visits += 1
                     nodes[index].depth = min(nodes[index].depth, known.depth)
+                    await refreshShot(nodes[index].id)
                 }
                 return fingerprint
             }
             let actions = ExploreEngine.actions(from: snapshot)
             let key = ExploreEngine.screenKey(of: snapshot) ?? fingerprint
             let localizationKeys = localization.keys(forLabels: ExploreEngine.contentLabels(of: snapshot))
-            if let index = nodeIndexByKey[key] {
-                screens[fingerprint] = ScreenState(nodeId: nodes[index].id, depth: depth, actions: actions)
+            if let index = nodeIndex[fingerprint] ?? nodeIndexByKey[key] {
+                // A fingerprint the store already carries is a revisit of a
+                // known state, not a new one — only a genuinely new structure
+                // of the screen grows the state and action counters.
+                let isNewState = nodeIndex[fingerprint] == nil
+                screens[fingerprint] = ScreenState(
+                    nodeId: nodes[index].id,
+                    depth: depth,
+                    actions: actions,
+                    triedKeys: Set(nodes[index].triedActionKeys ?? [])
+                )
                 nodeIndex[fingerprint] = index
-                nodes[index].states = (nodes[index].states ?? 1) + 1
+                nodeIndexByKey[key] = index
+                // Stores from before schema 2 carry no key — adopt this one, so
+                // the next run can match the screen even if its structure moved.
+                if nodes[index].key == nil { nodes[index].key = key }
+                if isNewState {
+                    nodes[index].states = (nodes[index].states ?? 1) + 1
+                    nodes[index].actionsTotal += actions.count
+                }
                 nodes[index].visits += 1
                 nodes[index].depth = min(nodes[index].depth, depth)
-                nodes[index].actionsTotal += actions.count
                 var mergedKeys = nodes[index].localizationKeys ?? []
                 for key in localizationKeys where !mergedKeys.contains(key) && mergedKeys.count < 30 {
                     mergedKeys.append(key)
                 }
                 nodes[index].localizationKeys = mergedKeys.isEmpty ? nil : mergedKeys
+                await refreshShot(nodes[index].id)
                 return fingerprint
             }
             let nodeId = "s-\(fingerprint.prefix(10))"
             screens[fingerprint] = ScreenState(nodeId: nodeId, depth: depth, actions: actions)
             let shot = "shots/\(nodeId).png"
+            refreshedShots.insert(nodeId)
             if let png = try? await SimulatorScreenshotClient.png(deviceUDID: configuration.device.udid, maxDimension: 700) {
                 try? png.write(to: directory.appendingPathComponent(shot), options: [.atomic])
             }
@@ -758,6 +946,7 @@ public final class ExploreController: @unchecked Sendable {
                 id: nodeId,
                 title: ExploreEngine.title(for: snapshot, fallback: "Экран \(fingerprint.prefix(6))"),
                 fingerprint: fingerprint,
+                key: key,
                 screenshot: shot,
                 depth: depth,
                 visits: 1,
@@ -765,6 +954,7 @@ public final class ExploreController: @unchecked Sendable {
                 actionsTotal: actions.count,
                 actionsTried: 0,
                 firstSeenAt: Self.timestamp(),
+                triedActionKeys: nil,
                 deeplinks: nil,
                 localizationKeys: localizationKeys.isEmpty ? nil : localizationKeys
             ))
@@ -798,6 +988,10 @@ public final class ExploreController: @unchecked Sendable {
                 nodes[index].actionsTried = screens.values
                     .filter { $0.nodeId == nodeId }
                     .reduce(0) { $0 + $1.triedKeys.count }
+                // Persisted so the next run continues the frontier here.
+                var persisted = Set(nodes[index].triedActionKeys ?? [])
+                persisted.insert(key)
+                nodes[index].triedActionKeys = persisted.sorted()
             }
         }
 
@@ -848,7 +1042,9 @@ public final class ExploreController: @unchecked Sendable {
         }
 
         func budgetsExhausted() -> Bool {
-            steps >= budgets.maxSteps || nodes.count >= budgets.maxScreens || Date() >= budgets.deadline
+            // Budgets meter this run's own work: a resumed store full of
+            // screens must not exhaust the screen budget on arrival.
+            steps >= budgets.maxSteps || nodes.count - priorScreens >= budgets.maxScreens || Date() >= budgets.deadline
         }
 
         do {
@@ -959,46 +1155,36 @@ public final class ExploreController: @unchecked Sendable {
                 }
                 if !anyUntriedRemains() { break passes }
             }
-            // Deeplink probing. Routes are mined from the project's own source
-            // (every `scheme://…` literal, schemes read from the installed
-            // bundle's Info.plist); the config's curated list rides along.
-            // A fresh launch before *each* probe: the app's router ignores a
-            // deeplink while a previous probe's screen still tops the stack,
-            // and the URL would then be attributed to that stale screen.
+            // Deeplink attribution — static, nothing is ever opened. Routes
+            // are mined from the project's own source (every `scheme://…`
+            // literal, schemes read from the installed bundle's Info.plist;
+            // the config's curated list rides along) and matched against the
+            // names of the screens the taps discovered. Probing used to open
+            // each URL after a relaunch, and every landing minted an orphan
+            // node — a screen on the map that no tap reaches, often a
+            // duplicate of a charted one in a different structural state.
+            // An unmatched route stays unattributed instead.
             if !Task.isCancelled {
-                var links = configuration.deeplinks
+                publish("Ищу диплинки в исходниках…")
+                var links = configuration.deeplinks.map(\.url)
                 if let projectRoot = configuration.projectRoot {
-                    publish("Ищу диплинки в исходниках…")
                     let schemes = await installedAppSchemes(bundleId: app)
                     for url in DeeplinkHarvest.harvest(projectRoot: projectRoot, schemes: schemes)
-                    where !links.contains(where: { $0.url == url }) {
-                        links.append(ProjectConfig.Deeplink(name: url, url: url))
+                    where !links.contains(url) {
+                        links.append(url)
                     }
                 }
-                for (index, link) in links.prefix(24).enumerated() {
-                    guard !Task.isCancelled else { break }
-                    publish("Диплинк \(index + 1)/\(min(links.count, 24)): \(link.url)…")
-                    guard (try? await launch(app: app, profile: resumeProfile ?? profile)) != nil,
-                          let baseline = (try? await settledSnapshot(stableReads: 8)) ?? nil else { continue }
-                    guard (try? await SimulatorDeeplinkClient.open(
-                        name: link.name, url: link.url, device: configuration.device
-                    )) != nil else { continue }
-                    guard let after = (try? await settledSnapshot()) ?? nil else { continue }
-                    if let expectedApp, ExploreEngine.applicationLabel(of: after) != expectedApp { continue }
-                    // Landing on the post-launch screen unchanged means the
-                    // router ignored the URL (missing arguments, disabled
-                    // route) — attributing it would pin bogus deeplinks on
-                    // the start screen.
-                    guard ExploreEngine.fingerprint(of: after) != ExploreEngine.fingerprint(of: baseline) else { continue }
-                    let fingerprint = await record(after, depth: 1)
-                    guard let nodePosition = nodeIndex[fingerprint] else { continue }
-                    var known = nodes[nodePosition].deeplinks ?? []
-                    if !known.contains(link.url) {
-                        known.append(link.url)
-                        nodes[nodePosition].deeplinks = known
-                    }
-                    publish("Диплинк \(link.url) → \(nodes[nodePosition].title)")
+                let names = nodes.map(\.title)
+                var attributed = 0
+                for url in links {
+                    guard let index = DeeplinkHarvest.screenIndex(for: url, inNames: names) else { continue }
+                    var known = nodes[index].deeplinks ?? []
+                    guard !known.contains(url) else { continue }
+                    known.append(url)
+                    nodes[index].deeplinks = known
+                    attributed += 1
                 }
+                if attributed > 0 { publish("Диплинки из исходников: привязано \(attributed)") }
             }
             let reason: String
             if Task.isCancelled { reason = "Остановлено пользователем." }
