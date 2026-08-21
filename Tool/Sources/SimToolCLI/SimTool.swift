@@ -1380,7 +1380,16 @@ struct TestCommand: AsyncParsableCommand {
                         evidence: options.evidence,
                         profiles: projectConfig?.profiles ?? [],
                         defaultApp: projectConfig?.bundleId,
-                        appFacingServerURL: projectConfig?.appFacingServerURL,
+                        // Where the app posts is the server this run actually
+                        // talks to — `--server`, or a session started on a port
+                        // that overrode the config. Arming the app against the
+                        // file's port points it at nothing.
+                        appFacingServerURL: projectConfig.map { config in
+                            guard let host = client.baseURL.host,
+                                  let port = client.baseURL.port.flatMap(UInt16.init(exactly:))
+                            else { return config.appFacingServerURL }
+                            return ProjectConfig.appFacingServerURL(host: host, port: port)
+                        },
                         projectRoot: projectConfig.map { URL(fileURLWithPath: $0.projectRoot) },
                         variableOverrides: overrides,
                         prepareApp: options.appPreparation(config: projectConfig, client: client)
@@ -1915,7 +1924,10 @@ func runViewer(
         // Web-triggered runs stage a scenario exactly like the CLI does, so the
         // server needs the same launch profiles and logger wiring.
         profiles: projectConfig?.profiles ?? [],
-        appFacingServerURL: projectConfig?.appFacingServerURL,
+        // The port this server actually bound, not the one the config names:
+        // `--port` overrides the file, and an app armed against the file's port
+        // waits for a server that is not there.
+        appFacingServerURL: ProjectConfig.appFacingServerURL(host: host, port: port),
         projectRoot: projectConfig?.simtoolDirectory.deletingLastPathComponent(),
         deeplinks: projectConfig?.deeplinks ?? []
     )

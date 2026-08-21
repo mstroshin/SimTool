@@ -198,6 +198,23 @@ public final class StreamServer: @unchecked Sendable {
             }
         }
 
+        // Naming runs against the stored map: no crawl, no simulator. The tool
+        // never asks a model for a name — it hands an agent the groups and the
+        // raw material, and takes the answers back here.
+        server.GET["/api/v1/explore/groups"] = { _ in
+            do { return try self.jsonEncodedResponse(self.explorer.namingGroups()) }
+            catch { return self.errorResponse(error) }
+        }
+
+        server.POST["/api/v1/explore/groups"] = { request in
+            do {
+                let body = try self.decodeJSON(ExploreGroupNamesRequest.self, from: request)
+                return try self.jsonEncodedResponse(try self.explorer.saveGroupNames(body.names))
+            } catch {
+                return self.errorResponse(error, statusCode: 400, reason: "Bad Request")
+            }
+        }
+
         server.GET["/api/v1/explore/shot"] = { request in
             guard let node = request.queryValue("node"), let data = self.explorer.shotData(node: node) else {
                 return self.errorResponse(SimToolError("No screenshot for that node"), statusCode: 404, reason: "Not Found")

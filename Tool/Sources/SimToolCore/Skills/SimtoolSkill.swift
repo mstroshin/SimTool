@@ -464,7 +464,10 @@ extension AgentSkill {
           keep it from re-tapping what previous runs already tried. Deeplinks it
           annotates the way this pass does — mined from the source and matched to
           screen names, never opened — so a screen enters the map only when a tap
-          reaches it.
+          reaches it. Every pass of it starts with a cold launch; when the session
+          on screen was staged by hand (a popup dismissed, a login done, a screen
+          navigated to), pass `{"fromCurrentScreen": true}` so the first pass
+          crawls that state instead of relaunching over it.
         - **The agent pass** — this document. *You* drive the app with simtool
           primitives and modify the store yourself. Use it when the blind crawl
           is not enough: you can name screens properly, attribute deeplinks by reading
@@ -645,6 +648,53 @@ extension AgentSkill {
         - Edge — required: `id`, `from`, `to`, `action` (`kind` plus optional
           `targetId`/`targetLabel` — the tab renders them as the arrow label), `count`.
         - Update `stats` as you go; when the pass ends, set `run.finishedAt`.
+        - `groups` and `entryPoint` are written by simtool, not by you: it splits the
+          map into feature flows at its forks — a screen offering several ways forward
+          is where the user chooses a feature, and everything behind one of its
+          buttons is that feature's flow — and marks a screen no transition leads
+          into. Do not hand-author them — record accurate edges and the flows follow.
+
+        ## Naming the feature groups
+
+        The canvas splits the map into feature flows and lets one be opened on its
+        own. A flow is keyed by the id of the screen it opens at (`s-topup-card`),
+        which is stable but reads like plumbing. Giving the flows human names is a
+        job for you: simtool has no model of its own, it only hands you the groups
+        and takes the answers back.
+
+        Run this **after** a pass, or against a map somebody else recorded — it needs
+        neither a crawl in flight nor a booted simulator.
+
+        1. `GET /api/v1/explore/groups` — the groups worth naming (flows too small to
+           draw a sequence are left out). Each carries `key`, `members`, `entry`,
+           `bridges`, and `candidates`.
+        2. `candidates` is raw material, strongest first: the words on the fork
+           buttons that open the flow, then the screens' own names, then the longest
+           localization-key prefix the flow's screens share.
+           Look at the entry screen too —
+           `GET /api/v1/explore/shot?node=<entry>`. It often shows the product's own
+           wording for the section, which no type name carries.
+        3. `POST /api/v1/explore/groups` with `{"names": {"<key>": "<name>", …}}`.
+
+        Four rules, all of which the endpoint or the reader will hold you to:
+
+        - **Name the whole set in one call.** Two flows can hang off buttons with the
+          same word — «Card» opens both a top-up and a transfer — and only a namer who
+          sees them together can tell them apart. A set where two names collide is
+          rejected whole, naming the offending keys.
+        - **Use the app's own words, do not translate.** If the screen says
+          `Bill pay`, the name is `Bill pay` — not its translation. Product names
+          (`Plata+`) stay as they are.
+        - **Name the section, not the screen you landed on.** `Credit account ·
+          −MXN 1.127.677` is a card with a balance in it; the group is `Credit account`.
+        - **Do not invent.** Every name should be traceable to something the app
+          displays or a screen is called. When nothing suggests a name, leave the group
+          out of the call — it keeps showing its strongest candidate, which is honest.
+
+        Names are stored in `.simtool/explore/groups.json`, keyed by group, and survive
+        both further crawls and a restart. A group whose membership later changes
+        beyond recognition is flagged `staleName` and worth re-naming; one that merely
+        gained a screen is not. An empty string clears a name.
 
         """#
 }

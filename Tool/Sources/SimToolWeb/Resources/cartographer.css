@@ -46,6 +46,30 @@ header { flex: 0 0 auto; display: flex; align-items: center; gap: 14px; padding:
 .search-step:hover:not(:disabled) { background: rgba(125,211,252,0.2); color: #f4f7fb; }
 .search-step:disabled { opacity: 0.3; cursor: default; }
 .search-hint { font-size: 11px; color: rgba(244,247,251,0.5); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.search-elsewhere { appearance: none; border: 0; border-radius: 6px; padding: 4px 8px; background: rgba(251,191,36,0.16); color: #fde68a; font-size: 11px; cursor: pointer; white-space: nowrap; }
+.search-elsewhere:hover { background: rgba(251,191,36,0.28); }
+
+/* Switching between the whole map and one feature — the whole map is the first
+   chip, so going back is the same gesture as going anywhere else. */
+.groups { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; max-width: 640px; }
+.group-chip { appearance: none; display: inline-flex; align-items: center; gap: 5px; border: 1px solid rgba(255,255,255,0.12); border-radius: 999px; padding: 4px 9px; background: rgba(13,20,40,0.94); color: rgba(244,247,251,0.8); font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; cursor: pointer; }
+.group-chip:hover:not(:disabled) { border-color: rgba(125,211,252,0.55); color: #f4f7fb; }
+.group-chip.active { border-color: #7dd3fc; background: rgba(125,211,252,0.16); color: #e0f2fe; }
+.group-chip:disabled { opacity: 0.45; cursor: default; }
+.group-chip.inline { margin: 0 4px 4px 0; }
+.group-chip.hit { border-color: rgba(251,191,36,0.55); color: #fde68a; }
+.group-count { font-size: 10px; color: rgba(244,247,251,0.5); }
+.group-chip.active .group-count { color: #bae6fd; }
+/* Names come from an agent and cannot be corrected by hand, so the key it was
+   given for stays in view: a chip that reads wrong is still diagnosable. */
+.group-key { font-size: 9px; color: rgba(244,247,251,0.38); }
+.group-chip.active .group-key { color: rgba(224,242,254,0.6); }
+.group-chip.stale { border-style: dashed; }
+
+/* A bridge is the way into the flow, not part of it: the fork screen whose
+   button opens it must never read as one of the flow's own screens. */
+.react-flow__node.bridge .screen-node { border-style: dashed; border-color: rgba(255,255,255,0.22); opacity: 0.72; }
+.bridge-tag { margin-left: 6px; padding: 1px 5px; border-radius: 999px; background: rgba(255,255,255,0.1); color: rgba(244,247,251,0.65); font-size: 9px; }
 /* A query rules a card out (dimmed), keeps it (match), or is parked on it (current) */
 .react-flow__node.dimmed { opacity: 0.2; }
 .react-flow__node.match .screen-node { border-color: rgba(251,191,36,0.55); box-shadow: 0 10px 26px rgba(0,0,0,0.45); }

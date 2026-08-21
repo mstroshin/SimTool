@@ -2,7 +2,10 @@ import CryptoKit
 import Foundation
 import SimToolCore
 
-private extension String {
+/// Shared across the explore files: the map's own text — a button's word, a
+/// screen's title, a bundle's display name — is absent as often as it is empty,
+/// and every reader of it wants those to be the same thing.
+extension String {
     var nilIfEmpty: String? { isEmpty ? nil : self }
 }
 
@@ -54,12 +57,28 @@ public struct ExploreScreenNode: Codable, Sendable {
     /// Action keys already tried on this screen, persisted so the next run
     /// continues the frontier instead of re-tapping everything from scratch.
     public var triedActionKeys: [String]?
+    /// Every action key ever catalogued on this screen, across its states and
+    /// across runs. The counters above sum per state, so the same button in
+    /// two states of one screen counts twice in `actionsTotal` and once in
+    /// `actionsTried` — comparing them says nothing. These two key sets are
+    /// comparable, which is what "this screen still has untried taps" needs.
+    /// Nil in graphs recorded before the keys were kept.
+    public var actionKeys: [String]?
     /// Routes mined from the project source whose tokens name this screen.
     /// Attributed statically — the crawl never opens a deeplink.
     public var deeplinks: [String]?
     /// Localization keys whose values match this screen's visible strings,
     /// reverse-looked-up in the project checkout.
     public var localizationKeys: [String]?
+    /// Keys of the flows this screen belongs to — each the id of the screen
+    /// that flow opens at — derived from the map's forks. A screen several
+    /// features share carries all of theirs. Nil in maps recorded before
+    /// screens were grouped.
+    public var groups: [String]?
+    /// True when no transition leads into this screen — it was recorded on
+    /// launch or after a relaunch rather than reached by a tap. Nil rather
+    /// than false so the field stays out of every other node's JSON.
+    public var entryPoint: Bool?
 }
 
 public struct ExploreTransitionAction: Codable, Sendable, Equatable {
@@ -115,19 +134,26 @@ public struct ExploreStartRequest: Codable, Sendable {
     public var maxScreens: Int?
     public var maxSteps: Int?
     public var budgetMinutes: Int?
+    /// Start from the screen the simulator is already showing instead of
+    /// launching the app first. For a session someone staged by hand — a popup
+    /// dismissed, a login done, a screen navigated to — where the usual cold
+    /// launch would throw that state away. Later passes launch as always.
+    public var fromCurrentScreen: Bool?
 
     public init(
         app: String? = nil,
         profile: String? = nil,
         maxScreens: Int? = nil,
         maxSteps: Int? = nil,
-        budgetMinutes: Int? = nil
+        budgetMinutes: Int? = nil,
+        fromCurrentScreen: Bool? = nil
     ) {
         self.app = app
         self.profile = profile
         self.maxScreens = maxScreens
         self.maxSteps = maxSteps
         self.budgetMinutes = budgetMinutes
+        self.fromCurrentScreen = fromCurrentScreen
     }
 }
 
@@ -151,6 +177,10 @@ public struct ExploreStatusPayload: Codable, Sendable {
     /// The saved canvas arrangement, so opening the tab restores the map the
     /// way the user left it without a second request.
     public var layout: ExploreLayout?
+    /// The groups the map's screens fall into, coarse level first and by size
+    /// within a level. Derived from the graph on every read rather than stored
+    /// with it, so a map recorded before grouping existed still gets them.
+    public var groups: [ExploreGroup]?
 }
 
 // MARK: - Engine (pure, unit-testable)
@@ -220,6 +250,21 @@ public enum ExploreEngine {
 
     /// The most taps one screen state may claim from the step budget.
     public static let maxActionsPerState = 24
+
+    /// Whether the screen still offers taps nobody has made — the difference
+    /// between a screen the map has finished with and one it merely reached.
+    ///
+    /// Read from the key sets when the store carries them, because those are
+    /// comparable; a store written before the keys were kept leaves only the
+    /// old per-state sums, where the total can even sit below the tried count,
+    /// so there the answer is "assume there is work left" rather than a
+    /// comparison that means nothing.
+    public static func hasUntriedActions(_ node: ExploreScreenNode) -> Bool {
+        guard let catalogued = node.actionKeys else {
+            return node.actionsTried != node.actionsTotal
+        }
+        return !Set(catalogued).subtracting(node.triedActionKeys ?? []).isEmpty
+    }
 
     static let backTokens = ["back", "close", "dismiss", "cancel", "назад", "закрыть", "отмена", "отменить", "chevron.backward", "xmark"]
 
@@ -553,14 +598,19 @@ public final class ExploreController: @unchecked Sendable {
         defer { lock.unlock() }
         loadNewestRunLocked()
         loadLayoutLocked()
+        // Grouping is derived, not stored: computing it here rather than only
+        // at crawl time means a map recorded by an earlier version lights up
+        // with feature groups on the next poll, without being re-walked.
+        let grouped = graph.map { ExploreGrouping.annotatedWithGroups($0, names: loadNamesLocked()) }
         return ExploreStatusPayload(
             running: running,
             runId: runId,
             app: graph?.run.app ?? configuration.defaultApp,
             message: message,
             error: lastError,
-            graph: graph,
-            layout: layout
+            graph: grouped?.graph,
+            layout: layout,
+            groups: grouped?.groups
         )
     }
 
@@ -623,7 +673,8 @@ public final class ExploreController: @unchecked Sendable {
                 profile: profile,
                 resumeProfile: resumeProfile,
                 directory: directory,
-                budgets: budgets
+                budgets: budgets,
+                fromCurrentScreen: request.fromCurrentScreen ?? false
             )
         }
         lock.unlock()
@@ -674,6 +725,77 @@ public final class ExploreController: @unchecked Sendable {
         layout = next
         layoutSignature = layoutFileSignature()
         return next
+    }
+
+    // MARK: group names
+
+    private var namesFile: URL {
+        configuration.root.appendingPathComponent("groups.json")
+    }
+
+    private func loadNamesLocked() -> ExploreGroupNames {
+        guard let data = try? Data(contentsOf: namesFile),
+              let decoded = try? JSON.decoder.decode(ExploreGroupNames.self, from: data) else {
+            return ExploreGroupNames()
+        }
+        return decoded
+    }
+
+    /// The groups an agent is asked to name: only the ones a person can pick,
+    /// each with the raw material for a name and the screenshot of the screen
+    /// it opens at. Reads the store off disk, so naming needs neither a crawl
+    /// in flight nor a booted simulator.
+    public func namingGroups() -> [ExploreGroup] {
+        lock.lock()
+        defer { lock.unlock() }
+        loadNewestRunLocked()
+        guard let graph else { return [] }
+        // Grouping reads the map's edges and counters, none of which annotating
+        // touches, so the raw store answers this without a second pass over it.
+        return ExploreGrouping.groups(of: graph, names: loadNamesLocked()).filter(\.displayable)
+    }
+
+    /// Records names for several groups at once.
+    ///
+    /// A set at a time, not one group per call: two groups can open at the same
+    /// screen, and only a namer looking at all of them together can tell them
+    /// apart. The whole set is rejected when any two labels collide — with
+    /// nothing to correct by hand, an ambiguous chip has no way back.
+    @discardableResult
+    public func saveGroupNames(_ requested: [String: String]) throws -> [ExploreGroup] {
+        lock.lock()
+        defer { lock.unlock() }
+        loadNewestRunLocked()
+        guard let graph else { throw SimToolError("No map to name groups in") }
+        // Walked once: splitting the map costs a reachability pass per screen,
+        // and asking for it again per name in the request made a set of twenty
+        // do the same work twenty times over.
+        let flows = ExploreGrouping.groups(of: graph)
+        let known = Set(flows.map(\.key))
+        if let unknown = requested.keys.first(where: { !known.contains($0) }) {
+            throw SimToolError("No group named \(unknown) in this map")
+        }
+
+        let membersByKey = Dictionary(flows.map { ($0.key, $0.members) }, uniquingKeysWith: { first, _ in first })
+        var stored = loadNamesLocked()
+        for (key, name) in requested {
+            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { stored.names[key] = nil; continue }
+            stored.names[key] = ExploreGroupName(name: trimmed, members: membersByKey[key] ?? [])
+        }
+
+        // Collisions are judged over what would be shown, not just over what
+        // this call sent: a new name can clash with one already on the panel.
+        let displayable = Set(flows.filter(\.displayable).map(\.key))
+        let shown = stored.names.filter { displayable.contains($0.key) }.mapValues(\.name)
+        let conflicts = ExploreGroupNaming.conflicts(in: shown)
+        guard conflicts.isEmpty else {
+            throw SimToolError("Groups would share a name: \(conflicts.joined(separator: ", "))")
+        }
+
+        try FileManager.default.createDirectory(at: configuration.root, withIntermediateDirectories: true)
+        try JSON.encoder.encode(stored).write(to: namesFile, options: [.atomic])
+        return ExploreGrouping.named(flows, with: stored).filter(\.displayable)
     }
 
     /// Stops the crawler when the server shuts down.
@@ -791,7 +913,8 @@ public final class ExploreController: @unchecked Sendable {
         profile: LaunchProfile?,
         resumeProfile: LaunchProfile?,
         directory: URL,
-        budgets: Budgets
+        budgets: Budgets,
+        fromCurrentScreen: Bool = false
     ) async {
         let shotsDirectory = directory.appendingPathComponent("shots", isDirectory: true)
         do {
@@ -839,9 +962,29 @@ public final class ExploreController: @unchecked Sendable {
         /// the run reaches gets one fresh shot, so the store's pictures track
         /// the app as it is now.
         var refreshedShots: Set<String> = []
-        /// The launched app's own accessibility label, captured at launch:
-        /// a snapshot rooted in anything else means a tap left the app.
-        var expectedApp: String?
+        /// The names the launched app may present as its accessibility root.
+        /// Seeded from the installed bundle, because the first snapshot cannot
+        /// be trusted to vouch for itself: a launch that silently failed
+        /// settles on the iOS home screen, and accepting it made the crawl map
+        /// SpringBoard — its icons and app switcher — as if it were the app.
+        /// Every name the bundle carries counts, not just `Info.plist`'s: the
+        /// root label is the *localized* display name, so a Spanish app checked
+        /// against the base name would reject its own launch and the whole
+        /// crawl with it. Narrowed to the one observed name once a launch is
+        /// confirmed, so a later hop out of the app is still caught.
+        var expectedApp: Set<String> = await installedAppDisplayNames(bundleId: app)
+        /// The root label of the last screen that settled, so a launch nothing
+        /// matched can say what it saw instead of only that it failed.
+        var lastSettledLabel: String?
+        /// Whether a settled screen belongs to the app under exploration.
+        /// Undecidable when the app names itself nowhere — then any screen
+        /// passes, as it did before the launch was checked at all.
+        func isExpectedApp(_ snapshot: [AccessibilityFlatNode]) -> Bool {
+            guard !expectedApp.isEmpty else { return true }
+            guard let label = ExploreEngine.applicationLabel(of: snapshot) else { return false }
+            lastSettledLabel = label
+            return expectedApp.contains { $0.compare(label, options: .caseInsensitive) == .orderedSame }
+        }
         // One scan of the checkout per run: visible strings on every screen
         // reverse-map to the localization keys that mint them.
         let localization = configuration.projectRoot.map(LocalizationIndex.build) ?? .empty
@@ -869,7 +1012,7 @@ public final class ExploreController: @unchecked Sendable {
                 steps: priorSteps + steps,
                 relaunches: priorRelaunches + relaunches
             )
-            let snapshot = graph
+            let snapshot = graph.map(ExploreGrouping.annotated)
             lock.unlock()
             guard let snapshot, let data = try? JSON.data(snapshot, pretty: true) else { return }
             try? data.write(to: directory.appendingPathComponent("graph.json"), options: [.atomic])
@@ -923,8 +1066,8 @@ public final class ExploreController: @unchecked Sendable {
                 if nodes[index].key == nil { nodes[index].key = key }
                 if isNewState {
                     nodes[index].states = (nodes[index].states ?? 1) + 1
-                    nodes[index].actionsTotal += actions.count
                 }
+                catalogue(actions.map(\.key), on: index)
                 nodes[index].visits += 1
                 nodes[index].depth = min(nodes[index].depth, depth)
                 var mergedKeys = nodes[index].localizationKeys ?? []
@@ -951,10 +1094,11 @@ public final class ExploreController: @unchecked Sendable {
                 depth: depth,
                 visits: 1,
                 states: 1,
-                actionsTotal: actions.count,
+                actionsTotal: Set(actions.map(\.key)).count,
                 actionsTried: 0,
                 firstSeenAt: Self.timestamp(),
                 triedActionKeys: nil,
+                actionKeys: Set(actions.map(\.key)).sorted(),
                 deeplinks: nil,
                 localizationKeys: localizationKeys.isEmpty ? nil : localizationKeys
             ))
@@ -982,16 +1126,30 @@ public final class ExploreController: @unchecked Sendable {
             edgeIndex[key] = edges.count - 1
         }
 
+        /// Adds action keys to what the screen is known to offer. Both counters
+        /// a node publishes are sizes of key sets, so "tried" and "total" mean
+        /// the same kind of thing and can be compared — the per-state sums they
+        /// used to be could not (one button in two states counted twice in the
+        /// total and once among the tried, and the total could even end up
+        /// below the tried count).
+        func catalogue(_ keys: [String], on index: Int) {
+            var known = Set(nodes[index].actionKeys ?? [])
+            // A store from before the keys were kept knows only its old total;
+            // the union starts from the keys of the state at hand and grows.
+            known.formUnion(keys)
+            nodes[index].actionKeys = known.sorted()
+            nodes[index].actionsTotal = max(known.count, nodes[index].actionsTried)
+        }
+
         func markTried(_ fingerprint: String, key: String) {
             screens[fingerprint]?.triedKeys.insert(key)
-            if let index = nodeIndex[fingerprint], let nodeId = screens[fingerprint]?.nodeId {
-                nodes[index].actionsTried = screens.values
-                    .filter { $0.nodeId == nodeId }
-                    .reduce(0) { $0 + $1.triedKeys.count }
+            if let index = nodeIndex[fingerprint] {
                 // Persisted so the next run continues the frontier here.
                 var persisted = Set(nodes[index].triedActionKeys ?? [])
                 persisted.insert(key)
                 nodes[index].triedActionKeys = persisted.sorted()
+                nodes[index].actionsTried = persisted.count
+                catalogue([key], on: index)
             }
         }
 
@@ -1009,10 +1167,7 @@ public final class ExploreController: @unchecked Sendable {
         /// frontier sits three taps deeper.
         func descentAction(on fingerprint: String) -> ExploreEngine.Action? {
             guard let state = screens[fingerprint] else { return nil }
-            var hasUntried: Set<String> = []
-            for other in screens.values where other.actions.contains(where: { !other.triedKeys.contains($0.key) }) {
-                hasUntried.insert(other.nodeId)
-            }
+            let hasUntried = nodesWithUntried()
             guard !hasUntried.isEmpty else { return nil }
             var adjacency: [String: [(to: String, action: ExploreTransitionAction)]] = [:]
             for edge in edges {
@@ -1037,8 +1192,39 @@ public final class ExploreController: @unchecked Sendable {
             return nil
         }
 
+        /// Nodes that still hold untried taps: the states this run has walked,
+        /// plus what the store remembers about screens it has not revisited yet.
+        /// Screen states live for one run, the map does not — reading the
+        /// frontier from visited states alone made a resumed run call the map
+        /// finished the moment its start screen was exhausted, while every
+        /// screen one tap deeper still had most of its actions untried.
+        func nodesWithUntried() -> Set<String> {
+            var result: Set<String> = []
+            for state in screens.values
+            where state.actions.contains(where: { !state.triedKeys.contains($0.key) }) {
+                result.insert(state.nodeId)
+            }
+            let visited = Set(screens.values.map(\.nodeId))
+            for node in nodes where !visited.contains(node.id) && ExploreEngine.hasUntriedActions(node) {
+                result.insert(node.id)
+            }
+            return result
+        }
+
         func anyUntriedRemains() -> Bool {
-            screens.values.contains { state in state.actions.contains { !state.triedKeys.contains($0.key) } }
+            !nodesWithUntried().isEmpty
+        }
+
+        /// A close/back control to re-tap on a screen that has nothing untried
+        /// and no path onward. A popup the app raises on every launch (a survey,
+        /// a rate-us sheet) is such a dead end: its own controls were all tried
+        /// in an earlier pass, and the screen it covers is unreachable until it
+        /// is dismissed. Tapping it again is not exploration — it is getting out
+        /// of the way — so it happens once per screen per pass, and the edge
+        /// rules keep the return off the map.
+        func escapeAction(on fingerprint: String) -> ExploreEngine.Action? {
+            guard let state = screens[fingerprint] else { return nil }
+            return state.actions.first { $0.isBack && !$0.isScroll }
         }
 
         func budgetsExhausted() -> Bool {
@@ -1047,6 +1233,13 @@ public final class ExploreController: @unchecked Sendable {
             steps >= budgets.maxSteps || nodes.count - priorScreens >= budgets.maxScreens || Date() >= budgets.deadline
         }
 
+        var attachToCurrentScreen = fromCurrentScreen
+        /// Passes that ended without a single step or new screen. Two in a row
+        /// mean the launch lands on the same worked-out screen every time and
+        /// nothing gets out of it — relaunching a third time would repeat it
+        /// until the budget runs out.
+        var barrenPasses = 0
+        var stalled = false
         do {
             passes: while !Task.isCancelled, !budgetsExhausted(), relaunches < budgets.maxRelaunches {
                 if relaunches > 0, !anyUntriedRemains() { break }
@@ -1058,25 +1251,84 @@ public final class ExploreController: @unchecked Sendable {
                 // settle that lands outside the app (a leftover app switcher
                 // above the fresh launch) does not count as launched.
                 var launched: [AccessibilityFlatNode]?
+                var launchError: String?
+                if attachToCurrentScreen {
+                    // Someone staged this session by hand. Launching would undo
+                    // it, so the first pass starts from what is on screen; if
+                    // the app is not there after all, the launch below runs.
+                    attachToCurrentScreen = false
+                    publish("Продолжаю с текущего экрана: жду стабилизации…")
+                    if let settled = try await settledSnapshot(stableReads: 4), isExpectedApp(settled) {
+                        launched = settled
+                    } else {
+                        publish("На экране не \(app) — запускаю приложение…")
+                    }
+                }
                 for _ in 0..<3 where launched == nil {
-                    try await launch(app: app, profile: relaunches == 1 ? profile : (resumeProfile ?? profile))
+                    do {
+                        try await launch(app: app, profile: relaunches == 1 ? profile : (resumeProfile ?? profile))
+                        launchError = nil
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch {
+                        // simctl reports "did not return a process handle nor
+                        // launch error" for launches that did start the app, so
+                        // the screen below still gets its chance — and a launch
+                        // that truly failed is one retry of this loop, not the
+                        // end of the crawl.
+                        launchError = error.localizedDescription
+                        publish("Запуск \(relaunches) не удался, пробую снова…")
+                    }
                     let settled = try await settledSnapshot(stableReads: 8)
-                    if let settled,
-                       expectedApp == nil || ExploreEngine.applicationLabel(of: settled) == expectedApp {
+                    if let settled, isExpectedApp(settled) {
                         launched = settled
                     }
                 }
                 guard let snapshot = launched else {
-                    finish(error: "Экран не стабилизировался после запуска \(app).")
+                    if let launchError {
+                        finish(error: "Не удалось запустить \(app): \(launchError)")
+                    } else if let lastSettledLabel, !expectedApp.isEmpty {
+                        // The screen did settle — on something that is not the
+                        // app. Naming both sides is the difference between a
+                        // diagnosable mismatch and a dead end.
+                        finish(error: """
+                            После запуска \(app) на экране «\(lastSettledLabel)», \
+                            а ожидалось \(expectedApp.sorted().map { "«\($0)»" }.joined(separator: " или ")).
+                            """)
+                    } else {
+                        finish(error: "Экран не стабилизировался после запуска \(app).")
+                    }
                     return
                 }
-                expectedApp = ExploreEngine.applicationLabel(of: snapshot) ?? expectedApp
+                if let label = ExploreEngine.applicationLabel(of: snapshot) { expectedApp = [label] }
                 var current = await record(snapshot, depth: 0)
                 publish("Стартовый экран: \(nodeTitle(nodes, screens, current))")
+                let stepsAtPassStart = steps
+                let screensAtPassStart = nodes.count
+                var escaped: Set<String> = []
+                /// Steps this pass spent only getting out of the way. They are
+                /// not progress, so a pass that did nothing else still counts
+                /// as barren — otherwise a launch popup whose ✕ leads nowhere
+                /// resets the stall detector on every pass and the crawl burns
+                /// its whole relaunch budget re-tapping it.
+                var escapeSteps = 0
 
                 while !Task.isCancelled, !budgetsExhausted() {
                     let fresh = untriedAction(on: current)
-                    guard let action = fresh ?? descentAction(on: current) else { break }
+                    // One BFS per step: the descent is asked for once and the
+                    // answer reused, both to decide whether an escape is needed
+                    // and as the action to take when it is not.
+                    let descent = fresh == nil ? descentAction(on: current) : nil
+                    var escape: ExploreEngine.Action?
+                    if fresh == nil, descent == nil, !escaped.contains(current) {
+                        escape = escapeAction(on: current)
+                        if escape != nil {
+                            escaped.insert(current)
+                            publish("Экран испробован — закрываю его, чтобы добраться до того, что под ним…")
+                        }
+                    }
+                    guard let action = fresh ?? escape ?? descent else { break }
+                    if escape != nil { escapeSteps += 1 }
                     let isReplay = fresh == nil
                     markTried(current, key: action.key)
                     steps += 1
@@ -1094,7 +1346,7 @@ public final class ExploreController: @unchecked Sendable {
                         _ = try? await SimulatorInputClient.tap(deviceUDID: configuration.device.udid, x: action.x, y: action.y)
                     }
                     guard let after = try await settledSnapshot() else { continue }
-                    if let expectedApp, ExploreEngine.applicationLabel(of: after) != expectedApp {
+                    if !isExpectedApp(after) {
                         // The tap left the app (switcher, external link, crash):
                         // SpringBoard is not part of the map — relaunch instead.
                         publish("Тап увёл из приложения — перезапускаю…")
@@ -1146,12 +1398,21 @@ public final class ExploreController: @unchecked Sendable {
                                 state.actions += revealed
                                 screens[current] = state
                                 if let index = nodeIndex[current] {
-                                    nodes[index].actionsTotal += revealed.count
+                                    catalogue(revealed.map(\.key), on: index)
                                 }
                             }
                         }
                         publish(nil)
                     }
+                }
+                if steps - escapeSteps == stepsAtPassStart, nodes.count == screensAtPassStart {
+                    barrenPasses += 1
+                    if barrenPasses >= 2 {
+                        stalled = true
+                        break passes
+                    }
+                } else {
+                    barrenPasses = 0
                 }
                 if !anyUntriedRemains() { break passes }
             }
@@ -1189,6 +1450,8 @@ public final class ExploreController: @unchecked Sendable {
             let reason: String
             if Task.isCancelled { reason = "Остановлено пользователем." }
             else if budgetsExhausted() { reason = "Бюджет исчерпан." }
+            else if stalled { reason = "Запуск приводит на тот же испробованный экран — дальше идти некуда." }
+            else if relaunches >= budgets.maxRelaunches { reason = "Исчерпан лимит перезапусков." }
             else { reason = "Все доступные действия испробованы." }
             publish(nil)
             finish(error: nil, note: "Готово: \(nodes.count) экранов, \(descentEdges().count) переходов, \(steps) шагов. \(reason)")
@@ -1213,7 +1476,7 @@ public final class ExploreController: @unchecked Sendable {
         if let note { message = note }
         if let error { message = error }
         graph?.run.finishedAt = Self.timestamp()
-        let snapshot = graph
+        let snapshot = graph.map(ExploreGrouping.annotated)
         let directory = runDirectory
         lock.unlock()
         if let snapshot, let directory, let data = try? JSON.data(snapshot, pretty: true) {
@@ -1229,20 +1492,26 @@ public final class ExploreController: @unchecked Sendable {
     private func launch(app: String, profile: LaunchProfile?) async throws {
         // Home first: a system overlay a stray tap opened (the app switcher)
         // stays above a freshly launched app and would poison the snapshot.
+        // The press has to land before the launch does: SpringBoard is still
+        // suspending the app while `--terminate-running-process` kills it, and
+        // simctl then reports the launch as "did not return a process handle
+        // nor launch error" instead of starting the app.
         _ = try? await SimulatorInputClient.button("home", deviceUDID: configuration.device.udid)
+        try await Task.sleep(for: .milliseconds(700))
         var environment = profile?.environment ?? [:]
         if let serverURL = configuration.appFacingServerURL {
             environment["SIMTOOL_SERVER_URL"] = environment["SIMTOOL_SERVER_URL"] ?? serverURL
             environment["SIMTOOL_NETWORK_LOGGER"] = environment["SIMTOOL_NETWORK_LOGGER"] ?? "1"
             environment["SIMTOOL_STATE_LOGGER"] = environment["SIMTOOL_STATE_LOGGER"] ?? "1"
         }
+        let arguments = SimulatorAppLifecycleClient.simctlLaunchArguments(
+            deviceUDID: configuration.device.udid,
+            bundleIdentifier: app,
+            launchArguments: (profile?.arguments ?? [])
+        )
         let output = try await ProcessRunner.run(
             executable: URL(fileURLWithPath: "/usr/bin/xcrun"),
-            arguments: SimulatorAppLifecycleClient.simctlLaunchArguments(
-                deviceUDID: configuration.device.udid,
-                bundleIdentifier: app,
-                launchArguments: (profile?.arguments ?? [])
-            ),
+            arguments: arguments,
             environment: SimulatorAppLifecycleClient.simctlChildEnvironment(launchEnvironment: environment),
             timeoutSeconds: 120
         )
@@ -1288,6 +1557,48 @@ public final class ExploreController: @unchecked Sendable {
             return []
         }
         return DeeplinkHarvest.schemes(fromInfoPlist: data)
+    }
+
+    /// Every name iOS could show under the app's icon — which is also the
+    /// label of the accessibility root the app presents. Empty when the bundle
+    /// is not installed or names itself nowhere; then the crawl has nothing to
+    /// check the launch against and trusts the first settled screen.
+    ///
+    /// A set, not one name: the root label is the *localized* display name, and
+    /// a localized app keeps that in `<lang>.lproj/InfoPlist.strings` while
+    /// `Info.plist` still carries the base one. Checking against the base name
+    /// alone rejected every launch of such an app, and with it the whole crawl.
+    private func installedAppDisplayNames(bundleId: String) async -> Set<String> {
+        guard let output = try? await ProcessRunner.run(
+            executable: URL(fileURLWithPath: "/usr/bin/xcrun"),
+            arguments: ["simctl", "get_app_container", configuration.device.udid, bundleId, "app"],
+            timeoutSeconds: 30
+        ), output.status == 0 else { return [] }
+        let appPath = output.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !appPath.isEmpty else { return [] }
+        let bundle = URL(fileURLWithPath: appPath)
+        var names: Set<String> = []
+        func collect(from url: URL) {
+            guard let data = try? Data(contentsOf: url),
+                  let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
+            else { return }
+            for key in ["CFBundleDisplayName", "CFBundleName"] {
+                if let name = (plist[key] as? String)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty {
+                    names.insert(name)
+                }
+            }
+        }
+        collect(from: bundle.appendingPathComponent("Info.plist"))
+        // Compiled `.strings` files are binary plists, so the same reader does.
+        let localizations = (try? FileManager.default.contentsOfDirectory(
+            at: bundle,
+            includingPropertiesForKeys: nil
+        )) ?? []
+        for directory in localizations where directory.pathExtension == "lproj" {
+            collect(from: directory.appendingPathComponent("InfoPlist.strings"))
+        }
+        return names
     }
 
     /// The accessibility snapshot once the screen stops changing:

@@ -125,8 +125,16 @@ public struct ProjectConfig: Codable, Equatable, Sendable {
     /// The base URL the launched app should post network events to: the run
     /// server, addressed from inside the simulator (which shares host loopback).
     public var appFacingServerURL: String {
-        let host = (server.host.isEmpty || server.host == "0.0.0.0") ? "127.0.0.1" : server.host
-        return "http://\(host):\(server.port)"
+        Self.appFacingServerURL(host: server.host, port: server.port)
+    }
+
+    /// The same address for a server that is already listening, which is the
+    /// only authority on where the app should post: `serve --port/--host`
+    /// override the config, and arming the app against the file's port instead
+    /// points it at nothing.
+    public static func appFacingServerURL(host: String, port: UInt16) -> String {
+        let resolved = (host.isEmpty || host == "0.0.0.0") ? "127.0.0.1" : host
+        return "http://\(resolved):\(port)"
     }
 
     /// The directory the config was loaded from — the project's `.simtool`
