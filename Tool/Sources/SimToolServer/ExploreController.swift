@@ -346,6 +346,42 @@ public enum ExploreEngine {
         "nav", "navbar", "tab", "tabbar", "static", "view", "screen",
     ]
 
+    /// Name endings that mark an identifier as a reusable control, not a
+    /// screen: design systems stamp their component ids on every screen
+    /// (`HolaTextField-TextField`, `AcmeButtonStack-FirstButton`), so a form
+    /// with three branded text fields hands the "dominant prefix" crown to the
+    /// text-field component unless component names are ruled out up front.
+    /// Suffix match, not exact: the brand half varies, the vocabulary half is
+    /// stable UIKit/design-system English.
+    static let componentNameSuffixes: [String] = [
+        "textfield", "securetextfield", "textview", "textarea", "texteditor",
+        "field", "input", "keyboard", "button", "buttons", "cell", "row",
+        "item", "label", "text", "title", "subtitle", "caption", "image",
+        "icon", "avatar", "badge", "chip", "pill", "toggle", "switch",
+        "slider", "stepper", "picker", "checkbox", "spinner", "loader",
+        "header", "footer", "divider", "separator", "stack", "bar", "list",
+        "carousel", "banner", "card", "tooltip", "toast", "snackbar",
+        // Identifier-namespace enums (`AccountUpgradeWidgetIds-Widget`,
+        // `…ScreenIdentifiers-Title`) name the container of ids, not a screen.
+        "ids", "identifiers",
+    ]
+
+    /// Name beginnings that mark an identifier as design-system vocabulary:
+    /// a kit stamps its brand on every component (`HolaTextFieldSumm`,
+    /// `HolaNumpad`), including reusable full-screen templates
+    /// (`HolaOnboardingScreen` hosts *different* onboardings), so an id that
+    /// opens with the brand never names one screen no matter how its tail
+    /// reads — the suffix vocabulary can't keep up with every coinage.
+    static let componentNamePrefixes: [String] = [
+        "hola",
+    ]
+
+    static func isComponentNamed(_ identifier: String) -> Bool {
+        let lowered = identifier.lowercased()
+        return componentNamePrefixes.contains { lowered.hasPrefix($0) }
+            || componentNameSuffixes.contains { lowered.hasSuffix($0) }
+    }
+
     /// Coarse screen identity, so that states of one screen (spinner, empty
     /// list, expanded section) collapse into one canvas node although their
     /// structural fingerprints differ. Two heuristics, strongest first:
@@ -357,10 +393,15 @@ public enum ExploreEngine {
     /// 2. The dominant identifier prefix over *distinct* ids
     ///    (`MainScreen-Balance`, `MainScreen-TransferButton` → `MainScreen`).
     ///    Distinct, because a repeated wrapper id is one design element, not
-    ///    a namespace; proper prefixes only, for the same reason.
-    /// 3. The navigation-bar title: static per screen in practice, and the
-    ///    last line of defense against one form splitting into a node per
+    ///    a namespace; proper prefixes only, for the same reason; and never a
+    ///    component name — a form full of branded text fields is named after
+    ///    the screen, not after the text-field component.
+    /// 3. The navigation-bar title: static per screen in practice, and a
+    ///    defense against one form splitting into a node per
     ///    keyboard/validation state.
+    /// 4. The headline: the big text a designer put at the top is how a human
+    ///    would name the screen — and the last line of defense before the
+    ///    fingerprint hash, which names it "Экран ab12ef".
     ///
     /// Nil when none fires — then the fingerprint is all we have.
     public static func screenKey(of nodes: [AccessibilityFlatNode]) -> String? {
@@ -372,12 +413,14 @@ public enum ExploreEngine {
             guard parts.count >= 2, let prefix = parts.first.map(String.init) else { continue }
             guard prefix.count >= 4,
                   prefix.rangeOfCharacter(from: .letters) != nil,
-                  !titleStopwords.contains(prefix.lowercased()) else { continue }
+                  !titleStopwords.contains(prefix.lowercased()),
+                  !isComponentNamed(prefix) else { continue }
             distinctIdsByPrefix[prefix, default: []].insert(id)
         }
         let best = distinctIdsByPrefix.max { ($0.value.count, $1.key) < ($1.value.count, $0.key) }
         if let best, best.value.count >= 3 { return best.key }
         if let navbar = navbarTitle(of: nodes) { return "navbar:\(navbar)" }
+        if let headline = headline(of: nodes) { return "headline:\(headline)" }
         return nil
     }
 
@@ -401,7 +444,8 @@ public enum ExploreEngine {
             guard let id = node.id, !id.isEmpty, !id.hasPrefix("_"), idCounts[id] == 1 else { continue }
             guard id.count >= 4,
                   id.rangeOfCharacter(from: .letters) != nil,
-                  !titleStopwords.contains(id.lowercased()) else { continue }
+                  !titleStopwords.contains(id.lowercased()),
+                  !isComponentNamed(id) else { continue }
             guard let frame = node.frame, frame.count == 4 else { continue }
             guard Double(frame[2]) * Double(frame[3]) >= windowArea * 0.7 else { continue }
             if best == nil || node.depth < best!.depth { best = (index, node.depth) }
@@ -454,19 +498,52 @@ public enum ExploreEngine {
         return navbarText?.label
     }
 
+    /// The screen's headline: the topmost large text in the upper part of the
+    /// window — "Your phone number", "How to restore access…". Large means a
+    /// line of title-sized font (28+ points tall), which skips status-bar
+    /// text, chips, and body copy on the way down; topmost, because when both
+    /// a title and a tall two-line paragraph qualify, the title sits above it.
+    public static func headline(of nodes: [AccessibilityFlatNode]) -> String? {
+        guard let bounds = nodes.first(where: { $0.depth == 0 })?.frame, bounds.count == 4,
+              bounds[3] > 0 else { return nil }
+        let ceiling = Int(Double(bounds[3]) * 0.45)
+        let candidates = nodes.filter { node in
+            guard node.type == "StaticText", let frame = node.frame, frame.count == 4 else { return false }
+            guard let label = node.label?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  (2...80).contains(label.count),
+                  label.rangeOfCharacter(from: .letters) != nil else { return false }
+            return frame[1] >= 30 && frame[1] <= ceiling && frame[3] >= 28
+        }
+        let best = candidates.min { lhs, rhs in
+            (lhs.frame![1], -lhs.frame![3]) < (rhs.frame![1], -rhs.frame![3])
+        }
+        guard let label = best?.label else { return nil }
+        // SwiftUI multiline labels carry their newlines; a key must not.
+        return label.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    }
+
     /// A display name for a screen, best effort: the screen key when one
-    /// exists (root container, dominant prefix, or navbar title), else the
-    /// first titled node, else the caller's fallback.
+    /// exists (root container, dominant prefix, navbar title, or headline),
+    /// else the first titled node, else the caller's fallback.
     public static func title(for nodes: [AccessibilityFlatNode], fallback: String) -> String {
         if let key = screenKey(of: nodes) {
-            // Navbar-derived keys carry a namespace prefix so they can never
+            // Text-derived keys carry a namespace prefix so they can never
             // collide with an identifier; the display name drops it.
-            return key.hasPrefix("navbar:") ? String(key.dropFirst("navbar:".count)) : key
+            for namespace in ["navbar:", "headline:"] where key.hasPrefix(namespace) {
+                return displayTitle(String(key.dropFirst(namespace.count)))
+            }
+            return displayTitle(key)
         }
         if let titled = nodes.first(where: { !($0.title ?? "").isEmpty }), let title = titled.title {
-            return title
+            return displayTitle(title)
         }
         return fallback
+    }
+
+    /// Headlines make honest names but poor labels when they run long; the
+    /// key keeps the full text (identity), the card shows it trimmed.
+    static func displayTitle(_ raw: String) -> String {
+        raw.count <= 48 ? raw : String(raw.prefix(47)) + "…"
     }
 }
 
@@ -1223,6 +1300,27 @@ public final class ExploreController: @unchecked Sendable {
 
     // MARK: simulator I/O
 
+    /// The app's own accessibility label — the display name iOS puts under its
+    /// icon, which is also the label AXe reports on the root of its tree. Read
+    /// from the installed bundle so the crawl knows which app it is waiting
+    /// for before the first snapshot exists. Nil when the app is not installed
+    /// or its Info.plist names it in neither key: the caller then falls back to
+    /// anchoring on whatever settles, the pre-existing behaviour.
+    private func installedAppLabel(of app: String) async -> String? {
+        guard let container = try? await ProcessRunner.run(
+            executable: URL(fileURLWithPath: "/usr/bin/xcrun"),
+            arguments: ["simctl", "get_app_container", configuration.device.udid, app, "app"],
+            timeoutSeconds: 30
+        ), container.status == 0 else { return nil }
+        let bundlePath = container.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !bundlePath.isEmpty,
+              let data = try? Data(contentsOf: URL(fileURLWithPath: bundlePath).appendingPathComponent("Info.plist")),
+              let info = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
+        else { return nil }
+        let name = (info["CFBundleDisplayName"] as? String) ?? (info["CFBundleName"] as? String)
+        return name?.nilIfEmpty
+    }
+
     /// Relaunches through simctl with the profile's argv, arming the SimTool
     /// loggers the same way `simtool test run` does — the crawl must observe
     /// the same app configuration a recorded test would.
@@ -1236,19 +1334,31 @@ public final class ExploreController: @unchecked Sendable {
             environment["SIMTOOL_NETWORK_LOGGER"] = environment["SIMTOOL_NETWORK_LOGGER"] ?? "1"
             environment["SIMTOOL_STATE_LOGGER"] = environment["SIMTOOL_STATE_LOGGER"] ?? "1"
         }
-        let output = try await ProcessRunner.run(
-            executable: URL(fileURLWithPath: "/usr/bin/xcrun"),
-            arguments: SimulatorAppLifecycleClient.simctlLaunchArguments(
-                deviceUDID: configuration.device.udid,
-                bundleIdentifier: app,
-                launchArguments: (profile?.arguments ?? [])
-            ),
-            environment: SimulatorAppLifecycleClient.simctlChildEnvironment(launchEnvironment: environment),
-            timeoutSeconds: 120
-        )
-        guard output.status == 0 else {
-            throw SimToolError("simctl launch \(app) failed: \(output.stderrString.trimmingCharacters(in: .whitespacesAndNewlines))")
+        // `--terminate-running-process` races the suspend the home press above
+        // just started: simctl kills the app mid-transition and then reports
+        // ESRCH ("did not return a process handle nor launch error") instead
+        // of a pid. Nothing is wrong with the app — the next attempt, with the
+        // transition over, launches it — so a lost race costs a retry rather
+        // than the whole crawl.
+        var lastFailure = ""
+        for attempt in 0..<3 {
+            if attempt > 0 {
+                try await Task.sleep(for: .milliseconds(1500))
+            }
+            let output = try await ProcessRunner.run(
+                executable: URL(fileURLWithPath: "/usr/bin/xcrun"),
+                arguments: SimulatorAppLifecycleClient.simctlLaunchArguments(
+                    deviceUDID: configuration.device.udid,
+                    bundleIdentifier: app,
+                    launchArguments: (profile?.arguments ?? [])
+                ),
+                environment: SimulatorAppLifecycleClient.simctlChildEnvironment(launchEnvironment: environment),
+                timeoutSeconds: 120
+            )
+            if output.status == 0 { return }
+            lastFailure = output.stderrString.trimmingCharacters(in: .whitespacesAndNewlines)
         }
+        throw SimToolError("simctl launch \(app) failed: \(lastFailure)")
     }
 
     /// The snapshot once the screen stops changing AND its data has arrived.
