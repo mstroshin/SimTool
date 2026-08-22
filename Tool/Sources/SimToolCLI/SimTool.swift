@@ -1747,7 +1747,11 @@ struct Serve: AsyncParsableCommand {
             device: booted,
             host: parameters.host,
             port: parameters.port,
-            defaultLogApp: app.flatMap { $0.isEmpty ? nil : $0 },
+            // `--app` first, then the project's own `bundleId`: the config is
+            // already loaded here, and without this fallback a `serve` in a
+            // configured checkout had no app — which the Картограф tab reported
+            // as "No app to explore" even though .simtool/config.yml named one.
+            defaultLogApp: app.flatMap { $0.isEmpty ? nil : $0 } ?? projectConfig?.bundleId,
             testSessionsRoot: SimToolDirectory.testSessionsDirectory(in: simtoolDirectory),
             testsRoot: SimToolDirectory.testsDirectory(in: simtoolDirectory),
             printSessionJSON: common.json || detachedChild,

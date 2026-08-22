@@ -559,19 +559,23 @@ extension AgentSkill {
         When the current screen has no untried actions left, replay recorded taps to
         reach the closest screen that still has some, or relaunch and descend again.
 
-        ## Edge rules — when NOT to draw a connection
+        ## Edge rules — when NOT to record a connection
 
-        The map draws **forward navigation only**. Never record an edge when:
+        The map records **forward navigation only**. Never record an edge when:
 
         - **The tap goes back.** A back / close / ✕ / cancel control, or any tap that
           lands on the screen you arrived from — iOS back buttons are titled after the
           previous screen, so judge by the destination, not the label. Return edges say
           nothing about the app's structure and tangle the map.
-        - **The destination is not deeper.** Only `depth(to) > depth(from)` edges are
-          drawn; a hop to a same-depth or shallower screen (the home tab, a modal's ✕,
-          a cross-tab jump) is the crawl retreating, not the app navigating forward.
         - **Source and destination are the same node.** A state change inside one
           screen is not a transition.
+
+        Everything else goes in, including a tap that lands on a screen no deeper than
+        the one it left. Which edges the canvas *draws* is simtool's call, made on
+        every read from how far each screen sits from the app's openings — and those
+        distances move as the map grows. Leaving such an edge out of the file instead
+        loses it for good: that is how a relaunch onto a charted screen used to erase
+        every arrow leading to it.
 
         One edge per (from, to, control): a repeated tap increments the edge's `count`
         instead of adding a parallel arrow.
@@ -643,8 +647,10 @@ extension AgentSkill {
           both — reuse the node id. `triedActionKeys` is the robot's persisted
           frontier; leave it alone if you did not compute it.
         - `depth` is the shortest observed distance from the launch screen; the canvas
-          lays columns out by depth, so keep it honest (shrink it if you rediscover a
-          screen closer to the root — and re-check the depth rule for its edges).
+          lays columns out by depth, so keep it honest — shrink it if you rediscover a
+          screen closer to the root. One exception: a screen you *launch into* keeps
+          the depth it already has. It is an opening, not a shorter path, and zeroing
+          it would drop every arrow leading there off the drawn map.
         - Edge — required: `id`, `from`, `to`, `action` (`kind` plus optional
           `targetId`/`targetLabel` — the tab renders them as the arrow label), `count`.
         - Update `stats` as you go; when the pass ends, set `run.finishedAt`.

@@ -120,6 +120,83 @@ public enum ExploreGrouping {
         ordered(Topology(graph: graph).flows())
     }
 
+    // MARK: what the map draws
+
+    /// The transitions the map draws: those leading into a screen further from
+    /// the app's openings than the one they leave. A hop onto a shallower or
+    /// equally deep screen is the crawler coming back — the home tab, a modal's
+    /// ✕, a cross-tab jump — and drawing those turns the map into a thicket.
+    ///
+    /// Computed, never stored: the store keeps every transition the crawl
+    /// observed, because dropping one from the file loses it for good, while
+    /// the distances this rule reads move around as the crawl finds shorter
+    /// paths.
+    public static func descending(
+        edges: [ExploreTransitionEdge],
+        nodes: [ExploreScreenNode]
+    ) -> [ExploreTransitionEdge] {
+        let level = levels(edges: edges, nodes: nodes)
+        return edges.filter { edge in
+            guard let from = level[edge.from], let to = level[edge.to] else { return false }
+            return to > from
+        }
+    }
+
+    /// The same rule applied to a whole map, with the transition count brought
+    /// in line with what is drawn — a header saying "30 переходов" over 26
+    /// arrows is a bug report waiting to happen.
+    public static func descending(_ graph: ExploreGraph) -> ExploreGraph {
+        var copy = graph
+        copy.edges = descending(edges: graph.edges, nodes: graph.nodes)
+        copy.stats.transitions = copy.edges.count
+        return copy
+    }
+
+    /// Distance from the screens the app opens into, over *every* recorded
+    /// transition. Measured on the full set on purpose: measuring it on the
+    /// drawn subset would make the drawing rule read the distances its own
+    /// output produced, and a screen could lose its last incoming arrow and
+    /// then keep the zero that loss handed it.
+    ///
+    /// A map whose transitions form a cycle through every screen has no
+    /// opening; there the shallowest recorded screen stands in, so the rule
+    /// still has somewhere to measure from. Screens no opening reaches keep
+    /// their own recorded depth, so a transition between two of them can still
+    /// be drawn.
+    static func levels(edges: [ExploreTransitionEdge], nodes: [ExploreScreenNode]) -> [String: Int] {
+        let known = Set(nodes.map(\.id))
+        var outgoing: [String: [String]] = [:]
+        var hasIncoming: Set<String> = []
+        for edge in edges where known.contains(edge.from) && known.contains(edge.to) && edge.from != edge.to {
+            outgoing[edge.from, default: []].append(edge.to)
+            hasIncoming.insert(edge.to)
+        }
+        var sources = nodes.map(\.id).filter { !hasIncoming.contains($0) }
+        if sources.isEmpty, let shallowest = nodes.min(by: { ($0.depth, $0.id) < ($1.depth, $1.id) }) {
+            sources = [shallowest.id]
+        }
+        var level = Self.depths(from: sources, outgoing: outgoing)
+        for node in nodes where level[node.id] == nil { level[node.id] = node.depth }
+        return level
+    }
+
+    /// Breadth-first distances from several sources at once.
+    static func depths(from sources: [String], outgoing: [String: [String]]) -> [String: Int] {
+        var distance: [String: Int] = [:]
+        for source in sources { distance[source] = 0 }
+        var queue = sources
+        var head = 0
+        while head < queue.count {
+            let current = queue[head]
+            head += 1
+            for next in outgoing[current] ?? [] where distance[next] == nil {
+                distance[next] = distance[current]! + 1
+                queue.append(next)
+            }
+        }
+        return distance
+    }
+
     /// A copy of the map with every node told which flows it joined, whether
     /// it is an entry point, and a depth that describes a real path.
     ///
@@ -197,21 +274,20 @@ extension ExploreGrouping {
         /// Labels of the transitions from one screen to another — the
         /// product's own words for what a button opens.
         private(set) var labels: [Route: [String]] = [:]
+        /// Accessibility identifiers of the same transitions, kept apart from
+        /// the words: an id is a name only a developer reads, so it is the last
+        /// thing a flow should be called after.
+        private(set) var identifiers: [Route: [String]] = [:]
         private(set) var titles: [String: String] = [:]
         private(set) var localizationKeys: [String: [String]] = [:]
         /// Whether the screen still has taps nobody has made — the difference
         /// between a screen the map has finished with and one it merely
         /// reached.
         private(set) var hasUntriedActions: [String: Bool] = [:]
-        /// Distance from the map root. Absent for a screen the root cannot
-        /// reach — one recorded after a relaunch, whose stored depth describes
-        /// no path and must not be reported as one.
-        private(set) var depth: [String: Int] = [:]
-        /// Distance from the nearest entry point rather than from the root, so
-        /// every screen has one — including those only a relaunch reaches.
-        /// This is what gets written back into the map.
+        /// Distance from the nearest entry point, so every screen has one —
+        /// including those only a relaunch reaches. This is what gets written
+        /// back into the map.
         private(set) var reachDepth: [String: Int] = [:]
-        private(set) var root: String?
 
         struct Route: Hashable {
             let from: String
@@ -226,59 +302,29 @@ extension ExploreGrouping {
                 localizationKeys[node.id] = node.localizationKeys ?? []
                 hasUntriedActions[node.id] = ExploreEngine.hasUntriedActions(node)
             }
-            for edge in graph.edges where known.contains(edge.from) && known.contains(edge.to) {
+            // The flows follow the map as it is drawn, not as it was recorded:
+            // the store keeps every observed transition, including the hops
+            // back out of a feature, and feeding those in would make one flow
+            // reach into another.
+            for edge in ExploreGrouping.descending(edges: graph.edges, nodes: graph.nodes)
+            where known.contains(edge.from) && known.contains(edge.to) {
                 outgoing[edge.from, default: []].append(edge.to)
                 incoming[edge.to, default: []].append(edge.from)
-                if let label = (edge.action.targetLabel ?? edge.action.targetId)?.nilIfEmpty {
-                    labels[Route(from: edge.from, to: edge.to), default: []].append(label)
+                let route = Route(from: edge.from, to: edge.to)
+                if let label = edge.action.targetLabel?.nilIfEmpty {
+                    labels[route, default: []].append(label)
+                }
+                if let identifier = edge.action.targetId?.nilIfEmpty {
+                    identifiers[route, default: []].append(identifier)
                 }
             }
-            root = Self.root(order: order, incoming: incoming, outgoing: outgoing)
-            if let root { depth = Self.depths(from: [root], outgoing: outgoing) }
-            reachDepth = Self.depths(from: entryPoints, outgoing: outgoing)
+            reachDepth = ExploreGrouping.depths(from: entryPoints, outgoing: outgoing)
         }
 
         /// The screens the app opens into: those no tap leads to. Everything
         /// reachable, and every flow, hangs off these.
         var entryPoints: [String] {
             order.filter { (incoming[$0] ?? []).isEmpty }
-        }
-
-        /// The screen the app launches into: of those no tap leads to, the one
-        /// the rest of the map hangs off. Picking by recorded depth alone
-        /// would crown a screen that appeared after a relaunch.
-        private static func root(
-            order: [String],
-            incoming: [String: [String]],
-            outgoing: [String: [String]]
-        ) -> String? {
-            let sources = order.filter { (incoming[$0] ?? []).isEmpty }
-            guard !sources.isEmpty else { return order.first }
-            return sources.max { left, right in
-                let reach = (
-                    depths(from: [left], outgoing: outgoing).count,
-                    depths(from: [right], outgoing: outgoing).count
-                )
-                return reach.0 == reach.1
-                    ? (order.firstIndex(of: left) ?? 0) > (order.firstIndex(of: right) ?? 0)
-                    : reach.0 < reach.1
-            }
-        }
-
-        private static func depths(from sources: [String], outgoing: [String: [String]]) -> [String: Int] {
-            var distance: [String: Int] = [:]
-            for source in sources { distance[source] = 0 }
-            var queue = sources
-            var head = 0
-            while head < queue.count {
-                let current = queue[head]
-                head += 1
-                for next in outgoing[current] ?? [] where distance[next] == nil {
-                    distance[next] = distance[current]! + 1
-                    queue.append(next)
-                }
-            }
-            return distance
         }
 
         /// True when no transition leads into the screen — it was recorded on
@@ -398,6 +444,14 @@ extension ExploreGrouping {
             add(titles[key])
             for member in members where member != key { add(titles[member]) }
             add(commonKeyPrefix(of: members))
+            // The buttons' accessibility identifiers only after all of those: a
+            // chip reading `AccountUpgradeWidgetIds-Widget` names the button's
+            // id namespace, while the screen right behind it is called
+            // `AccountUpgradeView` — and an app whose buttons carry no labels
+            // would otherwise have every flow named after plumbing.
+            for door in doors {
+                for identifier in identifiers[Route(from: door, to: key)] ?? [] { add(identifier) }
+            }
             add(key)
             return result
         }

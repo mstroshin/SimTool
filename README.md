@@ -578,6 +578,46 @@ swift run simtool open Details         # open by name
 swift run simtool open Settings --json
 ```
 
+## Картограф — the screen map
+
+The viewer's 🗺️ Картограф tab draws the app as a map: one node per screen, with
+its screenshot, the share of its taps already tried, the deeplinks and
+localization keys attributed to it, and the features it belongs to; one arrow
+per transition a tap opened. The whole map lives in a single store per project,
+so a later crawl extends the picture instead of starting a new one:
+
+```text
+.simtool/explore/
+  graph.json      screens, transitions, run stats
+  shots/          one PNG per screen
+  layout.json     where cards were dragged on the canvas
+  groups.json     names given to the features
+```
+
+Two things can fill it, and they share the store. The built-in crawler taps
+everything reachable — `POST /api/v1/explore/start` (`{"profile": "explore",
+"maxScreens": 40, "maxSteps": 200, "budgetMinutes": 15}`), stopped with
+`POST /api/v1/explore/stop`; an agent can also walk the app itself and write the
+same files. The tab has no start button on purpose: a crawl taps through a real
+app, so it is started by whoever knows what that app is doing. The `cartograph.md`
+skill (installed by `simtool init` next to `SKILL.md`) carries the agent-side
+procedure, including how to name the features.
+
+By convention the crawl launches through a profile named `explore` in
+`.simtool/config.yml` — a mock backend and an auto-login, so nothing stops on a
+passcode — and relaunches through `explore-resume`.
+
+Two ideas keep the map honest as it grows:
+
+- **The store keeps every transition; the canvas draws the descents.** Which
+  arrows are worth drawing depends on how far each screen sits from the app's
+  openings, and that moves as the crawl finds shorter paths — so it is decided
+  on read. Nothing is ever dropped from the file.
+- **Features come from the map's own shape.** A screen offering several ways
+  forward is a fork, and what lies behind one of its buttons is a feature;
+  `GET`/`POST /api/v1/explore/groups` reads those and records human names for
+  them. Nothing here matches screens against a list of known features.
+
 ## HTTP API
 
 Local endpoints:
@@ -603,6 +643,13 @@ GET /api/v1/network?seconds=2&limit=200
 GET /api/v1/mocks
 GET /api/v1/mocks/ack
 GET /api/v1/screenshot?maxDim=800
+GET /api/v1/explore/status
+POST /api/v1/explore/start
+POST /api/v1/explore/stop
+POST /api/v1/explore/layout
+GET /api/v1/explore/groups
+POST /api/v1/explore/groups
+GET /api/v1/explore/shot?node=<id>
 ```
 
 `mocks/ack` reports the server's mock-rule generation and the newest one an app

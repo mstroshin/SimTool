@@ -291,9 +291,18 @@ public enum ExploreEngine {
         var candidates: [Action] = []
         for node in nodes {
             guard let type = node.type else { continue }
+            // An underscore opens the identifiers UIKit and SwiftUI give their
+            // own plumbing (`_TtGC7SwiftUI29PresentationHosting`), never one the
+            // app chose. Such a node is not a control: tapping it aims at the
+            // centre of a hosting container and presses whatever happens to sit
+            // there, which spends the step budget and mints transitions no
+            // button of the app can explain. The screen heuristics already
+            // ignore these ids — here the whole element goes with them, unless
+            // it carries a human label of its own to tap by.
+            let id = node.id?.nilIfEmpty.flatMap { $0.hasPrefix("_") ? nil : $0 }
             // Custom widgets read as identified Groups (`TouchRecognizingView`);
             // the size cap keeps screen-sized containers out.
-            let isTappableContainer = type == "Group" && node.id?.nilIfEmpty != nil
+            let isTappableContainer = type == "Group" && id != nil
             guard tappableTypes.contains(type) || isTappableContainer else { continue }
             guard node.enabled != false else { continue }
             guard let frame = node.frame, frame.count == 4, frame[2] >= 10, frame[3] >= 10 else { continue }
@@ -311,7 +320,6 @@ public enum ExploreEngine {
                 // there opens the app switcher instead of the control.
                 guard centerY <= Double(bounds[1] + bounds[3]) - 24 else { continue }
             }
-            let id = node.id?.nilIfEmpty
             let label = node.label?.nilIfEmpty
             guard id != nil || label != nil else { continue }
             let text = "\(id ?? "") \(label ?? "")".lowercased()
@@ -408,10 +416,24 @@ public enum ExploreEngine {
         "slider", "stepper", "picker", "checkbox", "spinner", "loader",
         "header", "footer", "divider", "separator", "stack", "bar", "list",
         "carousel", "banner", "card", "tooltip", "toast", "snackbar",
-        // Identifier-namespace enums (`AccountUpgradeWidgetIds-Widget`,
-        // `…ScreenIdentifiers-Title`) name the container of ids, not a screen.
-        "ids", "identifiers",
+        // Plumbing that wraps a screen rather than being one: a router, a
+        // hosting controller, a tap region, the container a component draws
+        // itself in. The screen's own name is what the container is named
+        // after, so the wrapper's name is always the worse of the two — and
+        // several different screens share one wrapper, which is how
+        // `…-BenefitOptionContainer` ended up naming a promo sheet.
+        "container", "navigation", "navigator", "wrapper", "content",
+        "hosting", "region", "overlay", "router",
     ]
+
+    /// Name endings of an identifier-namespace enum: a type that exists to hold
+    /// the ids of a screen's elements (`AccountUpgradeWidgetIds-Widget`,
+    /// `…ScreenIdentifiers-Title`) names the container of ids, not a screen.
+    /// Kept apart from the component vocabulary because it is also asked of
+    /// every *segment* of a composite identifier, not just of its tail.
+    static let namespaceSuffixes: [String] = ["ids", "identifiers"]
+
+    private static let nameSuffixes: [String] = componentNameSuffixes + namespaceSuffixes
 
     /// Name beginnings that mark an identifier as design-system vocabulary:
     /// a kit stamps its brand on every component (`HolaTextFieldSumm`,
@@ -423,14 +445,25 @@ public enum ExploreEngine {
         "hola",
     ]
 
-    /// True when an identifier names a convention rather than a screen —
-    /// the one gate both naming heuristics ask, so a new stopword or component
+    /// True when an identifier names a convention rather than a screen — the one
+    /// gate every naming heuristic asks (both screen-key heuristics, and the
+    /// label a feature chip is shown under), so a new stopword or component
     /// suffix lands in exactly one place.
+    ///
+    /// A composite identifier is judged segment by segment as well as whole:
+    /// the vocabulary above only ever sees the tail, so
+    /// `AccountUpgradeWidgetIds-Widget` — whose *namespace* half is the
+    /// giveaway — read as a screen name until each segment was asked too.
     static func isGenericName(_ identifier: String) -> Bool {
         let lowered = identifier.lowercased()
         if titleStopwords.contains(lowered) { return true }
-        return componentNamePrefixes.contains { lowered.hasPrefix($0) }
-            || componentNameSuffixes.contains { lowered.hasSuffix($0) }
+        if componentNamePrefixes.contains(where: { lowered.hasPrefix($0) }) { return true }
+        if nameSuffixes.contains(where: { lowered.hasSuffix($0) }) { return true }
+        let segments = lowered.split(whereSeparator: { $0 == "-" || $0 == "." })
+        guard segments.count >= 2 else { return false }
+        return segments.contains { segment in
+            namespaceSuffixes.contains { segment.hasSuffix($0) }
+        }
     }
 
     /// Coarse screen identity, so that states of one screen (spinner, empty
@@ -589,6 +622,20 @@ public enum ExploreEngine {
         return fallback
     }
 
+    /// A count with its noun in the right Russian form: «1 экран», «2 экрана»,
+    /// «5 экранов». The status line is read by a person, and a number glued to
+    /// a single hardcoded form ("1 экранов") reads like a half-built interface.
+    public static func counted(_ count: Int, _ one: String, _ few: String, _ many: String) -> String {
+        let hundreds = abs(count) % 100
+        let units = hundreds % 10
+        if (11...14).contains(hundreds) { return "\(count) \(many)" }
+        switch units {
+        case 1: return "\(count) \(one)"
+        case 2...4: return "\(count) \(few)"
+        default: return "\(count) \(many)"
+        }
+    }
+
     /// Headlines make honest names but poor labels when they run long; the
     /// key keeps the full text (identity), the card shows it trimmed.
     static func displayTitle(_ raw: String) -> String {
@@ -683,13 +730,18 @@ public final class ExploreController: @unchecked Sendable {
         // at crawl time means a map recorded by an earlier version lights up
         // with feature groups on the next poll, without being re-walked.
         let grouped = graph.map { ExploreGrouping.annotatedWithGroups($0, names: loadNamesLocked()) }
+        // The store holds every transition the crawl observed; the tab is shown
+        // the ones the map draws. Keeping the two apart is what lets a screen
+        // the crawl relaunches into keep its arrows instead of losing them from
+        // the file the first time it is entered twice.
+        let drawn = grouped.map { ExploreGrouping.descending($0.graph) }
         return ExploreStatusPayload(
             running: running,
             runId: runId,
             app: graph?.run.app ?? configuration.defaultApp,
             message: message,
             error: lastError,
-            graph: grouped?.graph,
+            graph: drawn,
             layout: layout,
             groups: grouped?.groups
         )
@@ -733,7 +785,7 @@ public final class ExploreController: @unchecked Sendable {
             graph = existing
             graph?.run = meta
             graph?.schemaVersion = 2
-            message = "Продолжаю карту: \(existing.nodes.count) экранов…"
+            message = "Продолжаю карту: \(ExploreEngine.counted(existing.nodes.count, "экран", "экрана", "экранов"))…"
         } else {
             graph = ExploreGraph(
                 schemaVersion: 2,
@@ -937,7 +989,9 @@ public final class ExploreController: @unchecked Sendable {
         graph = loaded
         runId = loaded.run.id
         runDirectory = configuration.root
-        if isNewRun { message = "Показана карта: \(loaded.nodes.count) экранов" }
+        if isNewRun {
+            message = "Показана карта: \(ExploreEngine.counted(loaded.nodes.count, "экран", "экрана", "экранов"))"
+        }
     }
 
     private var layoutFile: URL {
@@ -1070,26 +1124,22 @@ public final class ExploreController: @unchecked Sendable {
         // reverse-map to the localization keys that mint them.
         let localization = configuration.projectRoot.map(LocalizationIndex.build) ?? .empty
 
-        // Depths only shrink as screens get rediscovered closer to the root,
-        // so an edge recorded as a descent can turn lateral later — the
-        // published graph re-applies the descent rule every time.
-        func descentEdges() -> [ExploreTransitionEdge] {
-            let depthById = Dictionary(nodes.map { ($0.id, $0.depth) }, uniquingKeysWith: { first, _ in first })
-            return edges.filter { edge in
-                guard let from = depthById[edge.from], let to = depthById[edge.to] else { return false }
-                return to > from
-            }
-        }
-
         func publish(_ text: String?) {
-            let descents = descentEdges()
+            // Which transitions the map *draws* is a question about the screens'
+            // distances from the app's openings, and those keep moving as the
+            // crawl finds shorter paths — so the answer is computed on read
+            // (`ExploreGrouping.descending`) and never baked into the store.
+            // Storing only the drawn ones cost the map real transitions: a
+            // relaunch that landed on a charted screen made it an opening, and
+            // every arrow into it vanished from the file for good.
+            let drawn = ExploreGrouping.descending(edges: edges, nodes: nodes).count
             lock.lock()
             if let text { message = text }
             graph?.nodes = nodes
-            graph?.edges = descents
+            graph?.edges = edges
             graph?.stats = ExploreStats(
                 screens: nodes.count,
-                transitions: descents.count,
+                transitions: drawn,
                 steps: priorSteps + steps,
                 relaunches: priorRelaunches + relaunches
             )
@@ -1114,14 +1164,24 @@ public final class ExploreController: @unchecked Sendable {
         /// joins the existing node — only its actions extend the crawl
         /// frontier. Screens persisted by previous runs attach the same way,
         /// seeded with the actions they already tried.
-        func record(_ snapshot: [AccessibilityFlatNode], depth: Int) async -> String {
+        ///
+        /// `isEntry` marks the screen a pass launched into. Such a screen is an
+        /// opening, not a shorter path to somewhere: a screen already charted
+        /// three taps deep keeps the depth it was found at, because flattening
+        /// it to zero on every relaunch also flattened every arrow leading into
+        /// it — the drawn map lost the transitions and the screen turned into
+        /// an orphan card.
+        func record(_ snapshot: [AccessibilityFlatNode], depth: Int, isEntry: Bool = false) async -> String {
             let fingerprint = ExploreEngine.fingerprint(of: snapshot)
+            /// The depth a known screen keeps: its own when this snapshot is a
+            /// launch landing on it, the shorter of the two otherwise.
+            func settled(_ current: Int) -> Int { isEntry ? current : min(current, depth) }
             if var known = screens[fingerprint] {
-                known.depth = min(known.depth, depth)
+                known.depth = settled(known.depth)
                 screens[fingerprint] = known
                 if let index = nodeIndex[fingerprint] {
                     nodes[index].visits += 1
-                    nodes[index].depth = min(nodes[index].depth, known.depth)
+                    nodes[index].depth = settled(nodes[index].depth)
                     await refreshShot(nodes[index].id)
                 }
                 return fingerprint
@@ -1136,7 +1196,7 @@ public final class ExploreController: @unchecked Sendable {
                 let isNewState = nodeIndex[fingerprint] == nil
                 screens[fingerprint] = ScreenState(
                     nodeId: nodes[index].id,
-                    depth: depth,
+                    depth: settled(nodes[index].depth),
                     actions: actions,
                     triedKeys: Set(nodes[index].triedActionKeys ?? [])
                 )
@@ -1150,7 +1210,7 @@ public final class ExploreController: @unchecked Sendable {
                 }
                 catalogue(actions.map(\.key), on: index)
                 nodes[index].visits += 1
-                nodes[index].depth = min(nodes[index].depth, depth)
+                nodes[index].depth = settled(nodes[index].depth)
                 var mergedKeys = nodes[index].localizationKeys ?? []
                 for key in localizationKeys where !mergedKeys.contains(key) && mergedKeys.count < 30 {
                     mergedKeys.append(key)
@@ -1192,12 +1252,12 @@ public final class ExploreController: @unchecked Sendable {
             // fromId == toId is a state change inside one screen, not a
             // transition the map should draw.
             guard let fromId = screens[from]?.nodeId, let toId = screens[to]?.nodeId, fromId != toId else { return }
-            // The map draws only descents into deeper territory. A tap that
-            // lands on a shallower or same-depth screen is the crawler coming
-            // back — the home tab, a modal's ✕, a cross-tab hop — and arrows
-            // into already-charted screens only tangle the map.
-            guard let fromIndex = nodeIndex[from], let toIndex = nodeIndex[to],
-                  nodes[toIndex].depth > nodes[fromIndex].depth else { return }
+            // Every forward transition is recorded — that a tap on this screen
+            // opened that one is a fact about the app, and facts belong in the
+            // store. Which of them the map draws (only descents into deeper
+            // territory; a hop onto a shallower screen is the crawler coming
+            // back and would only tangle the map) is decided on read, because
+            // the depths it depends on keep moving under it.
             let key = "\(fromId)→\(toId)→\(action.kind)|\(action.targetId ?? action.targetLabel ?? "")"
             if let index = edgeIndex[key] {
                 edges[index].count += 1
@@ -1382,7 +1442,7 @@ public final class ExploreController: @unchecked Sendable {
                     return
                 }
                 if let label = ExploreEngine.applicationLabel(of: snapshot) { expectedApp = [label] }
-                var current = await record(snapshot, depth: 0)
+                var current = await record(snapshot, depth: 0, isEntry: true)
                 publish("Стартовый экран: \(nodeTitle(nodes, screens, current))")
                 let stepsAtPassStart = steps
                 let screensAtPassStart = nodes.count
@@ -1423,7 +1483,12 @@ public final class ExploreController: @unchecked Sendable {
                         )
                     } else {
                         let described = action.targetLabel ?? action.targetId ?? "(\(Int(action.x)), \(Int(action.y)))"
-                        publish("Шаг \(steps): \(isReplay ? "спуск — " : "")tap «\(described)»")
+                        // An escape is not a descent: it re-taps a control
+                        // whose screen is worked out, to get out of the way of
+                        // what sits under it. Calling both "спуск" made the
+                        // status line describe the opposite of what happened.
+                        let intent = escape != nil ? "выход — " : (isReplay ? "спуск — " : "")
+                        publish("Шаг \(steps): \(intent)tap «\(described)»")
                         _ = try? await SimulatorInputClient.tap(deviceUDID: configuration.device.udid, x: action.x, y: action.y)
                     }
                     guard let after = try await settledSnapshot() else { continue }
@@ -1535,7 +1600,16 @@ public final class ExploreController: @unchecked Sendable {
             else if relaunches >= budgets.maxRelaunches { reason = "Исчерпан лимит перезапусков." }
             else { reason = "Все доступные действия испробованы." }
             publish(nil)
-            finish(error: nil, note: "Готово: \(nodes.count) экранов, \(descentEdges().count) переходов, \(steps) шагов. \(reason)")
+            let drawn = ExploreGrouping.descending(edges: edges, nodes: nodes).count
+            // Steps are cumulative across runs, the way the tab's header counts
+            // them: a closing note saying "105 шагов" next to a header reading
+            // "285 шагов" reads like a bug in one of the two.
+            let tally = [
+                ExploreEngine.counted(nodes.count, "экран", "экрана", "экранов"),
+                ExploreEngine.counted(drawn, "переход", "перехода", "переходов"),
+                ExploreEngine.counted(priorSteps + steps, "шаг", "шага", "шагов"),
+            ].joined(separator: ", ")
+            finish(error: nil, note: "Готово: \(tally). \(reason)")
         } catch is CancellationError {
             publish(nil)
             finish(error: nil, note: "Остановлено пользователем.")

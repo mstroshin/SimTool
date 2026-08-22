@@ -70,9 +70,18 @@ public enum ExploreGroupNaming {
     /// The label a group is shown under: what it was named, else the strongest
     /// candidate the map itself offers, else the raw key. A group is always
     /// selectable — an unnamed one is only less readable, never unusable.
+    ///
+    /// Candidates that name a convention rather than a thing — a component, an
+    /// id namespace, a container — are stepped over on the way: an app whose
+    /// buttons carry no accessibility labels offers `AccountUpgradeWidgetIds-Widget`
+    /// before the screen's own `AccountUpgradeView`, and a chip has one line to
+    /// say what it filters. Such a candidate is still used if it is all there
+    /// is, since showing it beats showing `s-c08837643e`.
     public static func label(name: String?, candidates: [String], key: String) -> String {
         if let name = name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty { return name }
-        if let candidate = candidates.first(where: { !$0.isEmpty }) { return candidate }
+        let offered = candidates.filter { !$0.isEmpty }
+        if let readable = offered.first(where: { !ExploreEngine.isGenericName($0) }) { return readable }
+        if let candidate = offered.first { return candidate }
         return key
     }
 

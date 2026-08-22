@@ -7,13 +7,28 @@ import htm from "https://esm.sh/htm@3.1.1";
 
 const html = htm.bind(React.createElement);
 
+// «1 экран», «2 экрана», «5 экранов»: a count and a noun glued together
+// without this read as a half-translated interface.
+function plural(count, one, few, many) {
+  const hundreds = Math.abs(count) % 100;
+  const units = hundreds % 10;
+  if (hundreds >= 11 && hundreds <= 14) return many;
+  if (units === 1) return one;
+  if (units >= 2 && units <= 4) return few;
+  return many;
+}
+
+function counted(count, one, few, many) {
+  return `${count} ${plural(count, one, few, many)}`;
+}
+
 function ScreenNode({ data, selected }) {
   return html`<div class="screen-node ${selected ? "selected" : ""}">
     <${Handle} type="target" position=${Position.Left} style=${{ opacity: 0 }} />
     <img src=${"/api/v1/explore/shot?node=" + data.id} loading="lazy" alt="" />
     <div class="screen-title" title=${data.title}>${data.title}</div>
     <div class="screen-meta">
-      ${data.actionsTried}/${data.actionsTotal} действий
+      ${data.actionsTried}/${counted(data.actionsTotal, "действие", "действия", "действий")}
       ${data.bridge && html`<span class="bridge-tag" title="Транзит: путь в фичу лежит через этот экран, но он не входит в неё">транзит<//>`}
     </div>
     <${Handle} type="source" position=${Position.Right} style=${{ opacity: 0 }} />
@@ -21,23 +36,41 @@ function ScreenNode({ data, selected }) {
 }
 const nodeTypes = { screen: ScreenNode };
 
-// Columns by BFS depth, rows in discovery order. Deterministic, so a
-// poll never shuffles nodes the user has not dragged.
+// Column width fits a card (168px) plus room for an edge label; row height
+// fits a full-height screenshot card (~410px) plus the same.
+const COLUMN = 320;
+const ROW = 480;
+// How tall one column may grow before it continues in the next one. A level of
+// a real app holds a dozen screens — one column of those is 6000px tall, and
+// fitView answers that by shrinking every card to a thumbnail.
+const MAX_ROWS = 4;
+
+// Screens grouped by distance, each group filling as many columns as it needs.
+// Deterministic — a poll never shuffles cards the user has not dragged: groups
+// go by ascending distance, cards within a group in map order.
+function gridPositions(byLevel) {
+  const positions = new Map();
+  let column = 0;
+  for (const level of [...byLevel.keys()].sort((a, b) => a - b)) {
+    const list = byLevel.get(level);
+    list.forEach((node, index) => {
+      positions.set(node.id, {
+        x: (column + Math.floor(index / MAX_ROWS)) * COLUMN,
+        y: (index % MAX_ROWS) * ROW,
+      });
+    });
+    column += Math.max(1, Math.ceil(list.length / MAX_ROWS));
+  }
+  return positions;
+}
+
 function autoLayout(graphNodes) {
   const byDepth = new Map();
   for (const node of graphNodes) {
     if (!byDepth.has(node.depth)) byDepth.set(node.depth, []);
     byDepth.get(node.depth).push(node);
   }
-  const positions = new Map();
-  for (const [depth, list] of byDepth) {
-    list.forEach((node, index) => {
-      // Row height fits a full-height screenshot card (~410px at
-      // 168px width) plus room for edge labels.
-      positions.set(node.id, { x: depth * 320, y: index * 480 });
-    });
-  }
-  return positions;
+  return gridPositions(byDepth);
 }
 
 // Columns by distance from the flow's doors rather than from the map root, so
@@ -72,15 +105,13 @@ function subtreeLayout(nodes, edges, entryIds) {
       }
     }
   }
-  const rows = new Map();
-  const positions = new Map();
+  const byDistance = new Map();
   for (const id of order) {
     const column = distance.get(id) || 0;
-    const row = rows.get(column) || 0;
-    rows.set(column, row + 1);
-    positions.set(id, { x: column * 320, y: row * 480 });
+    if (!byDistance.has(column)) byDistance.set(column, []);
+    byDistance.get(column).push({ id });
   }
-  return positions;
+  return gridPositions(byDistance);
 }
 
 // Every place a query can hit, grouped so the panel can name what matched.
@@ -210,16 +241,40 @@ function App() {
       position: placedPositions.current.get(node.id) || auto.get(node.id),
       data: node,
     }));
-    const edges = graph.edges.map((edge) => ({
-      id: edge.id,
-      source: edge.from,
-      target: edge.to,
-      label: edgeLabel(edge.action),
-      markerEnd: { type: MarkerType.ArrowClosed, color: "#7dd3fc" },
-      style: { stroke: "rgba(125,211,252,0.55)", strokeWidth: Math.min(1 + edge.count * 0.5, 3) },
-      labelStyle: { fill: "rgba(244,247,251,0.75)", fontSize: 10 },
-      labelBgStyle: { fill: "#0b1020", fillOpacity: 0.85 },
-    }));
+    // One arrow per pair of screens. Four buttons of a hub can open the same
+    // screen, and React Flow draws all four along the same curve — the labels
+    // landed on top of one another and read as a single scrambled word. The
+    // arrow now names the first button and counts the rest; every label stays
+    // on the edge for the search and in the tooltip for the reader.
+    const byPair = new Map();
+    for (const edge of graph.edges) {
+      const pair = `${edge.from}→${edge.to}`;
+      if (!byPair.has(pair)) byPair.set(pair, []);
+      byPair.get(pair).push(edge);
+    }
+    const edges = [...byPair.values()].map((parallel) => {
+      const first = parallel[0];
+      const labels = [];
+      for (const edge of parallel) {
+        const label = edgeLabel(edge.action);
+        if (!labels.includes(label)) labels.push(label);
+      }
+      const taps = parallel.reduce((total, edge) => total + edge.count, 0);
+      const extra = labels.length - 1;
+      return {
+        id: first.id,
+        source: first.from,
+        target: first.to,
+        // A plain string, not markup: React Flow prints an edge label inside an
+        // SVG <text>, where HTML renders as nothing at all.
+        label: extra > 0 ? `${labels[0]} +${extra}` : labels[0],
+        data: { labels },
+        markerEnd: { type: MarkerType.ArrowClosed, color: "#7dd3fc" },
+        style: { stroke: "rgba(125,211,252,0.55)", strokeWidth: Math.min(1 + taps * 0.5, 3) },
+        labelStyle: { fill: "rgba(244,247,251,0.75)", fontSize: 10 },
+        labelBgStyle: { fill: "#0b1020", fillOpacity: 0.85 },
+      };
+    });
     setFlow({ nodes, edges });
   }, []);
 
@@ -351,11 +406,16 @@ function App() {
   const searchIndex = useMemo(() => {
     const transitionLabels = new Map();
     for (const edge of flow.edges) {
-      const label = String(edge.label || "");
-      if (!label) continue;
-      for (const id of [edge.source, edge.target]) {
-        if (!transitionLabels.has(id)) transitionLabels.set(id, []);
-        transitionLabels.get(id).push(label);
+      // Every button word of every arrow folded into this one, not just the
+      // one the canvas has room to print: a query must still find the screen
+      // a button of that name leads to.
+      const labels = (edge.data && edge.data.labels) || [];
+      for (const label of labels) {
+        if (!label) continue;
+        for (const id of [edge.source, edge.target]) {
+          if (!transitionLabels.has(id)) transitionLabels.set(id, []);
+          transitionLabels.get(id).push(label);
+        }
       }
     }
     const index = new Map();
@@ -492,7 +552,13 @@ function App() {
 
   const running = status && status.running;
   const graph = status && status.graph;
-  const stats = graph ? `${graph.stats.screens} экранов · ${graph.stats.transitions} переходов · ${graph.stats.steps} шагов` : "";
+  const stats = graph
+    ? [
+        counted(graph.stats.screens, "экран", "экрана", "экранов"),
+        counted(graph.stats.transitions, "переход", "перехода", "переходов"),
+        counted(graph.stats.steps, "шаг", "шага", "шагов"),
+      ].join(" · ")
+    : "";
 
   useEffect(() => {
     document.getElementById("appName").textContent = (status && status.app) || "—";

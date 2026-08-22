@@ -444,6 +444,88 @@ final class ExploreEngineTests: XCTestCase {
         )
     }
 
+    // MARK: names that are not a screen's
+
+    // The namespace half is the giveaway, and it sits before the dash: the
+    // suffix vocabulary only ever sees the tail, so this id read as a screen
+    // name and a promo sheet ended up on the canvas as
+    // `BenefitOptionsViewIds-BenefitOptionContainer`.
+    func testRootContainerIgnoresAnIdentifierNamespaceBeforeTheDash() {
+        let sheet = [
+            node(id: nil, type: "Application", depth: 0, frame: [0, 0, 402, 874]),
+            node(id: "BenefitOptionsViewIds-BenefitOptionContainer", type: "Group", depth: 4, frame: [0, 0, 402, 874]),
+            node(id: nil, label: "10 cashback categories", type: "StaticText", depth: 6, frame: [24, 300, 340, 34]),
+        ]
+        XCTAssertEqual(ExploreEngine.screenKey(of: sheet), "headline:10 cashback categories")
+    }
+
+    // A router, a hosting controller, a tap region: several different screens
+    // share one wrapper, so its name says nothing about which of them this is.
+    func testRootContainerIgnoresContainerVocabulary() {
+        for wrapper in [
+            "SubscriptionsMainScreenNavigation",
+            "PopoverDismissRegion",
+            "PaymentsFlowRouter",
+            "OnboardingContentWrapper",
+        ] {
+            let snapshot = [
+                node(id: nil, type: "Application", depth: 0, frame: [0, 0, 402, 874]),
+                node(id: wrapper, type: "Group", depth: 3, frame: [0, 0, 402, 874]),
+                node(id: nil, label: "Your subscriptions", type: "StaticText", depth: 5, frame: [24, 280, 340, 34]),
+            ]
+            XCTAssertEqual(ExploreEngine.screenKey(of: snapshot), "headline:Your subscriptions", wrapper)
+        }
+    }
+
+    // A screen genuinely named after itself still wins: the vocabulary rules
+    // out wrappers, not every long identifier.
+    func testRootContainerStillAcceptsAScreensOwnName() {
+        let snapshot = [
+            node(id: nil, type: "Application", depth: 0, frame: [0, 0, 402, 874]),
+            node(id: "PersonalDetailsScreen", type: "Group", depth: 3, frame: [0, 0, 402, 874]),
+        ]
+        XCTAssertEqual(ExploreEngine.screenKey(of: snapshot), "PersonalDetailsScreen")
+    }
+
+    // MARK: actions
+
+    // SwiftUI names its own hosting containers with a leading underscore. They
+    // are not controls: a tap aims at the centre of the container and presses
+    // whatever sits there, spending the budget and minting transitions no
+    // button of the app can explain.
+    func testPrivateSystemContainersOfferNoAction() {
+        let snapshot = [
+            node(id: nil, type: "Application", depth: 0, frame: [0, 0, 402, 874]),
+            node(id: "_TtGC7SwiftUI29PresentationHosting", type: "Group", depth: 2, frame: [0, 100, 402, 400]),
+            node(id: "_TtGC7SwiftUI32NavigationStackHosting", type: "Group", depth: 3, frame: [0, 120, 402, 300]),
+            node(id: "MainScreen-TransferButton", type: "Button", depth: 4, frame: [24, 200, 120, 44]),
+        ]
+        XCTAssertEqual(ExploreEngine.actions(from: snapshot).map(\.key), ["MainScreen-TransferButton"])
+    }
+
+    // A control the app did label is still tappable — by its label — even when
+    // the identifier next to it belongs to the framework.
+    func testPrivateIdentifierWithALabelIsStillTappable() {
+        let snapshot = [
+            node(id: nil, type: "Application", depth: 0, frame: [0, 0, 402, 874]),
+            node(id: "_UIButtonBarButton", label: "Continue", type: "Button", depth: 4, frame: [24, 200, 120, 44]),
+        ]
+        XCTAssertEqual(ExploreEngine.actions(from: snapshot).map(\.key), ["Continue@Button"])
+    }
+
+    // MARK: counted nouns
+
+    func testACountIsReadWithItsNounInTheRightForm() {
+        XCTAssertEqual(ExploreEngine.counted(1, "экран", "экрана", "экранов"), "1 экран")
+        XCTAssertEqual(ExploreEngine.counted(2, "экран", "экрана", "экранов"), "2 экрана")
+        XCTAssertEqual(ExploreEngine.counted(5, "шаг", "шага", "шагов"), "5 шагов")
+        XCTAssertEqual(ExploreEngine.counted(11, "шаг", "шага", "шагов"), "11 шагов")
+        XCTAssertEqual(ExploreEngine.counted(21, "шаг", "шага", "шагов"), "21 шаг")
+        XCTAssertEqual(ExploreEngine.counted(114, "шаг", "шага", "шагов"), "114 шагов")
+        XCTAssertEqual(ExploreEngine.counted(141, "шаг", "шага", "шагов"), "141 шаг")
+        XCTAssertEqual(ExploreEngine.counted(0, "переход", "перехода", "переходов"), "0 переходов")
+    }
+
     // MARK: helpers
 
     private func screenNode(

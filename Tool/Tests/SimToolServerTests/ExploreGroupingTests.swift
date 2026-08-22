@@ -140,6 +140,33 @@ final class ExploreGroupingTests: XCTestCase {
         }
     }
 
+    // An app whose buttons carry no accessibility label leaves only their
+    // identifiers to name a flow after — and those name the button's id
+    // namespace, not the feature. The screen behind the door does better.
+    func testAFlowBehindUnlabelledButtonsIsNamedAfterItsScreen() {
+        let map = graph(
+            nodes: [
+                node("s-main", title: "MainScreen"),
+                node("s-upgrade", title: "AccountUpgradeView"),
+                node("s-benefits", title: "BenefitsScreen"),
+                node("s-cards", title: "CardDetailsScreen"),
+            ],
+            edges: [
+                identifiedEdge("s-main", "s-upgrade", "AccountUpgradeWidgetIds-Widget"),
+                identifiedEdge("s-upgrade", "s-benefits", "AccountUpgradeView-BenefitsHolaCell"),
+                identifiedEdge("s-main", "s-cards", "HolaCardMiniRow-CardView"),
+            ]
+        )
+        let groups = ExploreGrouping.groups(of: map)
+        XCTAssertEqual(groups.first { $0.key == "s-upgrade" }?.label, "AccountUpgradeView")
+        // The identifiers stay on offer — last, where an agent can still see
+        // what the map really had.
+        XCTAssertEqual(groups.first { $0.key == "s-upgrade" }?.candidates.last, "s-upgrade")
+        XCTAssertTrue(
+            groups.first { $0.key == "s-upgrade" }?.candidates.contains("AccountUpgradeWidgetIds-Widget") == true
+        )
+    }
+
     // MARK: name candidates
 
     func testTheDoorButtonWordsLeadTheCandidates() {
@@ -195,24 +222,22 @@ final class ExploreGroupingTests: XCTestCase {
 
     // MARK: entry points
 
-    func testScreenWithNoIncomingTransitionIsAnEntryPointAndHasNoDepth() {
+    func testScreenWithNoIncomingTransitionIsAnEntryPointAndMeasuredFromItself() {
         let topology = ExploreGrouping.Topology(graph: sampleMap())
 
-        XCTAssertEqual(topology.root, "s-main")
-        // `s-survey` was recorded after a relaunch: no tap leads to it.
+        // `s-survey` was recorded after a relaunch: no tap leads to it, so it
+        // is an opening of its own and everything is measured from there.
         XCTAssertTrue(topology.isEntryPoint("s-survey"))
-        XCTAssertNil(topology.depth["s-survey"])
-        XCTAssertEqual(topology.depth["s-payments"], 1)
-        XCTAssertEqual(topology.depth["s-spei"], 3)
-        // The launch screen has no incoming transition either, but its depth
-        // describes a real path — the empty one.
+        XCTAssertEqual(topology.reachDepth["s-survey"], 0)
         XCTAssertTrue(topology.isEntryPoint("s-main"))
-        XCTAssertEqual(topology.depth["s-main"], 0)
+        XCTAssertEqual(topology.reachDepth["s-main"], 0)
+        XCTAssertEqual(topology.reachDepth["s-payments"], 1)
+        XCTAssertEqual(topology.reachDepth["s-spei"], 3)
     }
 
-    func testRootIsTheScreenTheMapHangsOffNotTheFirstRecorded() {
-        // `s-survey` is recorded first and carries no incoming transition, but
-        // nothing hangs off it.
+    func testTheOrderScreensWereRecordedInDoesNotChangeTheMap() {
+        // `s-survey` carries no incoming transition and nothing hangs off it;
+        // recording it first must not turn it into the screen the map hangs on.
         let map = sampleMap()
         let reordered = ExploreGraph(
             schemaVersion: map.schemaVersion,
@@ -221,7 +246,50 @@ final class ExploreGroupingTests: XCTestCase {
             nodes: [map.nodes.first { $0.id == "s-survey" }!] + map.nodes.filter { $0.id != "s-survey" },
             edges: map.edges
         )
-        XCTAssertEqual(ExploreGrouping.Topology(graph: reordered).root, "s-main")
+        let topology = ExploreGrouping.Topology(graph: reordered)
+        XCTAssertEqual(topology.reachDepth["s-payments"], 1)
+        XCTAssertEqual(topology.reachDepth["s-spei"], 3)
+        XCTAssertEqual(
+            Set(ExploreGrouping.groups(of: reordered).map(\.key)),
+            Set(ExploreGrouping.groups(of: map).map(\.key))
+        )
+    }
+
+    // MARK: what is stored vs what is drawn
+
+    func testATransitionOntoAShallowerScreenStaysInTheStoreButIsNotDrawn() {
+        // The crawl tapped its way from the store list back up to the hub. The
+        // fact belongs in the store; the arrow would only tangle the map.
+        let map = sampleMap(extraEdges: [edge("s-stores", "s-payments", "Home")])
+        let drawn = ExploreGrouping.descending(map)
+
+        XCTAssertTrue(map.edges.contains { $0.from == "s-stores" && $0.to == "s-payments" })
+        XCTAssertFalse(drawn.edges.contains { $0.from == "s-stores" && $0.to == "s-payments" })
+        XCTAssertEqual(drawn.stats.transitions, drawn.edges.count)
+    }
+
+    func testAScreenEnteredTwiceKeepsTheArrowsThatLeadToIt() {
+        // A relaunch landed on a charted screen, so the store carries it with
+        // depth 0 — the crawl's note that a pass opened there. That must not
+        // cost the screen the transitions leading into it: measuring from the
+        // recorded transitions rather than from that zero is what keeps them.
+        let map = sampleMap()
+        let flattened = ExploreGraph(
+            schemaVersion: map.schemaVersion,
+            run: map.run,
+            stats: map.stats,
+            nodes: map.nodes.map { node in
+                guard node.id == "s-cash" else { return node }
+                var node = node
+                node.depth = 0
+                return node
+            },
+            edges: map.edges
+        )
+        let drawn = ExploreGrouping.descending(flattened)
+        XCTAssertTrue(drawn.edges.contains { $0.from == "s-topup" && $0.to == "s-cash" })
+        XCTAssertTrue(drawn.edges.contains { $0.from == "s-cash" && $0.to == "s-stores" })
+        XCTAssertFalse(ExploreGrouping.Topology(graph: flattened).isEntryPoint("s-cash"))
     }
 
     // MARK: annotation
@@ -371,6 +439,18 @@ final class ExploreGroupingTests: XCTestCase {
             from: from,
             to: to,
             action: ExploreTransitionAction(kind: "tap", targetId: nil, targetLabel: label),
+            count: 1
+        )
+    }
+
+    /// A transition whose button carries no accessibility label — only an
+    /// identifier, the way an unlabelled design-system control reads.
+    private func identifiedEdge(_ from: String, _ to: String, _ identifier: String) -> ExploreTransitionEdge {
+        ExploreTransitionEdge(
+            id: "\(from)->\(to)-\(identifier)",
+            from: from,
+            to: to,
+            action: ExploreTransitionAction(kind: "tap", targetId: identifier, targetLabel: nil),
             count: 1
         )
     }
