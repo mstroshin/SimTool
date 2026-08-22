@@ -406,7 +406,68 @@ final class ExploreEngineTests: XCTestCase {
         XCTAssertEqual(ExploreEngine.title(for: snapshot, fallback: "x"), "General")
     }
 
+    // MARK: untried actions
+
+    func testUntriedActionsAreReadFromTheKeySetsNotTheCounters() {
+        let screen = screenNode(
+            actionsTotal: 3, actionsTried: 3,
+            actionKeys: ["tab", "profile", "card"], triedActionKeys: ["tab", "profile"]
+        )
+        // The counters agree; the keys do not, and the keys are the truth.
+        XCTAssertTrue(ExploreEngine.hasUntriedActions(screen))
+    }
+
+    func testAScreenWhoseEveryCataloguedTapWasMadeIsFinished() {
+        let screen = screenNode(
+            actionsTotal: 2, actionsTried: 2,
+            actionKeys: ["tab", "profile"], triedActionKeys: ["profile", "tab"]
+        )
+        XCTAssertFalse(ExploreEngine.hasUntriedActions(screen))
+    }
+
+    // Stores written before the keys were kept summed both counters per state,
+    // so one button in two states counted twice among the totals and once among
+    // the tried — the tried count could even overshoot the total. Neither
+    // direction may be read as "nothing left to tap".
+    func testALegacyStoreWithMismatchedCountersIsTreatedAsUnfinished() {
+        XCTAssertTrue(ExploreEngine.hasUntriedActions(
+            screenNode(actionsTotal: 35, actionsTried: 37, actionKeys: nil, triedActionKeys: ["a"])
+        ))
+        XCTAssertTrue(ExploreEngine.hasUntriedActions(
+            screenNode(actionsTotal: 69, actionsTried: 24, actionKeys: nil, triedActionKeys: nil)
+        ))
+        XCTAssertFalse(
+            ExploreEngine.hasUntriedActions(
+                screenNode(actionsTotal: 8, actionsTried: 8, actionKeys: nil, triedActionKeys: nil)
+            ),
+            "counters that agree are all such a store has to say"
+        )
+    }
+
     // MARK: helpers
+
+    private func screenNode(
+        actionsTotal: Int,
+        actionsTried: Int,
+        actionKeys: [String]?,
+        triedActionKeys: [String]?
+    ) -> ExploreScreenNode {
+        ExploreScreenNode(
+            id: "s-main",
+            title: "MainScreen",
+            fingerprint: "s-main",
+            key: "MainScreen",
+            screenshot: "shots/s-main.png",
+            depth: 0,
+            visits: 1,
+            states: 1,
+            actionsTotal: actionsTotal,
+            actionsTried: actionsTried,
+            firstSeenAt: "2026-08-21T10:00:00Z",
+            triedActionKeys: triedActionKeys,
+            actionKeys: actionKeys
+        )
+    }
 
     private func node(
         id: String?,

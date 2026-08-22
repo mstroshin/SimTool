@@ -64,6 +64,22 @@ final class AgentSkillTests: XCTestCase {
         }
     }
 
+    // Naming the feature groups is the one part of the map simtool cannot do on
+    // its own: it holds no model, so the instructions an agent needs must ship
+    // with the skill or the groups stay called `payments_bills` forever.
+    func testCartographCompanionTeachesTheNamingPass() throws {
+        let cartograph = try XCTUnwrap(
+            AgentSkill.simtool.companions.first { $0.fileName == "cartograph.md" }
+        )
+        let text = cartograph.markdown
+
+        XCTAssertTrue(text.contains("GET /api/v1/explore/groups"), "missing where the groups come from")
+        XCTAssertTrue(text.contains("POST /api/v1/explore/groups"), "missing where the names go back")
+        XCTAssertTrue(text.contains("in one call"), "names must be chosen as a set, or two groups collide")
+        XCTAssertTrue(text.contains("do not translate"), "names must stay in the app's own words")
+        XCTAssertTrue(text.contains("groups.json"), "missing where names are kept")
+    }
+
     // `global` must land in $HOME, not in whatever directory `init` happened to
     // run from — that is the whole difference between the two scopes.
     func testGlobalScopeWritesIntoHomeNotTheProject() throws {

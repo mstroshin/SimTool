@@ -12,7 +12,10 @@ function ScreenNode({ data, selected }) {
     <${Handle} type="target" position=${Position.Left} style=${{ opacity: 0 }} />
     <img src=${"/api/v1/explore/shot?node=" + data.id} loading="lazy" alt="" />
     <div class="screen-title" title=${data.title}>${data.title}</div>
-    <div class="screen-meta">${data.actionsTried}/${data.actionsTotal} действий</div>
+    <div class="screen-meta">
+      ${data.actionsTried}/${data.actionsTotal} действий
+      ${data.bridge && html`<span class="bridge-tag" title="Транзит: путь в фичу лежит через этот экран, но он не входит в неё">транзит<//>`}
+    </div>
     <${Handle} type="source" position=${Position.Right} style=${{ opacity: 0 }} />
   </div>`;
 }
@@ -37,19 +40,63 @@ function autoLayout(graphNodes) {
   return positions;
 }
 
+// Columns by distance from the flow's doors rather than from the map root, so
+// the way in — the fork screen, then the flow's first screen — reads left to
+// right and a flow that starts deep opens flush left instead of behind empty
+// columns. Rows keep map order, so a screen the crawl adds while the flow is
+// open lands at the end of its column instead of reshuffling the ones shown.
+function subtreeLayout(nodes, edges, entryIds) {
+  const neighbours = new Map();
+  for (const edge of edges) {
+    if (!neighbours.has(edge.source)) neighbours.set(edge.source, []);
+    if (!neighbours.has(edge.target)) neighbours.set(edge.target, []);
+    neighbours.get(edge.source).push(edge.target);
+    neighbours.get(edge.target).push(edge.source);
+  }
+  const order = nodes.map((node) => node.id);
+  const drawn = new Set(order);
+  // Screens the doors cannot reach — recorded after a relaunch — start their
+  // own column 0 rather than dropping off the view.
+  const sources = [...entryIds, ...order].filter((id) => drawn.has(id));
+  const distance = new Map();
+  for (const source of sources) {
+    if (distance.has(source)) continue;
+    distance.set(source, 0);
+    const queue = [source];
+    for (let head = 0; head < queue.length; head += 1) {
+      const current = queue[head];
+      for (const next of neighbours.get(current) || []) {
+        if (distance.has(next)) continue;
+        distance.set(next, distance.get(current) + 1);
+        queue.push(next);
+      }
+    }
+  }
+  const rows = new Map();
+  const positions = new Map();
+  for (const id of order) {
+    const column = distance.get(id) || 0;
+    const row = rows.get(column) || 0;
+    rows.set(column, row + 1);
+    positions.set(id, { x: column * 320, y: row * 480 });
+  }
+  return positions;
+}
+
 // Every place a query can hit, grouped so the panel can name what matched.
 // The named groups cover what a person searches by; `restValues` sweeps up
 // everything else the record carries — depth, visits, timestamps, and any
 // field a later schema adds — so a query really searches the whole node.
 const SEARCH_GROUPS = [
   { label: "название", pick: (node) => [node.title] },
+  { label: "фичи", pick: (node) => node.groups || [] },
   { label: "диплинки", pick: (node) => node.deeplinks || [] },
   { label: "локализация", pick: (node) => node.localizationKeys || [] },
   { label: "действия", pick: (node) => node.triedActionKeys || [] },
   { label: "идентификаторы", pick: (node) => [node.id, node.key, node.fingerprint] },
 ];
 const NAMED_FIELDS = new Set([
-  "title", "deeplinks", "localizationKeys", "triedActionKeys", "id", "key", "fingerprint",
+  "title", "groups", "deeplinks", "localizationKeys", "triedActionKeys", "id", "key", "fingerprint",
 ]);
 
 function restValues(node) {
@@ -64,11 +111,15 @@ function restValues(node) {
   return values;
 }
 
-function searchEntry(node, transitionLabels) {
+function searchEntry(node, transitionLabels, featureLabels) {
   const groups = SEARCH_GROUPS.map((group) => ({
     label: group.label,
     values: group.pick(node).filter(Boolean).map(String),
   }));
+  // A node carries its flows as keys; what a person searches by is the label
+  // the chip shows, so both are in the haystack.
+  const features = groups.find((group) => group.label === "фичи");
+  if (features) features.values = [...(featureLabels || []), ...features.values];
   groups.push({ label: "переходы", values: transitionLabels });
   groups.push({ label: "прочее", values: restValues(node) });
   const haystack = groups.map((group) => group.values.join("\n")).join("\n").toLowerCase();
@@ -99,7 +150,14 @@ function App() {
   const [error, setError] = useState(null);
   const [query, setQuery] = useState("");
   const [matchIndex, setMatchIndex] = useState(0);
+  // Which feature the canvas is showing; null is the whole map, and the whole
+  // map is a choice in the same row rather than a mode with a way back out.
+  const [activeGroupKey, setActiveGroupKey] = useState(null);
   const searchInput = useRef(null);
+  // Where the user left the whole map, so returning to it lands where they
+  // were instead of at fitView.
+  const wholeMapViewport = useRef(null);
+  const shownGroupKey = useRef(null);
   // Node id -> position, both what the user dragged this session and
   // what earlier sessions saved on the server. A local drag always
   // wins over a polled value, so a save in flight never snaps a
@@ -109,17 +167,36 @@ function App() {
   const saveTimer = useRef(null);
   const flowInstance = useRef(null);
 
-  // Re-center as the map grows: a scan adds nodes outside the
-  // viewport, and watching the map расти is the whole demo.
+  // Re-center as the map grows: a scan adds nodes outside the viewport, and
+  // watching the map расти is the whole demo. Three things override that, and
+  // they share one effect so they cannot fight over the viewport:
+  //  - an active search owns it, so a poll never yanks away the card jumped to;
+  //  - a feature keeps it while the crawl fills that feature in;
+  //  - coming back to the whole map restores where the user left it.
   useEffect(() => {
-    // A search owns the viewport while it is active: re-fitting the whole map
-    // under it would throw away the card the user just jumped to.
+    const instance = flowInstance.current;
+    if (!instance) return undefined;
+    // Which view is on screen is tracked before the search bails out, not
+    // after: a feature opened while a query was active would otherwise still
+    // look like the whole map once the query clears, and the feature's own
+    // viewport would be saved as the place to return to.
+    const previous = shownGroupKey.current;
+    const switched = previous !== activeGroupKey;
+    if (switched && previous === null) wholeMapViewport.current = instance.getViewport();
+    shownGroupKey.current = activeGroupKey;
     if (query.trim()) return undefined;
+    // Growing inside an open feature: the new card joins the subtree, but the
+    // view stays exactly where it is.
+    if (activeGroupKey !== null && !switched) return undefined;
     const timer = setTimeout(() => {
-      if (flowInstance.current) flowInstance.current.fitView({ padding: 0.15, duration: 400 });
+      if (switched && activeGroupKey === null && wholeMapViewport.current) {
+        instance.setViewport(wholeMapViewport.current, { duration: 400 });
+        return;
+      }
+      instance.fitView({ padding: 0.15, duration: 400 });
     }, 80);
     return () => clearTimeout(timer);
-  }, [flow.nodes.length, query]);
+  }, [flow.nodes.length, query, activeGroupKey]);
 
   const rebuild = useCallback((graph, layout) => {
     if (!graph) { setFlow({ nodes: [], edges: [] }); return; }
@@ -207,15 +284,66 @@ function App() {
   const onNodesChange = useCallback((changes) => {
     setFlow((previous) => {
       const nodes = applyNodeChanges(changes, previous.nodes);
-      for (const change of changes) {
-        if (change.type === "position" && change.position) {
-          placedPositions.current.set(change.id, change.position);
-          scheduleSave(change.id, change.position);
+      // Only the whole map has an arrangement worth keeping. A feature view
+      // places its cards itself, so anything it reports is a computed
+      // position, not a decision the user made — recording it would overwrite
+      // the arrangement they actually built.
+      if (activeGroupKey === null) {
+        for (const change of changes) {
+          if (change.type === "position" && change.position) {
+            placedPositions.current.set(change.id, change.position);
+            scheduleSave(change.id, change.position);
+          }
         }
       }
       return { nodes, edges: previous.edges };
     });
-  }, [scheduleSave]);
+  }, [scheduleSave, activeGroupKey]);
+
+  const allGroups = useMemo(() => (status && status.groups) || [], [status]);
+  // Only flows worth offering: one that draws a single card shows no sequence,
+  // so it stays computed but unlisted until a later crawl fills it.
+  const groups = useMemo(() => allGroups.filter((group) => group.displayable), [allGroups]);
+  // Key -> shown label, listed or not: a screen names every flow it is part
+  // of, and a bare key reads like plumbing.
+  const groupLabels = useMemo(
+    () => new Map(allGroups.map((group) => [group.key, group.label])),
+    [allGroups]
+  );
+  const activeGroup = useMemo(
+    () => groups.find((group) => group.key === activeGroupKey) || null,
+    [groups, activeGroupKey]
+  );
+
+  // A crawl can regroup the map out from under an open feature. Falling back to
+  // the whole map beats showing an empty canvas — but only once a status has
+  // actually arrived: before the first poll every group is missing, and
+  // dropping the choice then would be answering a question nobody asked yet.
+  useEffect(() => {
+    if (activeGroupKey === null || !status) return;
+    if (!activeGroup) setActiveGroupKey(null);
+  }, [status, activeGroupKey, activeGroup]);
+
+  // The feature view is derived: its cards are placed by the layout above, not
+  // by where the user dragged them on the whole map, and they do not move. That
+  // is what keeps one arrangement — the whole map's — the only one to persist.
+  const view = useMemo(() => {
+    if (!activeGroup) return { nodes: flow.nodes, edges: flow.edges };
+    const bridges = new Set(activeGroup.bridges || []);
+    const visible = new Set([...(activeGroup.members || []), ...bridges]);
+    const nodes = flow.nodes.filter((node) => visible.has(node.id));
+    const edges = flow.edges.filter((edge) => visible.has(edge.source) && visible.has(edge.target));
+    const positions = subtreeLayout(nodes, edges, [...bridges, activeGroup.entry]);
+    return {
+      nodes: nodes.map((node) => ({
+        ...node,
+        position: positions.get(node.id) || node.position,
+        draggable: false,
+        data: { ...node.data, bridge: bridges.has(node.id) },
+      })),
+      edges,
+    };
+  }, [flow, activeGroup]);
 
   // What a query can match, per node: the node's own record plus the labels of
   // the transitions touching it, so "оплатить" finds the screen a button of
@@ -232,21 +360,32 @@ function App() {
     }
     const index = new Map();
     for (const node of flow.nodes) {
-      index.set(node.id, searchEntry(node.data, transitionLabels.get(node.id) || []));
+      const featureLabels = (node.data.groups || []).map((key) => groupLabels.get(key)).filter(Boolean);
+      index.set(node.id, searchEntry(node.data, transitionLabels.get(node.id) || [], featureLabels));
     }
     return index;
-  }, [flow.nodes, flow.edges]);
+  }, [flow.nodes, flow.edges, groupLabels]);
 
   const terms = useMemo(() => queryTerms(query), [query]);
+  const hitsQuery = useCallback((id) => {
+    const entry = searchIndex.get(id);
+    return Boolean(entry) && terms.every((term) => entry.haystack.includes(term));
+  }, [searchIndex, terms]);
+
+  // Search answers about what is on screen. It stays inside the open feature —
+  // jumping to a card the current view does not show would be a silent switch.
   const matches = useMemo(() => {
     if (terms.length === 0) return [];
-    return flow.nodes
-      .filter((node) => {
-        const entry = searchIndex.get(node.id);
-        return entry && terms.every((term) => entry.haystack.includes(term));
-      })
-      .map((node) => node.id);
-  }, [flow.nodes, searchIndex, terms]);
+    return view.nodes.filter((node) => hitsQuery(node.id)).map((node) => node.id);
+  }, [view.nodes, hitsQuery, terms.length]);
+
+  // ...but hits outside it are counted and offered, so a feature view never
+  // makes results disappear without saying so.
+  const outsideMatches = useMemo(() => {
+    if (terms.length === 0 || !activeGroup) return 0;
+    const shown = new Set(view.nodes.map((node) => node.id));
+    return flow.nodes.filter((node) => !shown.has(node.id) && hitsQuery(node.id)).length;
+  }, [terms.length, activeGroup, view.nodes, flow.nodes, hitsQuery]);
 
   // The list identity changes on every poll; its contents do not. Keying the
   // focus effect on the contents keeps a poll from yanking the viewport back.
@@ -309,13 +448,17 @@ function App() {
   // Dim what the query rules out, ring what it keeps: the map itself answers
   // «где это встречается», without a result list beside it.
   const displayNodes = useMemo(() => {
-    if (terms.length === 0) return flow.nodes;
+    const withBridges = view.nodes.map((node) => (
+      node.data && node.data.bridge ? { ...node, className: "bridge" } : node
+    ));
+    if (terms.length === 0) return withBridges;
     const matched = new Set(matches);
-    return flow.nodes.map((node) => {
-      if (!matched.has(node.id)) return { ...node, className: "dimmed" };
-      return { ...node, className: node.id === currentMatch ? "match current" : "match" };
+    return withBridges.map((node) => {
+      const bridge = node.className === "bridge" ? "bridge " : "";
+      if (!matched.has(node.id)) return { ...node, className: bridge + "dimmed" };
+      return { ...node, className: bridge + (node.id === currentMatch ? "match current" : "match") };
     });
-  }, [flow.nodes, matches, currentMatch, terms.length]);
+  }, [view.nodes, matches, currentMatch, terms.length]);
 
   const matchedGroups = useMemo(() => {
     const entry = currentMatch && searchIndex.get(currentMatch);
@@ -365,7 +508,7 @@ function App() {
     <div class="canvas">
       <${ReactFlow}
         nodes=${displayNodes}
-        edges=${flow.edges}
+        edges=${view.edges}
         nodeTypes=${nodeTypes}
         onNodesChange=${onNodesChange}
         onNodeClick=${(event, node) => setSelected(node.id)}
@@ -396,7 +539,28 @@ function App() {
             <button class="search-step" title="Следующее совпадение (⏎)" disabled=${matches.length < 2} onClick=${() => step(1)}>↓</button>
             ${query.length > 0 && html`<button class="search-step" title="Сбросить (Esc)" onClick=${clearSearch}>✕</button>`}
             ${matchedGroups && html`<span class="search-hint" title=${matchedGroups}>совпало: ${matchedGroups}<//>`}
+            ${outsideMatches > 0 && html`<button
+              class="search-elsewhere"
+              title="Показать всю карту и найти их"
+              onClick=${() => setActiveGroupKey(null)}
+            >ещё ${outsideMatches} вне фичи<//>`}
           </div>
+          ${groups.length > 0 && html`<div class="groups">
+            <button
+              class=${"group-chip" + (activeGroupKey === null ? " active" : "")}
+              onClick=${() => setActiveGroupKey(null)}
+            >Вся карта<span class="group-count">${flow.nodes.length}</span><//>
+            ${groups.map((group) => html`<button
+              key=${group.key}
+              class=${"group-chip" + (activeGroupKey === group.key ? " active" : "") + (group.staleName ? " stale" : "")}
+              title=${group.staleName ? group.key + " — состав заметно изменился с момента именования" : group.key}
+              onClick=${() => setActiveGroupKey(group.key)}
+            >
+              ${group.label}
+              ${group.label !== group.key && html`<span class="group-key">${group.key}<//>`}
+              <span class="group-count">${group.members.length}</span>
+            <//>`)}
+          </div>`}
         <//>
         <${Background} color="#233052" gap=${24} />
         <${Controls} />
@@ -418,6 +582,16 @@ function App() {
         <//>`)}
       <//>`}
       <img src=${"/api/v1/explore/shot?node=" + selectedNode.id} alt="" />
+      ${(selectedNode.groups || []).length > 0 && html`<div class="section">
+        <div class="section-title">Фичи</div>
+        ${selectedNode.groups.map((key) => html`<button
+          key=${key}
+          title=${key}
+          class=${"group-chip inline" + (activeGroupKey === key ? " active" : "") + (hits(key, terms) || hits(groupLabels.get(key) || "", terms) ? " hit" : "")}
+          disabled=${!groups.some((group) => group.key === key)}
+          onClick=${() => setActiveGroupKey(key)}
+        >${groupLabels.get(key) || key}<//>`)}
+      <//>`}
       <div class="section">
         <div class="section-title">Диплинки</div>
         ${(selectedNode.deeplinks || []).length
