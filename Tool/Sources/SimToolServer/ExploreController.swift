@@ -338,12 +338,14 @@ public enum ExploreEngine {
         return limited
     }
 
-    /// Identifier prefixes that name a convention, not a screen: reverse-DNS
-    /// heads, SF Symbols, generic UIKit vocabulary.
+    /// Whole identifiers that name a convention, not a screen: reverse-DNS
+    /// heads, SF Symbols, generic UIKit vocabulary. Only the words the
+    /// component vocabulary below cannot catch — `button`, `label`, `navbar`
+    /// and friends already end in a component name, and listing them twice
+    /// would mean maintaining the same rule in two places.
     static let titleStopwords: Set<String> = [
-        "com", "org", "net", "app", "apple", "chevron", "xmark", "arrow", "icon",
-        "cell", "button", "label", "image", "title", "text", "list", "table",
-        "nav", "navbar", "tab", "tabbar", "static", "view", "screen",
+        "com", "org", "net", "app", "apple", "chevron", "xmark", "table",
+        "nav", "tab", "static", "view", "screen",
     ]
 
     /// Name endings that mark an identifier as a reusable control, not a
@@ -376,8 +378,12 @@ public enum ExploreEngine {
         "hola",
     ]
 
-    static func isComponentNamed(_ identifier: String) -> Bool {
+    /// True when an identifier names a convention rather than a screen —
+    /// the one gate both naming heuristics ask, so a new stopword or component
+    /// suffix lands in exactly one place.
+    static func isGenericName(_ identifier: String) -> Bool {
         let lowered = identifier.lowercased()
+        if titleStopwords.contains(lowered) { return true }
         return componentNamePrefixes.contains { lowered.hasPrefix($0) }
             || componentNameSuffixes.contains { lowered.hasSuffix($0) }
     }
@@ -413,8 +419,7 @@ public enum ExploreEngine {
             guard parts.count >= 2, let prefix = parts.first.map(String.init) else { continue }
             guard prefix.count >= 4,
                   prefix.rangeOfCharacter(from: .letters) != nil,
-                  !titleStopwords.contains(prefix.lowercased()),
-                  !isComponentNamed(prefix) else { continue }
+                  !isGenericName(prefix) else { continue }
             distinctIdsByPrefix[prefix, default: []].insert(id)
         }
         let best = distinctIdsByPrefix.max { ($0.value.count, $1.key) < ($1.value.count, $0.key) }
@@ -444,8 +449,7 @@ public enum ExploreEngine {
             guard let id = node.id, !id.isEmpty, !id.hasPrefix("_"), idCounts[id] == 1 else { continue }
             guard id.count >= 4,
                   id.rangeOfCharacter(from: .letters) != nil,
-                  !titleStopwords.contains(id.lowercased()),
-                  !isComponentNamed(id) else { continue }
+                  !isGenericName(id) else { continue }
             guard let frame = node.frame, frame.count == 4 else { continue }
             guard Double(frame[2]) * Double(frame[3]) >= windowArea * 0.7 else { continue }
             if best == nil || node.depth < best!.depth { best = (index, node.depth) }
@@ -1299,27 +1303,6 @@ public final class ExploreController: @unchecked Sendable {
     }
 
     // MARK: simulator I/O
-
-    /// The app's own accessibility label — the display name iOS puts under its
-    /// icon, which is also the label AXe reports on the root of its tree. Read
-    /// from the installed bundle so the crawl knows which app it is waiting
-    /// for before the first snapshot exists. Nil when the app is not installed
-    /// or its Info.plist names it in neither key: the caller then falls back to
-    /// anchoring on whatever settles, the pre-existing behaviour.
-    private func installedAppLabel(of app: String) async -> String? {
-        guard let container = try? await ProcessRunner.run(
-            executable: URL(fileURLWithPath: "/usr/bin/xcrun"),
-            arguments: ["simctl", "get_app_container", configuration.device.udid, app, "app"],
-            timeoutSeconds: 30
-        ), container.status == 0 else { return nil }
-        let bundlePath = container.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !bundlePath.isEmpty,
-              let data = try? Data(contentsOf: URL(fileURLWithPath: bundlePath).appendingPathComponent("Info.plist")),
-              let info = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
-        else { return nil }
-        let name = (info["CFBundleDisplayName"] as? String) ?? (info["CFBundleName"] as? String)
-        return name?.nilIfEmpty
-    }
 
     /// Relaunches through simctl with the profile's argv, arming the SimTool
     /// loggers the same way `simtool test run` does — the crawl must observe
