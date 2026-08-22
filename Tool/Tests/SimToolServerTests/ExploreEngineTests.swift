@@ -162,6 +162,123 @@ final class ExploreEngineTests: XCTestCase {
         XCTAssertEqual(ExploreEngine.screenKey(of: withKeyboard), "navbar:Create link")
     }
 
+    // Design-system components stamp their ids on every screen: a form with
+    // one branded text field already carries HolaTextField-TextField,
+    // -PlaceholderText, -ClearButton — three distinct ids that would win the
+    // dominant-prefix vote and name the screen after the component. Component
+    // vocabulary in the prefix is disqualifying; the screen's own namespace,
+    // when present, wins even with fewer ids.
+    func testScreenKeyIgnoresComponentNamespacePrefixes() {
+        let form = [
+            node(id: nil, type: "Application", depth: 0, frame: [0, 0, 402, 874]),
+            node(id: "HolaTextField-TextField", type: "TextField", depth: 8),
+            node(id: "HolaTextField-PlaceholderText", type: "StaticText", depth: 8),
+            node(id: "HolaTextField-ClearButton", type: "Button", depth: 8),
+            node(id: "HolaButtonStack-FirstButton", type: "Button", depth: 7),
+        ]
+        XCTAssertNil(ExploreEngine.screenKey(of: form))
+        let named = form + [
+            node(id: "RestoreAccessScreen-OldNumber", type: "Group", depth: 6),
+            node(id: "RestoreAccessScreen-NewNumber", type: "Group", depth: 6),
+            node(id: "RestoreAccessScreen-Curp", type: "Group", depth: 6),
+        ]
+        XCTAssertEqual(ExploreEngine.screenKey(of: named), "RestoreAccessScreen")
+    }
+
+    // A full-screen unique id can still be a control (a screen-sized branded
+    // text editor): controls make poor screen names, so the crawl looks past
+    // them at the next heuristic.
+    func testRootContainerIgnoresComponentNamedNodes() {
+        let snapshot = [
+            node(id: nil, type: "Application", depth: 0, frame: [0, 0, 402, 874]),
+            node(id: "HolaTextField", type: "Group", depth: 5, frame: [0, 0, 402, 874]),
+            node(id: nil, label: "Tell us what happened to your old phone number", type: "StaticText", depth: 6, frame: [40, 138, 320, 41]),
+        ]
+        XCTAssertEqual(ExploreEngine.screenKey(of: snapshot), "headline:Tell us what happened to your old phone number")
+    }
+
+    // A brand prefix marks design-system vocabulary even when the suffix list
+    // has never heard of the coinage: HolaTextFieldSumm-* would win the
+    // dominant-prefix vote on any amount form. The screen's own namespace,
+    // when present, still wins.
+    func testScreenKeyIgnoresBrandPrefixedComponents() {
+        let form = [
+            node(id: nil, type: "Application", depth: 0, frame: [0, 0, 402, 874]),
+            node(id: "HolaTextFieldSumm-Currency", type: "StaticText", depth: 8),
+            node(id: "HolaTextFieldSumm-Value", type: "TextField", depth: 8),
+            node(id: "HolaTextFieldSumm-Hint", type: "StaticText", depth: 8),
+        ]
+        XCTAssertNil(ExploreEngine.screenKey(of: form))
+        let named = form + [
+            node(id: "AmountInputScreen-ProviderCard", type: "Group", depth: 6),
+            node(id: "AmountInputScreen-Continue", type: "Button", depth: 6),
+            node(id: "AmountInputScreen-SourcePicker", type: "Group", depth: 6),
+        ]
+        XCTAssertEqual(ExploreEngine.screenKey(of: named), "AmountInputScreen")
+    }
+
+    // Identifier-namespace enums (…Ids / …Identifiers) name the container of
+    // ids, not a screen: a widget with three AccountUpgradeWidgetIds-* nodes
+    // must not become the "AccountUpgradeWidgetIds" screen.
+    func testScreenKeyIgnoresIdentifierNamespaceSuffixes() {
+        let widget = [
+            node(id: nil, type: "Application", depth: 0, frame: [0, 0, 402, 874]),
+            node(id: "AccountUpgradeWidgetIds-Widget", type: "Group", depth: 6),
+            node(id: "AccountUpgradeWidgetIds-HolaHeader", type: "Group", depth: 7),
+            node(id: "AccountUpgradeWidgetIds-Button", type: "Button", depth: 7),
+        ]
+        XCTAssertNil(ExploreEngine.screenKey(of: widget))
+        let named = widget + [
+            node(id: "ProfileScreen-Avatar", type: "Group", depth: 6),
+            node(id: "ProfileScreen-PersonalDetailsHolaCell", type: "Group", depth: 6),
+            node(id: "ProfileScreen-LanguageHolaCell", type: "Group", depth: 6),
+        ]
+        XCTAssertEqual(ExploreEngine.screenKey(of: named), "ProfileScreen")
+    }
+
+    // A reusable full-screen template carries one container id across many
+    // features: two different onboardings hosted by HolaOnboardingScreen are
+    // two screens, so the brand-prefixed container must not become their
+    // shared key — with no other signal (the template's title sits below the
+    // headline zone) the key is nil and the fingerprint keeps them apart.
+    func testRootContainerIgnoresBrandPrefixedTemplates() {
+        func onboarding(_ title: String) -> [AccessibilityFlatNode] {
+            [
+                node(id: nil, type: "Application", depth: 0, frame: [0, 0, 402, 874]),
+                node(id: "HolaOnboardingScreen", type: "Group", depth: 5, frame: [0, 0, 402, 874]),
+                node(id: "HolaOnboardingScreen-Image", type: "Image", depth: 6, frame: [40, 142, 322, 322]),
+                node(id: nil, label: title, type: "StaticText", depth: 6, frame: [40, 572, 322, 41]),
+            ]
+        }
+        XCTAssertNil(ExploreEngine.screenKey(of: onboarding("Defer your operations")))
+        XCTAssertNil(ExploreEngine.screenKey(of: onboarding("Set a monthly spending limit")))
+    }
+
+    // The "lost access" screen as AXe reports it: no full-screen id, only
+    // component namespaces, a navbar-window title too long for the navbar
+    // heuristic — the headline (topmost title-sized text) is the human name,
+    // and it beats the taller two-line bullet below it.
+    func testScreenKeyFallsBackToTheHeadline() {
+        let snapshot = [
+            node(id: nil, type: "Application", depth: 0, frame: [0, 0, 402, 874]),
+            node(id: "BackButton", label: "Back", type: "Button", depth: 8, frame: [16, 62, 44, 44]),
+            node(id: "HolaScreenTitle-Title", label: "How to restore access with a new phone number", type: "StaticText", depth: 12, frame: [20, 136, 362, 122]),
+            node(id: "HolaTextBulletList-Text", label: "Enter your old phone number and your CURP", type: "StaticText", depth: 12, frame: [72, 282, 310, 41]),
+            node(id: "HolaTextBulletList-Text", label: "Enter your new phone number", type: "StaticText", depth: 12, frame: [72, 348, 310, 20]),
+            node(id: "HolaButtonStack-FirstButton", label: "Continue", type: "Button", depth: 11, frame: [20, 764, 362, 56]),
+        ]
+        XCTAssertEqual(
+            ExploreEngine.screenKey(of: snapshot),
+            "headline:How to restore access with a new phone number"
+        )
+        // 46 characters — under the display cap, shown whole.
+        XCTAssertEqual(
+            ExploreEngine.title(for: snapshot, fallback: "x"),
+            "How to restore access with a new phone number"
+        )
+        XCTAssertEqual(ExploreEngine.displayTitle(String(repeating: "a", count: 60)).count, 48)
+    }
+
     // Custom tab bars read as RadioButton groups, and app widgets as Groups
     // with an identifier — both are doors, not decoration. Screen-sized
     // containers and anonymous groups stay out.
