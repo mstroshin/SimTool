@@ -379,10 +379,12 @@ extension AgentSkill {
         in one step. Flags: `simtool serve --help` / `simtool run --help`.
 
         ### Картограф — the screen map
-        The viewer's Картограф tab renders the app as a map: one node per screen (its
+        The viewer's 🗺️ Картограф link opens `/cartographer`, a page of its own (not a
+        tab of the viewer), that renders the app as a map: one node per screen (its
         screenshot, deeplinks found in the source, localization keys), arrows for
-        forward navigation only, and a search box that filters the cards by any field a
-        node carries. A map can be produced by the built-in robot
+        forward navigation only, and a search box that filters the cards by what a
+        screen is known by — its name, id, deeplinks, localization keys, buttons and
+        the features it joined. A map can be produced by the built-in robot
         (`POST /api/v1/explore/start`) or by the agent walking the app itself — the full
         pass algorithm (settle-wait, screen identity and dedup, deeplinks from source
         without opening them, edge rules, the `graph.json` format) is in
@@ -432,28 +434,42 @@ extension AgentSkill {
     static let simtoolCartographMarkdown = #"""
         # Картограф: crawl an app into a screen map (via simtool)
 
-        The Картограф tab of the simtool viewer (`simtool serve` → 🗺️ Картограф) draws a
-        map of the app: one card per screen with its screenshot, arrows for forward
-        navigation, and a details drawer with the screen's deeplinks and localization
-        keys. The search box (`/` or ⌘F) filters the cards by anything a node carries —
-        title, deeplinks, localization keys, tried actions, ids, transition labels —
-        dimming what does not match and jumping between hits with ⏎. The project has
-        **one** map — a single store under `.simtool/explore/`:
+        The Картограф page — `simtool serve` → 🗺️ Картограф opens `/cartographer`, a
+        page of its own, not a tab of the viewer — draws a map of the app: one card
+        per screen with its screenshot, arrows for forward navigation, and a details
+        drawer with the screen's deeplinks and localization keys. The search box
+        (`/` or ⌘F) filters the cards by what a screen is known by — `title`, `id`,
+        `key`, its features, deeplinks, localization keys, the buttons it offers
+        (tapped and untapped alike) and the labels on the arrows into and out of it —
+        dimming what does not match and jumping between hits with ⏎. Its
+        bookkeeping is deliberately not searchable: `depth`, `visits`,
+        `firstSeenAt`, the screenshot path and the structural `fingerprint` would
+        each let one typed character match every card. The project has **one**
+        map — a single store under `.simtool/explore/`:
 
         ```
         .simtool/explore/
         ├── graph.json          # the map: nodes (screens) + edges (transitions)
-        └── shots/
-            ├── s-main.png      # one screenshot per node, named `<node id>.png`
-            └── s-profile.png
+        ├── shots/
+        │   ├── s-main.png      # one screenshot per node, named `<node id>.png`
+        │   └── s-profile.png
+        ├── layout.json         # where cards were dragged on the canvas
+        └── groups.json         # names given to the feature groups
         ```
 
         Every run — robot or agent — opens this store and modifies it: attaches to the
         screens it already holds, adds the new ones, retakes the screenshots of the
         screens it reaches. Runs never create a second copy. (`run` in `graph.json`
         describes the *latest* run; `stats.steps`/`stats.relaunches` accumulate across
-        runs.) The tab re-reads the store every few seconds, so nodes appear on the
+        runs.) The page re-reads the store every few seconds, so nodes appear on the
         canvas as they are written.
+
+        A `graph.json`, `layout.json` or `groups.json` simtool cannot decode is
+        moved aside as `<name>.broken-<timestamp>` rather than overwritten —
+        `GET /api/v1/explore/status`'s `error` field says which file and why, so a
+        `.broken-*` sibling you find next to the store is that, not something you
+        broke. A file written by a newer simtool is read but never written back, for
+        the same reason; move it aside yourself first if you need to record over it.
 
         Two ways to grow the map:
 
@@ -484,20 +500,32 @@ extension AgentSkill {
         **0. Preflight.** Start the viewer (`simtool serve --detach --json`), make sure
         a simulator is booted. Open the store: read `.simtool/explore/graph.json` if it
         exists — its nodes are your dedup base and its `run.app` must match the app you
-        are about to map (a different app means the store is another app's map: start
-        it over). If there is no store yet, create `.simtool/explore/shots/` and write
-        an initial `graph.json` with empty `nodes`/`edges`. Update `run` to describe
-        your pass (fresh `id` timestamp, `startedAt`, `finishedAt: null`). Cold-launch
-        the app with the project's usual options (`simtool app launch … -- <args>`); if
-        `.simtool/config.yml` has a launch profile named `explore` (mock backend,
-        auto-login), use its argv — the map must not depend on backend luck. Do not run
+        are about to map (a different app means the store is another app's map:
+        remove the whole `.simtool/explore/` directory — `graph.json`, `shots/`,
+        `layout.json`, `groups.json`, all of it — and start it over; the running
+        viewer notices the files are gone and clears the map right away, no restart
+        needed. Leaving `groups.json` or `layout.json` behind survives the reset, and
+        a node id you pick by hand — `s-main`, `s-profile` — can collide with the
+        previous app's, attaching its feature name to a screen of this one. The
+        built-in robot does this swap for itself when `POST /api/v1/explore/start`
+        names a different app; a hand-driven pass never calls that route, so here
+        it is on you). If there is no store yet, create `.simtool/explore/shots/`
+        and write an initial `graph.json` with empty `nodes`/`edges`. Update `run`
+        to describe your pass (fresh `id` timestamp, `startedAt`, `finishedAt: null`).
+        Cold-launch the app with the project's usual options
+        (`simtool app launch … -- <args>`); if `.simtool/config.yml` has a launch
+        profile named `explore` (mock backend, auto-login), use its argv — the map
+        must not depend on backend luck. Once the screen settles (step 1), mark its
+        node `entryPoint: true` in step 4 — this pass opens there, new node or one
+        you already have. Do not run
         the pass while the built-in robot is scanning: one run owns the simulator (and
         the store) at a time.
 
         **1. Wait until the screen is truly loaded.** Read the accessibility tree
         (`simtool ax tree --json`) every second or so until two consecutive reads are
         structurally identical AND no node's id/type contains a loading marker:
-        `skeleton`, `shimmer`, `spinner`, `loading`, `activityindicator`, `progress`.
+        `skeleton`, `shimmer`, `spinner`, `loading`, `activityindicator`,
+        `progressindicator`, `progressview`.
         A screenshot taken mid-shimmer maps a loading state, not the screen — wait it
         out (bounded: after ~10 extra reads, accept the screen as it is).
 
@@ -507,7 +535,9 @@ extension AgentSkill {
            SwiftUI/UIKit screens often carry one;
         2. the dominant identifier prefix over *distinct* ids (`MainScreen-Balance`,
            `MainScreen-TransferButton` → `MainScreen`);
-        3. the navigation-bar title (a short StaticText near the top of the screen).
+        3. the navigation-bar title (a short StaticText near the top of the screen);
+        4. the headline — the big text at the top of the screen — as the last resort
+           before falling back to naming it after its fingerprint hash.
 
         That identity becomes the node's `title` and — more importantly — its dedup key.
 
@@ -540,13 +570,14 @@ extension AgentSkill {
 
         **7. Publish.** Append the node (and edge, if the rules below allow one) to
         `graph.json`, update `stats`, and write **atomically** — write `graph.json.tmp`,
-        then `mv` it over. The tab polls every ~3 s; a torn write shows up as a broken
+        then `mv` it over. The page polls every ~3 s; a torn write shows up as a broken
         map until the next write.
 
         **8. Tap and descend.** Pick an untried tappable element (Buttons, Cells,
         Links, tab items) and `simtool input tap …`. Skip destructive vocabulary —
-        logout / sign out / delete / remove / call / «выйти» / «удалить» / «позвонить».
-        Then return to step 1 and classify where the tap landed:
+        logout / sign out / delete / remove / call / «выйти» / «выход» / «удалить» /
+        «заблокировать» / «позвонить». Then return to step 1 and classify where the
+        tap landed:
 
         - **A new screen** → a new node at `depth = depth(from) + 1`, plus an edge —
           unless the edge rules veto it.
@@ -554,7 +585,9 @@ extension AgentSkill {
         - **The same screen** → a state change, not a transition; keep tapping, or
           scroll to reveal content below the fold.
         - **Outside the app** (app switcher, Safari, a crash to SpringBoard) →
-          relaunch and continue; what is not the app is not on the map.
+          relaunch and continue, marking the screen you land back on
+          `entryPoint: true` the same way step 0 does; what is not the app is not
+          on the map.
 
         When the current screen has no untried actions left, replay recorded taps to
         reach the closest screen that still has some, or relaunch and descend again.
@@ -611,7 +644,8 @@ extension AgentSkill {
               "actionsTried": 5,
               "firstSeenAt": "2026-08-19T11:03:20Z",
               "deeplinks": ["myapp://main"],
-              "localizationKeys": ["main.title", "main.transfer_button"]
+              "localizationKeys": ["main.title", "main.transfer_button"],
+              "entryPoint": true
             },
             {
               "id": "s-profile",
@@ -641,24 +675,52 @@ extension AgentSkill {
 
         - Node — required: `id`, `title`, `fingerprint`, `screenshot`, `depth`,
           `visits`, `actionsTotal`, `actionsTried`, `firstSeenAt`; optional: `key`,
-          `states`, `triedActionKeys`, `deeplinks`, `localizationKeys`. `fingerprint`
-          is the robot's structural hash and `key` its screen-identity hash — the
-          robot resumes by them; in an agent pass any stable unique string works for
-          both — reuse the node id. `triedActionKeys` is the robot's persisted
-          frontier; leave it alone if you did not compute it.
-        - `depth` is the shortest observed distance from the launch screen; the canvas
-          lays columns out by depth, so keep it honest — shrink it if you rediscover a
-          screen closer to the root. One exception: a screen you *launch into* keeps
-          the depth it already has. It is an opening, not a shorter path, and zeroing
-          it would drop every arrow leading there off the drawn map.
+          `states`, `triedActionKeys`, `actionKeys`, `deeplinks`, `localizationKeys`,
+          `groups`, `entryPoint`. `fingerprint` is the robot's structural hash and
+          `key` its screen-identity hash — the robot resumes by them; in an agent
+          pass any stable unique string works for both — reuse the node id.
+          `triedActionKeys` and `actionKeys` are the robot's persisted frontier
+          (tried vs. every tap ever catalogued — together they decide whether a
+          screen still has untried taps); leave both alone if you did not compute
+          them.
+        - `depth` is the shortest observed distance from the launch screen, and
+          simtool stores exactly what you write here — nothing recomputes it in the
+          file, ever. Shrink it when you rediscover a known screen by a shorter path
+          (`depth(from) + 1`, the same rule as a new node); leave it alone for a
+          screen a cold launch or a relaunch lands you on directly, and mark that
+          one `entryPoint: true` too (see below) — it is an opening, not a shorter
+          path. Get it right regardless: when several marked openings lead to one
+          another, the recorded `depth` is the *first* thing simtool ranks them by
+          to decide which one the map is actually measured from (then how many
+          transitions touch the screen, then its id) — a wrong `depth` can hand that
+          role to the wrong screen. The canvas lays its columns out by a further,
+          unstored distance measured fresh from whichever openings win that ranking,
+          every time the map is served; a map with no `entryPoint` marked anywhere
+          falls back to this same recorded `depth`, at its shallowest, among the
+          screens nothing leads into.
         - Edge — required: `id`, `from`, `to`, `action` (`kind` plus optional
-          `targetId`/`targetLabel` — the tab renders them as the arrow label), `count`.
-        - Update `stats` as you go; when the pass ends, set `run.finishedAt`.
-        - `groups` and `entryPoint` are written by simtool, not by you: it splits the
-          map into feature flows at its forks — a screen offering several ways forward
-          is where the user chooses a feature, and everything behind one of its
-          buttons is that feature's flow — and marks a screen no transition leads
-          into. Do not hand-author them — record accurate edges and the flows follow.
+          `targetId`/`targetLabel` — the page renders them as the arrow label), `count`.
+        - Keep `stats.screens`/`stats.steps`/`stats.relaunches` accurate as you go —
+          nothing recomputes them for you. `stats.transitions` is different: simtool
+          overwrites it with a fresh count of the transitions it draws every time it
+          serves the map (still not the same as the arrow count the canvas shows,
+          which folds several transitions between one pair of screens into one
+          arrow), so whatever you write there is cosmetic. When the pass ends, set
+          `run.finishedAt`.
+        - `groups` is computed by simtool from the map's own shape, not by you: a
+          screen offering several ways forward is where the user chooses a feature,
+          and everything behind one of its buttons is that feature's flow. Do not
+          hand-author it — record accurate edges and the flows follow.
+        - `entryPoint: true`, like `depth`, is the crawl's own note, not simtool's —
+          it is never written back, so what you set here is what stays. Mark it on
+          every node a cold launch or a relaunch landed you on directly (steps 0 and
+          8 both call for it) — a plain fact, "the app opened here", even for a
+          screen the map also shows a tap reaching (a tab-bar home does both). Marking
+          more than one is fine: where several marked screens lead to one another,
+          simtool keeps only the best-ranked as a source and quietly drops the rest —
+          it never erases the mark or the arrows into the ones it drops. Miss the
+          mark everywhere and simtool falls back to guessing openings from recorded
+          `depth`, which is not always the same screen.
 
         ## Naming the feature groups
 
@@ -674,9 +736,12 @@ extension AgentSkill {
         1. `GET /api/v1/explore/groups` — the groups worth naming (flows too small to
            draw a sequence are left out). Each carries `key`, `members`, `entry`,
            `bridges`, and `candidates`.
-        2. `candidates` is raw material, strongest first: the words on the fork
-           buttons that open the flow, then the screens' own names, then the longest
-           localization-key prefix the flow's screens share.
+        2. `candidates` is raw material, ranked: the words on the fork buttons that
+           open the flow always come first; next, names that read like a thing — the
+           screens' own names, the localization-key prefix they share, a button's
+           accessibility identifier when it reads like a name too; last before the
+           key, names that read like plumbing (a component, an id namespace) — kept
+           only because some apps leave nothing better.
            Look at the entry screen too —
            `GET /api/v1/explore/shot?node=<entry>`. It often shows the product's own
            wording for the section, which no type name carries.
@@ -699,8 +764,18 @@ extension AgentSkill {
 
         Names are stored in `.simtool/explore/groups.json`, keyed by group, and survive
         both further crawls and a restart. A group whose membership later changes
-        beyond recognition is flagged `staleName` and worth re-naming; one that merely
-        gained a screen is not. An empty string clears a name.
+        beyond recognition — grows past it or shrinks past it — is flagged `staleName`
+        and worth re-naming; one that merely gained a screen is not. If the flow's
+        door screen shifts and its key no longer matches any name on file, simtool
+        looks for a surviving flow whose membership still mostly matches the orphaned
+        record and shows the old name on it, so a chip can keep reading right under a
+        new key without being renamed twice — the record itself stays filed under the
+        old key until you act on it. An empty string clears a name under any key, even
+        one naming no flow of the current map at all, which is the only way to clear
+        such a leftover (a non-empty name still has to name a flow that exists).
+        Posting that same name for the flow it now shows on instead — confirming the
+        move — retires it from every dead key it was filed under, so the file never
+        holds one name under two keys at once.
 
         """#
 }

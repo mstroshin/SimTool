@@ -75,9 +75,11 @@ public struct ExploreScreenNode: Codable, Sendable {
     /// features share carries all of theirs. Nil in maps recorded before
     /// screens were grouped.
     public var groups: [String]?
-    /// True when no transition leads into this screen — it was recorded on
-    /// launch or after a relaunch rather than reached by a tap. Nil rather
-    /// than false so the field stays out of every other node's JSON.
+    /// True when the app opens on this screen: it was recorded on a launch or
+    /// a relaunch rather than reached by a tap. The store says so because the
+    /// crawl was there when it happened — which is why grouping trusts this
+    /// over "nothing leads into it", a shape a single relaunch artifact fakes.
+    /// Nil rather than false so the field stays out of every other node's JSON.
     public var entryPoint: Bool?
 }
 
@@ -115,14 +117,45 @@ public struct ExploreNodePosition: Codable, Sendable, Equatable {
 /// inside `graph.json`: the crawler rewrites the graph after every step, so a
 /// placement saved from the tab would race that write and lose.
 public struct ExploreLayout: Codable, Sendable {
+    /// The schema this build writes — and reads before writing. A file from a
+    /// newer simtool holds an arrangement this build cannot represent, and
+    /// replacing it with our own view of it would drop what it does not know.
+    public static let currentSchemaVersion = 1
+
     public var schemaVersion: Int
     /// Node id → where the user put that card. Nodes absent here fall back to
     /// the canvas' automatic depth layout.
     public var positions: [String: ExploreNodePosition]
 
-    public init(schemaVersion: Int = 1, positions: [String: ExploreNodePosition] = [:]) {
+    public init(
+        schemaVersion: Int = ExploreLayout.currentSchemaVersion,
+        positions: [String: ExploreNodePosition] = [:]
+    ) {
         self.schemaVersion = schemaVersion
         self.positions = positions
+    }
+}
+
+// MARK: - HTTP errors
+
+/// Why an explore request was refused, in the terms the HTTP layer needs. The
+/// routes answered 409 for everything `start` could throw, so "a run is already
+/// in progress" and "unknown launch profile 'x'" reached the client as the same
+/// answer — and a `layout.json` that could not be written reached it as "bad
+/// request", which the client can do nothing about.
+public enum ExploreRequestError: Error, LocalizedError, Sendable {
+    /// The request is wrong, and a different request would work.
+    case badRequest(String)
+    /// The request is fine; the state it arrived in cannot serve it.
+    case conflict(String)
+    /// Ours to answer for: a write that failed, a server started without an app
+    /// to explore. No request the client can send fixes it.
+    case failure(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .badRequest(let message), .conflict(let message), .failure(let message): return message
+        }
     }
 }
 
@@ -154,6 +187,52 @@ public struct ExploreStartRequest: Codable, Sendable {
         self.maxSteps = maxSteps
         self.budgetMinutes = budgetMinutes
         self.fromCurrentScreen = fromCurrentScreen
+    }
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case app, profile, maxScreens, maxSteps, budgetMinutes, fromCurrentScreen
+    }
+
+    /// A key the body carried, whatever it was. `CodingKeys` can only see the
+    /// ones this build knows, and the ones it does not are the entire question.
+    private struct AnyKey: CodingKey {
+        let stringValue: String
+        var intValue: Int? { nil }
+        init?(stringValue: String) { self.stringValue = stringValue }
+        init?(intValue: Int) { nil }
+    }
+
+    /// Written out instead of synthesized for one reason: `Codable` ignores a
+    /// key it does not recognise, so `{"maxStep": 60}` decoded as "crawl with
+    /// the defaults" and a typo in a budget became a silent 200-step run over
+    /// the wrong app. Refusing a body that will not parse is half the guard;
+    /// the half that mattered is refusing one that parses into something the
+    /// caller did not ask for.
+    ///
+    /// Every field stays optional — omitting one still means "use the default".
+    /// It is naming a field this build has never heard of that is a mistake, and
+    /// the answer says which one and what the alternatives are.
+    public init(from decoder: Decoder) throws {
+        let present = try decoder.container(keyedBy: AnyKey.self).allKeys.map(\.stringValue)
+        let known = Set(CodingKeys.allCases.map(\.rawValue))
+        let unknown = present.filter { !known.contains($0) }.sorted()
+        guard unknown.isEmpty else {
+            // Ours to word, not `DecodingError`'s: its `debugDescription` never
+            // reaches `localizedDescription`, and the answer a caller reads
+            // would have been "the data isn't in the correct format" over a
+            // body that is perfectly good JSON. Naming the field is the point.
+            throw SimToolError(
+                "Unknown field\(unknown.count == 1 ? "" : "s") \(unknown.joined(separator: ", ")) "
+                    + "in the start request. Known fields: \(known.sorted().joined(separator: ", "))."
+            )
+        }
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        app = try container.decodeIfPresent(String.self, forKey: .app)
+        profile = try container.decodeIfPresent(String.self, forKey: .profile)
+        maxScreens = try container.decodeIfPresent(Int.self, forKey: .maxScreens)
+        maxSteps = try container.decodeIfPresent(Int.self, forKey: .maxSteps)
+        budgetMinutes = try container.decodeIfPresent(Int.self, forKey: .budgetMinutes)
+        fromCurrentScreen = try container.decodeIfPresent(Bool.self, forKey: .fromCurrentScreen)
     }
 }
 
@@ -339,9 +418,23 @@ public enum ExploreEngine {
             if type == "RadioButton" { tabCandidates.append(action) } else { candidates.append(action) }
         }
 
+        // One tap point, one probe. Two candidates whose frames share a centre
+        // are the same tap — the same pixel, the same gesture, the same result —
+        // and the app hands out plenty of those: every cell of this list wraps
+        // itself in a `TouchRecognizingView` of exactly its own size, and a
+        // screen with a SceneKit animation on it publishes the scene's lights
+        // and geometry (`left spot`, `front line`, `CUBE`, `ambient`) as eight
+        // identically framed Groups. Template limiting cannot fold them — their
+        // identifiers differ — so each one spent a step tapping a pixel the one
+        // before it had already tapped, and on a screen at the cap below it took
+        // a real control's place. The first one wins, which is also the outer,
+        // better-named element: the tree lists a container before its child.
+        var seenPoints = Set<[Double]>()
+        let distinct = (tabCandidates + candidates).filter { seenPoints.insert([$0.x, $0.y]).inserted }
+
         var grouped: [String: [Action]] = [:]
         var order: [String] = []
-        for action in tabCandidates + candidates {
+        for action in distinct {
             let template = normalizeIdentifier(action.targetId ?? action.key)
             if grouped[template] == nil { order.append(template) }
             grouped[template, default: []].append(action)
@@ -682,15 +775,49 @@ public final class ExploreController: @unchecked Sendable {
         }
     }
 
-    private struct Budgets {
+    struct Budgets {
         var maxScreens: Int
         var maxSteps: Int
         var deadline: Date
         var maxRelaunches = 12
     }
 
-    /// What the crawler knows about one discovered screen.
-    private struct ScreenState {
+    /// Ceilings for the three budgets a request may name. Not politeness: the
+    /// minute budget is multiplied out into seconds, `Int` arithmetic traps on
+    /// overflow, and one absurd number in a request body took the whole simtool
+    /// process down with it — stream, mocks and the run watching them. They are
+    /// also the honest ceiling of a crawl: no app has twenty thousand screens,
+    /// no simulator session outlives a million taps, and nobody waits a week
+    /// for a map. Past them the number is a typo, and a typo deserves an answer
+    /// rather than a silent clamp to something else.
+    static let maxScreensLimit = 20_000
+    static let maxStepsLimit = 1_000_000
+    static let budgetMinutesLimit = 7 * 24 * 60
+
+    /// The budgets of one run, or a rejection naming the field at fault.
+    static func budgets(for request: ExploreStartRequest) throws -> Budgets {
+        func checked(_ value: Int?, _ field: String, fallback: Int, limit: Int) throws -> Int {
+            guard let value else { return fallback }
+            guard value > 0, value <= limit else {
+                throw ExploreRequestError.badRequest("\(field) must be between 1 and \(limit), got \(value).")
+            }
+            return value
+        }
+        let screens = try checked(request.maxScreens, "maxScreens", fallback: 40, limit: maxScreensLimit)
+        let steps = try checked(request.maxSteps, "maxSteps", fallback: 200, limit: maxStepsLimit)
+        let minutes = try checked(request.budgetMinutes, "budgetMinutes", fallback: 15, limit: budgetMinutesLimit)
+        return Budgets(
+            maxScreens: screens,
+            maxSteps: steps,
+            // Counted in `TimeInterval`: the same arithmetic in `Int` is what
+            // trapped.
+            deadline: Date().addingTimeInterval(TimeInterval(minutes) * 60)
+        )
+    }
+
+    /// What the crawler knows about one discovered screen. Visible to tests:
+    /// the frontier and descent rules below are decided from these.
+    struct ScreenState {
         var nodeId: String
         var depth: Int
         var actions: [ExploreEngine.Action]
@@ -705,6 +832,27 @@ public final class ExploreController: @unchecked Sendable {
     private var graph: ExploreGraph?
     private var message: String?
     private var lastError: String?
+    /// Something wrong with the store itself: a file set aside because it would
+    /// not decode, one written by a newer simtool, a run directory that could
+    /// not be adopted. Kept apart from `lastError`, which belongs to the run,
+    /// and reported next to it — a lost arrangement is news even when the crawl
+    /// went perfectly.
+    ///
+    /// Keyed by the file each notice is about, because a notice outlives the
+    /// poll that raised it and only that file's own news can retire it. One
+    /// slot for all of them meant a successful `layout.json` write cleared the
+    /// notice that `groups.json` had been set aside — and nothing could ever
+    /// raise it again, since the next read of a quarantined file just finds it
+    /// missing. One card dragged, and every name a person had given the
+    /// features was quietly out of play with the banner that said so gone.
+    private var storeWarnings: [String: String] = [:]
+    /// The schema of a `layout.json` / `groups.json` this build is too old to
+    /// rewrite, when the file says so. Reading it is fine — what decodes is
+    /// shown — but writing our own view over it would drop the rest.
+    private var futureLayoutVersion: Int?
+    private var futureNamesVersion: Int?
+    /// Legacy per-run directories are looked for once, not on every poll.
+    private var legacyRunsMigrated = false
     private var task: Task<Void, Never>?
     /// `<directory>|<graph.json mtime>` of the run `loadNewestRunLocked` last
     /// decoded, so the tab's 3-second poll does not re-decode an unchanged file.
@@ -740,7 +888,10 @@ public final class ExploreController: @unchecked Sendable {
             runId: runId,
             app: graph?.run.app ?? configuration.defaultApp,
             message: message,
-            error: lastError,
+            // Both, joined: a file set aside or a store gone from disk is
+            // news the run itself has no way to report.
+            error: ([lastError].compactMap { $0 } + storeWarnings.sorted { $0.key < $1.key }.map(\.value))
+                .joined(separator: " ").nilIfEmpty,
             graph: drawn,
             layout: layout,
             groups: grouped?.groups
@@ -748,27 +899,34 @@ public final class ExploreController: @unchecked Sendable {
     }
 
     public func start(_ request: ExploreStartRequest) throws -> ExploreStatusPayload {
+        // Budgets first: they are arithmetic on the request alone, and telling a
+        // caller its numbers are impossible is cheaper than resolving an app and
+        // a profile for a run that cannot happen.
+        let budgets = try Self.budgets(for: request)
         guard let app = request.app?.nilIfEmpty ?? configuration.defaultApp else {
-            throw SimToolError("No app to explore: start the server with --app <bundle-id> or configure `bundleId` in .simtool/config.yml.")
+            // Neither the caller's mistake nor a state to wait out: the server
+            // was started without an app, and no request fixes that.
+            throw ExploreRequestError.failure(
+                "No app to explore: start the server with --app <bundle-id> or configure `bundleId` in .simtool/config.yml."
+            )
         }
         let profile = try resolveProfile(named: request.profile)
 
         lock.lock()
         if running {
             lock.unlock()
-            throw SimToolError("An exploration run is already in progress.")
+            throw ExploreRequestError.conflict("An exploration run is already in progress.")
         }
         let id = Self.runIdFormatter.string(from: Date())
         let directory = configuration.root
-        let budgets = Budgets(
-            maxScreens: max(1, request.maxScreens ?? 40),
-            maxSteps: max(1, request.maxSteps ?? 200),
-            deadline: Date().addingTimeInterval(TimeInterval(max(1, request.budgetMinutes ?? 15) * 60))
-        )
         running = true
         runId = id
         runDirectory = directory
         lastError = nil
+        // A new crawl is the answer to a map that could not be read, so its own
+        // notice goes. The notices about the arrangement and the names are not
+        // this run's business, and a run does not put either file back.
+        storeWarnings["graph.json"] = nil
         let meta = ExploreRunMeta(
             id: id,
             app: app,
@@ -781,12 +939,19 @@ public final class ExploreController: @unchecked Sendable {
         // nodes, same shots — and only extends and refreshes it. A map of a
         // different app is stale territory, not something to merge into.
         migrateLegacyRunsLocked()
-        if let existing = Self.loadGraph(at: directory), existing.run.app == app {
+        let existing = loadGraphToResumeLocked(at: directory)
+        if let existing, existing.run.app == app {
             graph = existing
             graph?.run = meta
             graph?.schemaVersion = 2
             message = "Продолжаю карту: \(ExploreEngine.counted(existing.nodes.count, "экран", "экрана", "экранов"))…"
         } else {
+            // Everything the previous app left behind goes with its map: the
+            // screenshots of screens this crawl will never see, the arrangement
+            // of cards that no longer exist, the names someone gave its
+            // features. Kept, they grew `.simtool/explore/` without bound while
+            // a stray feature name waited for a matching id to latch onto.
+            if existing != nil { discardStoreLocked() }
             graph = ExploreGraph(
                 schemaVersion: 2,
                 run: meta,
@@ -796,10 +961,7 @@ public final class ExploreController: @unchecked Sendable {
             )
             message = "Запускаю \(app)…"
         }
-        // Convention: `explore-resume` relaunches after the first one. A fresh
-        // full login on every relaunch hammers the auth backend into
-        // throttling; the resume profile reuses the session instead.
-        let resumeProfile = configuration.profiles.first { $0.name == "explore-resume" }
+        let resumeProfile = Self.resumeProfile(for: profile, in: configuration.profiles)
         task = Task { [weak self] in
             await self?.crawl(
                 app: app,
@@ -846,17 +1008,28 @@ public final class ExploreController: @unchecked Sendable {
         defer { lock.unlock() }
         loadNewestRunLocked()
         loadLayoutLocked()
+        if let version = futureLayoutVersion {
+            throw ExploreRequestError.conflict(
+                "layout.json was written by a newer simtool (schemaVersion \(version)); refusing to overwrite it. Move the file aside to start a new arrangement."
+            )
+        }
         var merged = layout.positions
         for (id, position) in positions { merged[id] = position }
         if let known = graph?.nodes, !known.isEmpty {
             let ids = Set(known.map(\.id))
             merged = merged.filter { ids.contains($0.key) }
         }
-        let next = ExploreLayout(schemaVersion: 1, positions: merged)
-        try FileManager.default.createDirectory(at: configuration.root, withIntermediateDirectories: true)
-        try JSON.encoder.encode(next).write(to: layoutFile, options: [.atomic])
+        let next = ExploreLayout(positions: merged)
+        do {
+            try FileManager.default.createDirectory(at: configuration.root, withIntermediateDirectories: true)
+            try JSON.encoder.encode(next).write(to: layoutFile, options: [.atomic])
+        } catch {
+            // Ours, not the caller's: the request was fine and the disk was not.
+            throw writeRefusalLocked(layoutFile, error)
+        }
         layout = next
         layoutSignature = layoutFileSignature()
+        storeWarnings["layout.json"] = nil
         return next
     }
 
@@ -866,10 +1039,33 @@ public final class ExploreController: @unchecked Sendable {
         configuration.root.appendingPathComponent("groups.json")
     }
 
+    /// The `groups.json` schema this build writes. Kept here rather than on
+    /// `ExploreGroupNames`: how the file is versioned is the store's business,
+    /// and the store is this file.
+    static let namesSchemaVersion = 1
+
     private func loadNamesLocked() -> ExploreGroupNames {
-        guard let data = try? Data(contentsOf: namesFile),
-              let decoded = try? JSON.decoder.decode(ExploreGroupNames.self, from: data) else {
+        guard let data = try? Data(contentsOf: namesFile) else {
+            futureNamesVersion = nil
             return ExploreGroupNames()
+        }
+        guard let decoded = try? JSON.decoder.decode(ExploreGroupNames.self, from: data) else {
+            // Every name a person gave a feature is in this file. Starting from
+            // none of them is survivable; the next save writing that emptiness
+            // over the file is not, and nobody would have learned it happened.
+            quarantineLocked(namesFile, what: "имена фич")
+            futureNamesVersion = nil
+            return ExploreGroupNames()
+        }
+        if decoded.schemaVersion > Self.namesSchemaVersion {
+            futureNamesVersion = decoded.schemaVersion
+            storeWarnings["groups.json"] = "groups.json написан более новой версией simtool (schemaVersion \(decoded.schemaVersion)) — файл не перезаписывается."
+        } else {
+            futureNamesVersion = nil
+            // Readable and writable again: this file's own news, and the only
+            // thing that can retire its notice. See `loadLayoutLocked` — a
+            // notice that only a save could clear outlived what it described.
+            storeWarnings["groups.json"] = nil
         }
         return decoded
     }
@@ -905,8 +1101,15 @@ public final class ExploreController: @unchecked Sendable {
         // do the same work twenty times over.
         let flows = ExploreGrouping.groups(of: graph)
         let known = Set(flows.map(\.key))
-        if let unknown = requested.keys.first(where: { !known.contains($0) }) {
-            throw SimToolError("No group named \(unknown) in this map")
+        // Only a name has to land on a flow that exists. An empty name is an
+        // erasure, and the record most in need of erasing is exactly the one
+        // whose flow is gone: refusing it left a name nothing showed and
+        // nothing could clear, and `groups.json` had to be edited by hand.
+        let unknown = requested.first {
+            !known.contains($0.key) && !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        if let unknown {
+            throw SimToolError("No group named \(unknown.key) in this map")
         }
 
         let membersByKey = Dictionary(flows.map { ($0.key, $0.members) }, uniquingKeysWith: { first, _ in first })
@@ -914,20 +1117,36 @@ public final class ExploreController: @unchecked Sendable {
         for (key, name) in requested {
             let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { stored.names[key] = nil; continue }
+            // A key that outlived its flow does not get to hold the name it is
+            // no longer showing anywhere against the flow that is — see
+            // `ExploreGroupNaming.retired`.
+            for dead in ExploreGroupNaming.retired(name: trimmed, in: stored, flows: known) {
+                stored.names[dead] = nil
+            }
             stored.names[key] = ExploreGroupName(name: trimmed, members: membersByKey[key] ?? [])
         }
 
-        // Collisions are judged over what would be shown, not just over what
-        // this call sent: a new name can clash with one already on the panel.
-        let displayable = Set(flows.filter(\.displayable).map(\.key))
-        let shown = stored.names.filter { displayable.contains($0.key) }.mapValues(\.name)
-        let conflicts = ExploreGroupNaming.conflicts(in: shown)
+        // Collisions are judged over every recorded name, not just the ones on
+        // the panel right now: a feature that shrank to one screen drops off
+        // the panel for a run, and judging only what is shown let its name be
+        // handed to a second feature — two identical chips once it came back.
+        let conflicts = ExploreGroupNaming.conflicts(in: stored)
         guard conflicts.isEmpty else {
             throw SimToolError("Groups would share a name: \(conflicts.joined(separator: ", "))")
         }
 
-        try FileManager.default.createDirectory(at: configuration.root, withIntermediateDirectories: true)
-        try JSON.encoder.encode(stored).write(to: namesFile, options: [.atomic])
+        if let version = futureNamesVersion {
+            throw ExploreRequestError.conflict(
+                "groups.json was written by a newer simtool (schemaVersion \(version)); refusing to overwrite it. Move the file aside to record names again."
+            )
+        }
+        do {
+            try FileManager.default.createDirectory(at: configuration.root, withIntermediateDirectories: true)
+            try JSON.encoder.encode(stored).write(to: namesFile, options: [.atomic])
+        } catch {
+            throw writeRefusalLocked(namesFile, error)
+        }
+        storeWarnings["groups.json"] = nil
         return ExploreGrouping.named(flows, with: stored).filter(\.displayable)
     }
 
@@ -945,7 +1164,9 @@ public final class ExploreController: @unchecked Sendable {
         if let name = name?.nilIfEmpty {
             guard let match = configuration.profiles.first(where: { $0.name == name }) else {
                 let available = configuration.profiles.map(\.name).joined(separator: ", ")
-                throw SimToolError("Unknown launch profile '\(name)'.\(available.isEmpty ? "" : " Available: \(available).")")
+                throw ExploreRequestError.badRequest(
+                    "Unknown launch profile '\(name)'.\(available.isEmpty ? "" : " Available: \(available).")"
+                )
             }
             return match
         }
@@ -975,6 +1196,18 @@ public final class ExploreController: @unchecked Sendable {
         migrateLegacyRunsLocked()
         let file = configuration.root.appendingPathComponent("graph.json")
         guard let modified = (try? FileManager.default.attributesOfItem(atPath: file.path))?[.modificationDate] as? Date else {
+            // The store is gone from disk — the cartograph.md pass is told to
+            // delete it when the map has to be started over. Holding the decoded
+            // copy alive answered `/status` with twelve screens nobody could see
+            // any more, and let the next `/layout` save build the directory back
+            // around them.
+            if graph != nil {
+                graph = nil
+                runId = nil
+                runDirectory = nil
+                loadedRunSignature = nil
+                message = "Карта удалена с диска."
+            }
             return
         }
         let signature = "graph|\(modified.timeIntervalSince1970)"
@@ -1009,11 +1242,47 @@ public final class ExploreController: @unchecked Sendable {
     /// normal state of a map nobody rearranged yet, and a torn read (a save in
     /// flight) keeps the arrangement we already hold.
     private func loadLayoutLocked() {
-        guard let signature = layoutFileSignature(), signature != layoutSignature else { return }
-        guard let data = try? Data(contentsOf: layoutFile),
-              let decoded = try? JSON.decoder.decode(ExploreLayout.self, from: data) else { return }
+        guard let signature = layoutFileSignature() else {
+            // Deleted: the arrangement went with the file, and answering with
+            // the copy in memory would write it back at the next save.
+            if layoutSignature != nil {
+                layout = ExploreLayout()
+                layoutSignature = nil
+                futureLayoutVersion = nil
+            }
+            return
+        }
+        guard signature != layoutSignature else { return }
+        guard let data = try? Data(contentsOf: layoutFile) else { return }
+        guard let decoded = try? JSON.decoder.decode(ExploreLayout.self, from: data) else {
+            // Every card a person dragged is in this file. Starting from an
+            // empty arrangement is survivable; the next save writing that
+            // emptiness over the file is not — and until it did, nobody would
+            // have learned the file had stopped being read.
+            quarantineLocked(layoutFile, what: "раскладка карточек")
+            layout = ExploreLayout()
+            layoutSignature = nil
+            futureLayoutVersion = nil
+            return
+        }
         layoutSignature = signature
         layout = decoded
+        // What decodes is still shown — a newer schema is additive until it
+        // proves otherwise — but this build cannot write back the parts it does
+        // not know about, so it does not write the file at all.
+        if decoded.schemaVersion > ExploreLayout.currentSchemaVersion {
+            futureLayoutVersion = decoded.schemaVersion
+            storeWarnings["layout.json"] = "layout.json написан более новой версией simtool (schemaVersion \(decoded.schemaVersion)) — файл не перезаписывается."
+        } else {
+            futureLayoutVersion = nil
+            // A file this build can write again is this file's own news, and
+            // the notice about it goes. Only a save used to retire it, so the
+            // banner outlived what it described: move the newer `layout.json`
+            // aside — the very thing the banner asks for — and the page went on
+            // reporting a refusal that no longer applied until somebody
+            // happened to drag a card.
+            storeWarnings["layout.json"] = nil
+        }
     }
 
     private static func loadGraph(at directory: URL) -> ExploreGraph? {
@@ -1021,24 +1290,339 @@ public final class ExploreController: @unchecked Sendable {
         return try? JSON.decoder.decode(ExploreGraph.self, from: data)
     }
 
+    /// The store a starting run resumes from, or nil when there is none.
+    ///
+    /// A `graph.json` that will not decode is not "no store": it is a map, and
+    /// starting fresh on top of it replaces it at the first publish. Set aside
+    /// first, so what could not be read can still be looked at.
+    private func loadGraphToResumeLocked(at directory: URL) -> ExploreGraph? {
+        let file = directory.appendingPathComponent("graph.json")
+        guard FileManager.default.fileExists(atPath: file.path) else { return nil }
+        if let loaded = Self.loadGraph(at: directory) { return loaded }
+        quarantineLocked(file, what: "карта")
+        return nil
+    }
+
+    /// Why a store file would not take a write: something a person has to move
+    /// before any attempt can work, or a disk that may well take the next one.
+    ///
+    /// The tab tells the two apart by status — a refusal it must stop repeating
+    /// against one worth trying again. A directory sitting where a file belongs
+    /// never resolves itself, and a page that keeps posting into it every few
+    /// seconds promises to retry an arrangement that is already lost.
+    private func writeRefusalLocked(_ file: URL, _ error: Error) -> ExploreRequestError {
+        let manager = FileManager.default
+        var isDirectory: ObjCBool = false
+        func settled(_ complaint: String) -> ExploreRequestError {
+            storeWarnings[file.lastPathComponent] = complaint
+            return .conflict(complaint)
+        }
+        if manager.fileExists(atPath: file.path, isDirectory: &isDirectory), isDirectory.boolValue {
+            return settled("\(file.lastPathComponent) — каталог, а не файл; записать туда нечего до того, как его уберут.")
+        }
+        if manager.fileExists(atPath: configuration.root.path, isDirectory: &isDirectory), !isDirectory.boolValue {
+            return settled("\(configuration.root.lastPathComponent) — файл, а не каталог; хранилище карты не записать, пока его не уберут.")
+        }
+        return .failure("Could not write \(file.lastPathComponent): \(error.localizedDescription)")
+    }
+
+    /// Moves a file this build must not use out of the way instead of writing
+    /// over it, and says so where a person will see it — under that file's own
+    /// name, so the notice lasts until that file is news again. Nothing else
+    /// can raise it a second time: the next read of a quarantined file simply
+    /// finds it missing, which is the normal state of a store nobody has
+    /// written yet and says nothing at all.
+    private func quarantineLocked(_ file: URL, what: String) {
+        let aside = file.appendingPathExtension("broken-\(Self.quarantineStamp.string(from: Date()))")
+        do {
+            try FileManager.default.moveItem(at: file, to: aside)
+            storeWarnings[file.lastPathComponent] = "\(file.lastPathComponent) не читается (\(what)) — файл отложен как \(aside.lastPathComponent)."
+        } catch {
+            storeWarnings[file.lastPathComponent] = "\(file.lastPathComponent) не читается (\(what)), и отложить его не удалось: \(error.localizedDescription)"
+        }
+    }
+
+    /// Everything the store holds about one app: its map, its screenshots, the
+    /// arrangement of its cards, the names of its features. Dropped together
+    /// when the app under exploration changes — one of them outliving the
+    /// others is what "leftover" means.
+    private func discardStoreLocked() {
+        let manager = FileManager.default
+        for name in ["graph.json", "shots", "layout.json", "groups.json"] {
+            try? manager.removeItem(at: configuration.root.appendingPathComponent(name))
+        }
+        loadedRunSignature = nil
+        layout = ExploreLayout()
+        layoutSignature = nil
+        futureLayoutVersion = nil
+        futureNamesVersion = nil
+        // The files the notices were about are gone with the rest of the store.
+        storeWarnings.removeAll()
+    }
+
     /// The store used to be one directory per run. Adopt the newest run as the
     /// single store (its map is the freshest picture of the app) and drop the
     /// rest — they are regenerable crawl artifacts, not history worth keeping.
+    ///
+    /// Once, not on every status poll: this walks the store directory to answer
+    /// a question whose answer cannot change after the first pass, and the tab
+    /// asks for the status every three seconds.
     private func migrateLegacyRunsLocked() {
+        guard !legacyRunsMigrated else { return }
         let manager = FileManager.default
         let store = configuration.root.appendingPathComponent("graph.json")
         let legacyRuns = ((try? manager.contentsOfDirectory(at: configuration.root, includingPropertiesForKeys: nil)) ?? [])
             .filter { manager.fileExists(atPath: $0.appendingPathComponent("graph.json").path) }
             .sorted { $0.lastPathComponent > $1.lastPathComponent }
-        guard !legacyRuns.isEmpty else { return }
-        if !manager.fileExists(atPath: store.path), let newest = legacyRuns.first {
-            try? manager.moveItem(
-                at: newest.appendingPathComponent("shots", isDirectory: true),
-                to: configuration.root.appendingPathComponent("shots", isDirectory: true)
-            )
-            try? manager.moveItem(at: newest.appendingPathComponent("graph.json"), to: store)
+        guard !legacyRuns.isEmpty else {
+            legacyRunsMigrated = true
+            return
         }
-        for legacy in legacyRuns { try? manager.removeItem(at: legacy) }
+        if !manager.fileExists(atPath: store.path), let newest = legacyRuns.first {
+            let shots = newest.appendingPathComponent("shots", isDirectory: true)
+            do {
+                if manager.fileExists(atPath: shots.path) {
+                    try manager.moveItem(at: shots, to: configuration.root.appendingPathComponent("shots", isDirectory: true))
+                }
+                try manager.moveItem(at: newest.appendingPathComponent("graph.json"), to: store)
+            } catch {
+                // The map we meant to adopt is still in its old directory, and
+                // the sweep below deletes every one of those: a move that failed
+                // — a `shots` already at the root, most often — used to take the
+                // only copy of the screenshots with it. Leave everything where
+                // it is and say so; nothing is lost, and the next poll retries
+                // once someone has looked.
+                storeWarnings[newest.lastPathComponent] = "Прежний прогон \(newest.lastPathComponent) не перенесён: \(error.localizedDescription) Каталог оставлен на месте."
+                return
+            }
+        }
+        for legacy in legacyRuns {
+            try? manager.removeItem(at: legacy)
+            // The retry got through: whatever this directory was blamed for is
+            // no longer there to look at.
+            storeWarnings[legacy.lastPathComponent] = nil
+        }
+        legacyRunsMigrated = true
+    }
+
+    private static let quarantineStamp: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmmss-SSS"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        return formatter
+    }()
+
+    /// Convention: a profile named `<name>-resume` is that profile's relaunch
+    /// companion — a session reused instead of a full login on every pass.
+    ///
+    /// Looked up from the profile the run actually uses, never from the name
+    /// `explore`: every run relaunched through `explore-resume` from its second
+    /// pass on, including a run someone asked for by name, so the map came out
+    /// glued together from two configurations with only the first recorded in
+    /// `graph.run.profile`.
+    static func resumeProfile(for profile: LaunchProfile?, in profiles: [LaunchProfile]) -> LaunchProfile? {
+        guard let name = profile?.name else { return nil }
+        return profiles.first { $0.name == "\(name)-resume" }
+    }
+
+    // MARK: what the store keeps
+
+    /// The map as it goes to disk: the crawl's own record, plus the flow
+    /// annotations a reader of the store wants.
+    ///
+    /// Nothing is added on top of `annotated`, and there used to be — a loop
+    /// that copied every recorded depth back over the annotated one, in case
+    /// the annotation had measured a new one. It never had; deleting the loop
+    /// changed no map and broke no test, which is all a guard against a caller
+    /// that cannot misbehave can ever amount to. What the store may and may not
+    /// carry is `annotated`'s own promise, tested where it is made
+    /// (`ExploreGroupingTests.testTheStoreKeepsWhatTheCrawlRecorded`), and the
+    /// name here says which map goes where.
+    static func storeSnapshot(_ graph: ExploreGraph) -> ExploreGraph {
+        ExploreGrouping.annotated(graph)
+    }
+
+    /// Writes the store, throwing when it could not be written. The failure was
+    /// swallowed here (`try?`), so a run whose writes all failed still finished
+    /// with "Готово: N экранов" over a file that was not there.
+    static func writeStore(_ snapshot: ExploreGraph, to directory: URL) throws {
+        try JSON.data(snapshot, pretty: true)
+            .write(to: directory.appendingPathComponent("graph.json"), options: [.atomic])
+    }
+
+    /// The same write, and what the run has to say about the store afterwards:
+    /// nothing when it went through, why not when it did not.
+    ///
+    /// One answer for both writers. The closing write used to swallow its
+    /// failure, so a run reported "Готово: 30 экранов" over a file that was
+    /// never there; the per-step write grew a recovery of its own for the
+    /// opposite case, a run still complaining after the map had actually landed
+    /// on disk. Two writers, two half-answers. Recomputed from the attempt in
+    /// hand, so neither direction can be the one that was forgotten.
+    static func writeStoreReportingFailure(_ snapshot: ExploreGraph, to directory: URL) -> String? {
+        do {
+            try writeStore(snapshot, to: directory)
+            return nil
+        } catch {
+            return "Карта не сохранена: \(error.localizedDescription)"
+        }
+    }
+
+    // MARK: the frontier (pure, so tests can ask it directly)
+
+    /// Nodes that still hold untried taps.
+    ///
+    /// The node's stored key sets are the answer, and the states walked this run
+    /// only add to it. Judging a visited screen by the states seen this pass let
+    /// the crawl call a screen with several states finished on the strength of
+    /// one of them, while `ExploreEngine.hasUntriedActions` — the same question,
+    /// asked by the map over the same node — still showed untried taps on that
+    /// card. Two answers to one question is a bug wherever they differ, so
+    /// there is one, and it is the one the map shows.
+    static func nodesWithUntried(states: [String: ScreenState], nodes: [ExploreScreenNode]) -> Set<String> {
+        var result = Set(nodes.filter(ExploreEngine.hasUntriedActions).map(\.id))
+        // A key tried in another state of the same screen is tried as far as the
+        // store is concerned, and untried in the state in hand — where the crawl
+        // can still act on it. That is work left, so it counts.
+        for state in states.values
+        where state.actions.contains(where: { !state.triedKeys.contains($0.key) }) {
+            result.insert(state.nodeId)
+        }
+        return result
+    }
+
+    /// The first hop of the shortest recorded path from `origin` to a node that
+    /// still has untried taps — the action to replay when the screen in hand is
+    /// worked out.
+    ///
+    /// A path whose first hop this screen cannot reproduce is skipped, not taken
+    /// as the answer: the search used to give up the moment the nearest target's
+    /// first hop did not match, with a queue still full of other paths. One
+    /// scroll edge out of the current screen was enough to trigger it, because a
+    /// scroll records no target and the match asked for a non-scroll action with
+    /// none — a pair nothing can satisfy. So the descent was declared
+    /// impossible, the pass went barren, and two of those ended the run with
+    /// "дальше идти некуда" over a map full of untapped screens.
+    static func descentAction(
+        from origin: String,
+        actions: [ExploreEngine.Action],
+        edges: [ExploreTransitionEdge],
+        targets: Set<String>
+    ) -> ExploreEngine.Action? {
+        guard !targets.isEmpty else { return nil }
+        var adjacency: [String: [(to: String, action: ExploreTransitionAction)]] = [:]
+        for edge in edges {
+            adjacency[edge.from, default: []].append((edge.to, edge.action))
+        }
+        // BFS in node space; edges only ever descend (the depth rule), so this
+        // terminates without cycle bookkeeping beyond `visited`.
+        var queue: [(node: String, firstHop: ExploreTransitionAction?)] = [(origin, nil)]
+        var visited: Set<String> = [origin]
+        while !queue.isEmpty {
+            let (node, firstHop) = queue.removeFirst()
+            if targets.contains(node), let firstHop, let action = replaying(firstHop, from: actions) {
+                return action
+            }
+            for (to, action) in adjacency[node] ?? [] where !visited.contains(to) {
+                visited.insert(to)
+                queue.append((to, firstHop ?? action))
+            }
+        }
+        return nil
+    }
+
+    /// The action on the screen in hand that would repeat a recorded
+    /// transition. A scroll carries nothing to aim at, so it is matched by kind;
+    /// a tap by what it aimed at.
+    private static func replaying(
+        _ recorded: ExploreTransitionAction,
+        from actions: [ExploreEngine.Action]
+    ) -> ExploreEngine.Action? {
+        guard recorded.kind != "scroll" else { return actions.first(where: \.isScroll) }
+        return actions.first {
+            !$0.isScroll && $0.targetId == recorded.targetId && $0.targetLabel == recorded.targetLabel
+        }
+    }
+
+    /// Whether the screen in hand belongs to the app under exploration, and the
+    /// name it gave for itself if it gave one.
+    ///
+    /// Nothing to check against (`expected` empty — an app that names itself
+    /// nowhere in its bundle) means every screen passes, as it did before the
+    /// launch was checked at all. Otherwise the root label decides.
+    ///
+    /// A blank root label is not the absence of an answer — it is SpringBoard's
+    /// answer. Measured on a booted simulator: the app under exploration reports
+    /// its display name, and SpringBoard reports a single space. So a screen that
+    /// names nothing is not the app, and the permission alert iOS puts over a
+    /// freshly installed app is exactly that screen. Treating the space as
+    /// "undecidable, carry on" let a crawl map `SBSwitcherWindow:Main` as one of
+    /// the app's own screens.
+    ///
+    /// The name comes back trimmed and only when there is one, so nothing
+    /// narrows the expectation down to whitespace.
+    static func appMatch(rootLabel: String?, expected: Set<String>) -> (isApp: Bool, label: String?) {
+        guard !expected.isEmpty else { return (true, nil) }
+        guard let rootLabel else { return (false, nil) }
+        let label = rootLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !label.isEmpty else { return (false, nil) }
+        return (expected.contains { $0.compare(label, options: .caseInsensitive) == .orderedSame }, label)
+    }
+
+    /// What to call a screen that settled on something other than the app, when
+    /// a failure has to name it. A screen that named nothing is described rather
+    /// than quoted: the message read «на экране « »», which tells a reader that
+    /// the crawl is confused rather than that iOS is in front of them.
+    static let unnamedScreenDescription = "системный экран без названия"
+
+    // MARK: what a node has been through
+
+    /// Adds action keys to what the screen is known to offer. Both counters a
+    /// node publishes are sizes of key sets, so "tried" and "total" mean the
+    /// same kind of thing and can be compared — the per-state sums they used to
+    /// be could not (one button in two states counted twice in the total and
+    /// once among the tried, and the total could even end up below the tried
+    /// count).
+    static func catalogue(_ keys: [String], on node: inout ExploreScreenNode) {
+        var known = Set(node.actionKeys ?? [])
+        // A store from before the keys were kept knows only its old total; the
+        // union starts from the keys of the state at hand and grows.
+        known.formUnion(keys)
+        node.actionKeys = known.sorted()
+        node.actionsTotal = max(known.count, node.actionsTried)
+    }
+
+    /// Records a tap in the set the next run continues from.
+    ///
+    /// `legacyTriedCount` is what a schema-1 store published as this screen's
+    /// tried count with no keys behind it. Re-tapping such a screen is
+    /// deliberate — its key set has to be rebuilt from nothing — but the share
+    /// the map already showed must not walk backwards while that happens: `5/8`
+    /// turned into `1/10` on the first tap of the next run. So the count is the
+    /// larger of the rebuilt set and the history, and only there can it exceed
+    /// the number of keys listed.
+    /// The depth a screen the crawl has already charted keeps.
+    ///
+    /// Normally the shorter of what it had and how far this pass walked to
+    /// reach it — a shorter path is news about the app. A pass *landing* on the
+    /// screen is not: `reached` is then zero for every relaunch, and flattening
+    /// a screen charted three taps in to zero on each of them told the reader
+    /// the app opens there. The reader believes it — the map is measured from
+    /// its openings, and among two openings that lead to each other the
+    /// shallower recorded depth is what decides which one the map hangs on
+    /// (`ExploreGrouping.rootOrder`). A flattened depth handed that job to
+    /// whichever screen happened to be busiest, and the arrow from the launch
+    /// screen into the hub it landed on stopped being drawn.
+    static func settledDepth(recorded: Int, reached: Int, isLanding: Bool) -> Int {
+        isLanding ? recorded : min(recorded, reached)
+    }
+
+    static func markTried(_ key: String, on node: inout ExploreScreenNode, legacyTriedCount: Int = 0) {
+        var persisted = Set(node.triedActionKeys ?? [])
+        persisted.insert(key)
+        node.triedActionKeys = persisted.sorted()
+        node.actionsTried = max(persisted.count, legacyTriedCount)
+        catalogue([key], on: &node)
     }
 
     // MARK: crawl loop
@@ -1093,6 +1677,13 @@ public final class ExploreController: @unchecked Sendable {
         let priorSteps = resumed?.stats.steps ?? 0
         let priorRelaunches = resumed?.stats.relaunches ?? 0
         let priorScreens = nodes.count
+        /// The tried count a schema-1 node published with no keys behind it, per
+        /// node id. Its key set is rebuilt from nothing over this run, and the
+        /// share the map already showed must not fall while that happens.
+        var legacyTriedCounts: [String: Int] = [:]
+        for node in nodes where node.triedActionKeys == nil {
+            legacyTriedCounts[node.id] = node.actionsTried
+        }
         /// Node ids whose screenshot was already retaken this run: every screen
         /// the run reaches gets one fresh shot, so the store's pictures track
         /// the app as it is now.
@@ -1115,14 +1706,21 @@ public final class ExploreController: @unchecked Sendable {
         /// Undecidable when the app names itself nowhere — then any screen
         /// passes, as it did before the launch was checked at all.
         func isExpectedApp(_ snapshot: [AccessibilityFlatNode]) -> Bool {
-            guard !expectedApp.isEmpty else { return true }
-            guard let label = ExploreEngine.applicationLabel(of: snapshot) else { return false }
-            lastSettledLabel = label
-            return expectedApp.contains { $0.compare(label, options: .caseInsensitive) == .orderedSame }
+            let root = ExploreEngine.applicationLabel(of: snapshot)
+            let match = Self.appMatch(rootLabel: root, expected: expectedApp)
+            // Named or not, a screen that had a root node did settle on
+            // something, and the failure below has to be able to say what.
+            if root != nil, !expectedApp.isEmpty {
+                lastSettledLabel = match.label ?? Self.unnamedScreenDescription
+            }
+            return match.isApp
         }
         // One scan of the checkout per run: visible strings on every screen
         // reverse-map to the localization keys that mint them.
         let localization = configuration.projectRoot.map(LocalizationIndex.build) ?? .empty
+
+        /// What to say about the store instead of "Готово" when a write failed.
+        var storeWriteError: String?
 
         func publish(_ text: String?) {
             // Which transitions the map *draws* is a question about the screens'
@@ -1143,10 +1741,19 @@ public final class ExploreController: @unchecked Sendable {
                 steps: priorSteps + steps,
                 relaunches: priorRelaunches + relaunches
             )
-            let snapshot = graph.map(ExploreGrouping.annotated)
+            let snapshot = graph.map(Self.storeSnapshot)
             lock.unlock()
-            guard let snapshot, let data = try? JSON.data(snapshot, pretty: true) else { return }
-            try? data.write(to: directory.appendingPathComponent("graph.json"), options: [.atomic])
+            guard let snapshot else { return }
+            // A map nobody could write must not end the run with "Готово: N
+            // экранов" — the number would describe a file that is not there —
+            // and a write that goes through afterwards must take the complaint
+            // back, or the run sends someone hunting for a map that is on disk.
+            // Assigned either way for that second half: nothing else touches
+            // `lastError` while a run is in flight.
+            storeWriteError = Self.writeStoreReportingFailure(snapshot, to: directory)
+            lock.lock()
+            lastError = storeWriteError
+            lock.unlock()
         }
 
         /// Retakes a node's screenshot once per run, so the store's pictures
@@ -1165,23 +1772,23 @@ public final class ExploreController: @unchecked Sendable {
         /// frontier. Screens persisted by previous runs attach the same way,
         /// seeded with the actions they already tried.
         ///
-        /// `isEntry` marks the screen a pass launched into. Such a screen is an
-        /// opening, not a shorter path to somewhere: a screen already charted
-        /// three taps deep keeps the depth it was found at, because flattening
-        /// it to zero on every relaunch also flattened every arrow leading into
-        /// it — the drawn map lost the transitions and the screen turned into
-        /// an orphan card.
+        /// `isEntry` marks the screen a pass launched into — a fact about the
+        /// app, recorded whether or not a tap also reaches the screen, and it
+        /// is `ExploreGrouping.rootmost` that decides what the drawn map makes
+        /// of the mark. The landing is not a shorter path to anywhere, so the
+        /// screen keeps the depth it was charted at; see `settledDepth`.
         func record(_ snapshot: [AccessibilityFlatNode], depth: Int, isEntry: Bool = false) async -> String {
             let fingerprint = ExploreEngine.fingerprint(of: snapshot)
-            /// The depth a known screen keeps: its own when this snapshot is a
-            /// launch landing on it, the shorter of the two otherwise.
-            func settled(_ current: Int) -> Int { isEntry ? current : min(current, depth) }
+            func settled(_ current: Int) -> Int {
+                Self.settledDepth(recorded: current, reached: depth, isLanding: isEntry)
+            }
             if var known = screens[fingerprint] {
                 known.depth = settled(known.depth)
                 screens[fingerprint] = known
                 if let index = nodeIndex[fingerprint] {
                     nodes[index].visits += 1
                     nodes[index].depth = settled(nodes[index].depth)
+                    if isEntry { nodes[index].entryPoint = true }
                     await refreshShot(nodes[index].id)
                 }
                 return fingerprint
@@ -1211,6 +1818,7 @@ public final class ExploreController: @unchecked Sendable {
                 catalogue(actions.map(\.key), on: index)
                 nodes[index].visits += 1
                 nodes[index].depth = settled(nodes[index].depth)
+                if isEntry { nodes[index].entryPoint = true }
                 var mergedKeys = nodes[index].localizationKeys ?? []
                 for key in localizationKeys where !mergedKeys.contains(key) && mergedKeys.count < 30 {
                     mergedKeys.append(key)
@@ -1241,7 +1849,8 @@ public final class ExploreController: @unchecked Sendable {
                 triedActionKeys: nil,
                 actionKeys: Set(actions.map(\.key)).sorted(),
                 deeplinks: nil,
-                localizationKeys: localizationKeys.isEmpty ? nil : localizationKeys
+                localizationKeys: localizationKeys.isEmpty ? nil : localizationKeys,
+                entryPoint: isEntry ? true : nil
             ))
             nodeIndex[fingerprint] = nodes.count - 1
             nodeIndexByKey[key] = nodes.count - 1
@@ -1267,30 +1876,16 @@ public final class ExploreController: @unchecked Sendable {
             edgeIndex[key] = edges.count - 1
         }
 
-        /// Adds action keys to what the screen is known to offer. Both counters
-        /// a node publishes are sizes of key sets, so "tried" and "total" mean
-        /// the same kind of thing and can be compared — the per-state sums they
-        /// used to be could not (one button in two states counted twice in the
-        /// total and once among the tried, and the total could even end up
-        /// below the tried count).
         func catalogue(_ keys: [String], on index: Int) {
-            var known = Set(nodes[index].actionKeys ?? [])
-            // A store from before the keys were kept knows only its old total;
-            // the union starts from the keys of the state at hand and grows.
-            known.formUnion(keys)
-            nodes[index].actionKeys = known.sorted()
-            nodes[index].actionsTotal = max(known.count, nodes[index].actionsTried)
+            Self.catalogue(keys, on: &nodes[index])
         }
 
         func markTried(_ fingerprint: String, key: String) {
             screens[fingerprint]?.triedKeys.insert(key)
             if let index = nodeIndex[fingerprint] {
                 // Persisted so the next run continues the frontier here.
-                var persisted = Set(nodes[index].triedActionKeys ?? [])
-                persisted.insert(key)
-                nodes[index].triedActionKeys = persisted.sorted()
-                nodes[index].actionsTried = persisted.count
-                catalogue([key], on: index)
+                let legacyTried = legacyTriedCounts[nodes[index].id] ?? 0
+                Self.markTried(key, on: &nodes[index], legacyTriedCount: legacyTried)
             }
         }
 
@@ -1308,48 +1903,22 @@ public final class ExploreController: @unchecked Sendable {
         /// frontier sits three taps deeper.
         func descentAction(on fingerprint: String) -> ExploreEngine.Action? {
             guard let state = screens[fingerprint] else { return nil }
-            let hasUntried = nodesWithUntried()
-            guard !hasUntried.isEmpty else { return nil }
-            var adjacency: [String: [(to: String, action: ExploreTransitionAction)]] = [:]
-            for edge in edges {
-                adjacency[edge.from, default: []].append((edge.to, edge.action))
-            }
-            // BFS in node space; edges only ever descend (the depth rule), so
-            // this terminates without cycle bookkeeping beyond `visited`.
-            var queue: [(node: String, firstHop: ExploreTransitionAction?)] = [(state.nodeId, nil)]
-            var visited: Set<String> = [state.nodeId]
-            while !queue.isEmpty {
-                let (node, firstHop) = queue.removeFirst()
-                if hasUntried.contains(node), let firstHop {
-                    return state.actions.first {
-                        $0.targetId == firstHop.targetId && $0.targetLabel == firstHop.targetLabel && !$0.isScroll
-                    }
-                }
-                for (to, action) in adjacency[node] ?? [] where !visited.contains(to) {
-                    visited.insert(to)
-                    queue.append((to, firstHop ?? action))
-                }
-            }
-            return nil
+            return Self.descentAction(
+                from: state.nodeId,
+                actions: state.actions,
+                edges: edges,
+                targets: nodesWithUntried()
+            )
         }
 
-        /// Nodes that still hold untried taps: the states this run has walked,
-        /// plus what the store remembers about screens it has not revisited yet.
+        /// Nodes that still hold untried taps: what the map says about every
+        /// screen it carries, plus what the states walked this run add to it.
         /// Screen states live for one run, the map does not — reading the
         /// frontier from visited states alone made a resumed run call the map
         /// finished the moment its start screen was exhausted, while every
         /// screen one tap deeper still had most of its actions untried.
         func nodesWithUntried() -> Set<String> {
-            var result: Set<String> = []
-            for state in screens.values
-            where state.actions.contains(where: { !state.triedKeys.contains($0.key) }) {
-                result.insert(state.nodeId)
-            }
-            let visited = Set(screens.values.map(\.nodeId))
-            for node in nodes where !visited.contains(node.id) && ExploreEngine.hasUntriedActions(node) {
-                result.insert(node.id)
-            }
-            return result
+            Self.nodesWithUntried(states: screens, nodes: nodes)
         }
 
         func anyUntriedRemains() -> Bool {
@@ -1381,6 +1950,9 @@ public final class ExploreController: @unchecked Sendable {
         /// until the budget runs out.
         var barrenPasses = 0
         var stalled = false
+        /// Why a relaunch after the first pass could not get the app up. Ends the
+        /// run with what it has instead of discarding it.
+        var lateLaunchFailure: String?
         do {
             passes: while !Task.isCancelled, !budgetsExhausted(), relaunches < budgets.maxRelaunches {
                 if relaunches > 0, !anyUntriedRemains() { break }
@@ -1399,15 +1971,25 @@ public final class ExploreController: @unchecked Sendable {
                     // the app is not there after all, the launch below runs.
                     attachToCurrentScreen = false
                     publish("Продолжаю с текущего экрана: жду стабилизации…")
-                    if let settled = try await settledSnapshot(stableReads: 4), isExpectedApp(settled) {
+                    if let settled = try await settledSnapshot(stableReads: 4, deadline: budgets.deadline),
+                       isExpectedApp(settled) {
                         launched = settled
                     } else {
                         publish("На экране не \(app) — запускаю приложение…")
                     }
                 }
-                for _ in 0..<3 where launched == nil {
+                // The time budget bounds the launch phase too: three launch
+                // attempts at a two-minute timeout each, plus a settling window
+                // after every one of them, used to run to the end whatever the
+                // clock said — a pass begun a millisecond before the deadline
+                // went on for minutes.
+                for _ in 0..<3 where launched == nil && !budgetsExhausted() {
                     do {
-                        try await launch(app: app, profile: relaunches == 1 ? profile : (resumeProfile ?? profile))
+                        try await launch(
+                            app: app,
+                            profile: relaunches == 1 ? profile : (resumeProfile ?? profile),
+                            deadline: budgets.deadline
+                        )
                         launchError = nil
                     } catch is CancellationError {
                         throw CancellationError()
@@ -1420,28 +2002,53 @@ public final class ExploreController: @unchecked Sendable {
                         launchError = error.localizedDescription
                         publish("Запуск \(relaunches) не удался, пробую снова…")
                     }
-                    let settled = try await settledSnapshot(stableReads: 8)
+                    let settled = try await settledSnapshot(stableReads: 8, deadline: budgets.deadline)
                     if let settled, isExpectedApp(settled) {
                         launched = settled
                     }
                 }
                 guard let snapshot = launched else {
+                    let failure: String
                     if let launchError {
-                        finish(error: "Не удалось запустить \(app): \(launchError)")
+                        failure = "Не удалось запустить \(app): \(launchError)"
                     } else if let lastSettledLabel, !expectedApp.isEmpty {
                         // The screen did settle — on something that is not the
                         // app. Naming both sides is the difference between a
                         // diagnosable mismatch and a dead end.
-                        finish(error: """
+                        failure = """
                             После запуска \(app) на экране «\(lastSettledLabel)», \
                             а ожидалось \(expectedApp.sorted().map { "«\($0)»" }.joined(separator: " или ")).
-                            """)
+                            """
                     } else {
-                        finish(error: "Экран не стабилизировался после запуска \(app).")
+                        failure = "Экран не стабилизировался после запуска \(app)."
                     }
-                    return
+                    // Nothing failed if nobody waited: the budget cut the launch
+                    // phase short, and the closing reason below says so.
+                    if budgetsExhausted() { break passes }
+                    // Not getting the app up at all is the run failing — there is
+                    // no map yet, and no reason to expect the next try to differ.
+                    // Not getting it up on the eighth pass, after thirty screens,
+                    // is a reason to stop rather than to throw the pass away: the
+                    // map, the deeplink attribution and the closing tally are all
+                    // still worth having.
+                    if relaunches == 1 {
+                        finish(error: failure)
+                        return
+                    }
+                    lateLaunchFailure = failure
+                    break passes
                 }
-                if let label = ExploreEngine.applicationLabel(of: snapshot) { expectedApp = [label] }
+                // Narrowed to the one name this launch actually showed — but only
+                // to a name. A blank root label is no name at all (see
+                // `appMatch`), and pinning the expectation to it would make every
+                // equally blank screen pass for the app from here on. Read off
+                // the snapshot rather than through `appMatch`, so an app that
+                // names itself nowhere in the bundle still gets its expectation
+                // narrowed to what its own launch showed.
+                if let label = ExploreEngine.applicationLabel(of: snapshot)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty {
+                    expectedApp = [label]
+                }
                 var current = await record(snapshot, depth: 0, isEntry: true)
                 publish("Стартовый экран: \(nodeTitle(nodes, screens, current))")
                 let stepsAtPassStart = steps
@@ -1491,7 +2098,19 @@ public final class ExploreController: @unchecked Sendable {
                         publish("Шаг \(steps): \(intent)tap «\(described)»")
                         _ = try? await SimulatorInputClient.tap(deviceUDID: configuration.device.udid, x: action.x, y: action.y)
                     }
-                    guard let after = try await settledSnapshot() else { continue }
+                    guard let after = try await settledSnapshot() else {
+                        // A webview, or a native screen carrying no identifiers
+                        // at all, is invisible to the snapshot reader — and
+                        // whatever this one is, we no longer know what is in
+                        // front of us. Going back to the top of the loop kept
+                        // tapping the catalog of the screen we just left, blind,
+                        // by its coordinates, with the denylist filtering a
+                        // snapshot nobody is looking at. Relaunching is the
+                        // honest way out; the tap that got us here is already
+                        // marked tried, so the next pass walks past it.
+                        publish("Экран не распознан — перезапускаю…")
+                        break
+                    }
                     if !isExpectedApp(after) {
                         // The tap left the app (switcher, external link, crash):
                         // SpringBoard is not part of the map — relaunch instead.
@@ -1571,6 +2190,12 @@ public final class ExploreController: @unchecked Sendable {
             // node — a screen on the map that no tap reaches, often a
             // duplicate of a charted one in a different structural state.
             // An unmatched route stays unattributed instead.
+            //
+            // Outside the time budget, deliberately: the scan opens nothing,
+            // reads only the checkout, and is the run's one chance to attribute
+            // routes to the screens it just found. A crawl that walked for
+            // fifteen minutes should not lose that because the deadline fell in
+            // its last second.
             if !Task.isCancelled {
                 publish("Ищу диплинки в исходниках…")
                 var links = configuration.deeplinks.map(\.url)
@@ -1593,12 +2218,19 @@ public final class ExploreController: @unchecked Sendable {
                 }
                 if attributed > 0 { publish("Диплинки из исходников: привязано \(attributed)") }
             }
+            // Honest endings before the limiters: a crawl that finished the
+            // frontier on its last pass reported "Исчерпан лимит перезапусков",
+            // and a deadline that expired during the deeplink scan — with the
+            // walking already over — reported "Бюджет исчерпан". Both named
+            // something that had stopped nothing.
             let reason: String
             if Task.isCancelled { reason = "Остановлено пользователем." }
-            else if budgetsExhausted() { reason = "Бюджет исчерпан." }
+            else if !nodes.isEmpty, !anyUntriedRemains() { reason = "Все доступные действия испробованы." }
             else if stalled { reason = "Запуск приводит на тот же испробованный экран — дальше идти некуда." }
+            else if let lateLaunchFailure { reason = "Перезапуск не удался. \(lateLaunchFailure)" }
+            else if budgetsExhausted() { reason = "Бюджет исчерпан." }
             else if relaunches >= budgets.maxRelaunches { reason = "Исчерпан лимит перезапусков." }
-            else { reason = "Все доступные действия испробованы." }
+            else { reason = "Обход завершён." }
             publish(nil)
             let drawn = ExploreGrouping.descending(edges: edges, nodes: nodes).count
             // Steps are cumulative across runs, the way the tab's header counts
@@ -1609,10 +2241,10 @@ public final class ExploreController: @unchecked Sendable {
                 ExploreEngine.counted(drawn, "переход", "перехода", "переходов"),
                 ExploreEngine.counted(priorSteps + steps, "шаг", "шага", "шагов"),
             ].joined(separator: ", ")
-            finish(error: nil, note: "Готово: \(tally). \(reason)")
+            finish(error: storeWriteError, note: "Готово: \(tally). \(reason)")
         } catch is CancellationError {
             publish(nil)
-            finish(error: nil, note: "Остановлено пользователем.")
+            finish(error: storeWriteError, note: "Остановлено пользователем.")
         } catch {
             publish(nil)
             finish(error: "Обход прерван: \(error.localizedDescription)")
@@ -1626,17 +2258,26 @@ public final class ExploreController: @unchecked Sendable {
 
     private func finish(error: String?, note: String? = nil) {
         lock.lock()
-        running = false
-        lastError = error
-        if let note { message = note }
-        if let error { message = error }
         graph?.run.finishedAt = Self.timestamp()
-        let snapshot = graph.map(ExploreGrouping.annotated)
+        let snapshot = graph.map(Self.storeSnapshot)
         let directory = runDirectory
         lock.unlock()
-        if let snapshot, let directory, let data = try? JSON.data(snapshot, pretty: true) {
-            try? data.write(to: directory.appendingPathComponent("graph.json"), options: [.atomic])
+
+        // The closing write is the one that matters most and was the one least
+        // watched: swallowed here, it let a run report "Готово: 30 экранов" over
+        // a store that was never written.
+        var writeFailure: String?
+        if let snapshot, let directory {
+            writeFailure = Self.writeStoreReportingFailure(snapshot, to: directory)
         }
+
+        lock.lock()
+        running = false
+        lastError = [error, writeFailure].compactMap { $0 }.joined(separator: " ").nilIfEmpty
+        if let note { message = note }
+        if let error { message = error }
+        if let writeFailure { message = writeFailure }
+        lock.unlock()
     }
 
     // MARK: simulator I/O
@@ -1644,7 +2285,7 @@ public final class ExploreController: @unchecked Sendable {
     /// Relaunches through simctl with the profile's argv, arming the SimTool
     /// loggers the same way `simtool test run` does — the crawl must observe
     /// the same app configuration a recorded test would.
-    private func launch(app: String, profile: LaunchProfile?) async throws {
+    private func launch(app: String, profile: LaunchProfile?, deadline: Date) async throws {
         // Home first: a system overlay a stray tap opened (the app switcher)
         // stays above a freshly launched app and would poison the snapshot.
         // The press has to land before the launch does: SpringBoard is still
@@ -1672,6 +2313,13 @@ public final class ExploreController: @unchecked Sendable {
         // than the whole crawl.
         var lastFailure = ""
         for attempt in 0..<3 {
+            // Under the run's own deadline, like every other phase: a launch
+            // that starts after the budget is spent is work nobody is waiting
+            // for, and simctl's timeout alone let three of them run for six
+            // minutes past it.
+            guard Date() < deadline else {
+                throw SimToolError("Бюджет времени исчерпан во время запуска \(app).")
+            }
             if attempt > 0 {
                 try await Task.sleep(for: .milliseconds(1500))
             }
@@ -1679,7 +2327,10 @@ public final class ExploreController: @unchecked Sendable {
                 executable: URL(fileURLWithPath: "/usr/bin/xcrun"),
                 arguments: arguments,
                 environment: SimulatorAppLifecycleClient.simctlChildEnvironment(launchEnvironment: environment),
-                timeoutSeconds: 120
+                // Never past the deadline, and never so short that a healthy
+                // launch is cut off: simctl needs its two minutes when it has
+                // them.
+                timeoutSeconds: min(120, max(5, deadline.timeIntervalSinceNow))
             )
             if output.status == 0 { return }
             lastFailure = output.stderrString.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1697,13 +2348,19 @@ public final class ExploreController: @unchecked Sendable {
     /// 2 between taps, but a launch under an auto-login profile walks through
     /// auth screens that each stand still for seconds — tapping them breaks
     /// the login — so a launch demands a much longer quiet streak.
-    private func settledSnapshot(stableReads: Int = 2) async throws -> [AccessibilityFlatNode]? {
-        var snapshot = try await structurallySettledSnapshot(stableReads: stableReads)
+    ///
+    /// `deadline` cuts the wait short with whatever settled last. Passed by the
+    /// launch phase, whose windows are counted in minutes; the wait between two
+    /// taps is left alone, because a snapshot taken half-drawn maps a screen
+    /// nobody ever sees.
+    private func settledSnapshot(stableReads: Int = 2, deadline: Date? = nil) async throws -> [AccessibilityFlatNode]? {
+        var snapshot = try await structurallySettledSnapshot(stableReads: stableReads, deadline: deadline)
         var patience = 10
-        while let current = snapshot, ExploreEngine.isLoading(current), patience > 0, !Task.isCancelled {
+        while let current = snapshot, ExploreEngine.isLoading(current), patience > 0, !Task.isCancelled,
+              Date() < (deadline ?? .distantFuture) {
             patience -= 1
             try await Task.sleep(for: .milliseconds(700))
-            if let refreshed = try await structurallySettledSnapshot(stableReads: stableReads) {
+            if let refreshed = try await structurallySettledSnapshot(stableReads: stableReads, deadline: deadline) {
                 snapshot = refreshed
             }
         }
@@ -1772,12 +2429,13 @@ public final class ExploreController: @unchecked Sendable {
     /// `stableReads` consecutive reads with the same structural fingerprint.
     /// Nil when the screen never settles within the window (endless
     /// animation) — the caller decides whether that is fatal.
-    private func structurallySettledSnapshot(stableReads: Int = 2) async throws -> [AccessibilityFlatNode]? {
+    private func structurallySettledSnapshot(stableReads: Int = 2, deadline: Date? = nil) async throws -> [AccessibilityFlatNode]? {
         try await Task.sleep(for: .milliseconds(600))
         var streak = 1
         var previous: (fingerprint: String, nodes: [AccessibilityFlatNode])?
         for _ in 0..<(10 + stableReads * 4) {
             if Task.isCancelled { return previous?.nodes }
+            if let deadline, Date() >= deadline { return previous?.nodes }
             // AXe fails transiently mid-transition ("no translation object
             // returned") — that is "not settled yet", not a fatal error, so a
             // failed read costs one retry instead of the whole run.

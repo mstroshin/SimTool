@@ -32,6 +32,36 @@ final class ProcessRunnerTests: XCTestCase {
         )
         XCTAssertEqual(output.stdoutString, "plain\n")
     }
+
+    // A child that never exits has to become an error, and quickly. `await` on
+    // one is not a suspension point anything can cancel: a wedged
+    // `simctl io … screenshot` froze a whole crawl, its minute budget stopped
+    // applying, and `POST /api/v1/explore/stop` had nothing to interrupt —
+    // killing the child by hand was the only way out.
+    func testAChildThatNeverExitsFailsOnTheTimeoutInsteadOfHanging() async throws {
+        let started = Date()
+        do {
+            _ = try await ProcessRunner.run(
+                executable: URL(fileURLWithPath: "/bin/sh"),
+                arguments: ["-c", "sleep 30"],
+                timeoutSeconds: 0.5
+            )
+            XCTFail("a process that outlives its timeout must not return normally")
+        } catch {
+            XCTAssertTrue(
+                error.localizedDescription.contains("timed out"),
+                "the failure has to say what happened, got \(error.localizedDescription)"
+            )
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 10, "the wait is the timeout, not the child")
+    }
+
+    // The two clients the crawl leans on every step carry a bound of their own,
+    // so nothing has to remember to pass one.
+    func testTheSimulatorClientsAreBoundedByDefault() {
+        XCTAssertGreaterThan(AxeClient.defaultTimeoutSeconds, 0)
+        XCTAssertGreaterThan(SimulatorScreenshotClient.defaultTimeoutSeconds, 0)
+    }
 }
 
 private final class LineCollector: @unchecked Sendable {

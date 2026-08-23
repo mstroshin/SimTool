@@ -36,7 +36,23 @@ public enum AxeClient {
         throw SimToolError("AXe is not installed or not in PATH. Install https://github.com/cameroncooke/AXe")
     }
 
-    public static func run(_ arguments: [String], stdin: Data? = nil, timeoutSeconds: TimeInterval? = nil) async throws -> ProcessOutput {
+    /// How long an AXe command may take before it is treated as a failure.
+    ///
+    /// Every one of them is a short operation — a tap, a swipe of a second or
+    /// two, one read of the accessibility tree — and none has a reason to
+    /// outlast a minute. Unbounded, one that wedges takes its caller with it:
+    /// `await` on a child process that never exits is not a suspension point
+    /// anything can cancel, so the crawl's own time budget stops applying and
+    /// `POST /api/v1/explore/stop` has nothing to interrupt. A bound turns that
+    /// into an error the callers already handle — a failed tree read is "not
+    /// settled yet" to the crawl, and a failed tap ends the pass.
+    public static let defaultTimeoutSeconds: TimeInterval = 60
+
+    public static func run(
+        _ arguments: [String],
+        stdin: Data? = nil,
+        timeoutSeconds: TimeInterval? = defaultTimeoutSeconds
+    ) async throws -> ProcessOutput {
         let output = try await ProcessRunner.run(
             executable: try await url(),
             arguments: arguments,
@@ -385,11 +401,38 @@ public enum SimulatorLogsClient {
 }
 
 public enum SimulatorScreenshotClient {
-    public static func png(deviceUDID: String, maxDimension: Int? = nil) async throws -> Data {
+    /// How long one `simctl io … screenshot` may take before it is a failure.
+    ///
+    /// A screenshot is a fraction of a second's work, and this is not a limit on
+    /// a slow machine so much as on a wedged one: CoreSimulator's `simctl io`
+    /// does sometimes stop returning, and it took a whole crawl with it — every
+    /// screen the crawl reaches is photographed, `await` on a child that never
+    /// exits cannot be cancelled, so the run's minute budget stopped applying
+    /// and `POST /api/v1/explore/stop` had nothing to interrupt. Killing the
+    /// child by hand was the only way out. Bounded, the crawl loses one
+    /// screenshot and walks on.
+    ///
+    /// Two minutes, the same threshold `simctl launch` is given, and deliberately
+    /// far above anything healthy: the number's job is to tell a hang from work,
+    /// not to police a slow machine. A CoreSimulator left with stale display
+    /// objects answered every screenshot in a steady 60 seconds — miserable, and
+    /// still a machine doing its job, which a tighter bound would have called
+    /// broken.
+    public static let defaultTimeoutSeconds: TimeInterval = 120
+
+    public static func png(
+        deviceUDID: String,
+        maxDimension: Int? = nil,
+        timeoutSeconds: TimeInterval = defaultTimeoutSeconds
+    ) async throws -> Data {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("simtool-screenshot-\(UUID().uuidString).png")
         defer { try? FileManager.default.removeItem(at: url) }
-        let output = try await ProcessRunner.runXcrun(["simctl", "io", deviceUDID, "screenshot", "--type=png", url.path])
+        let output = try await ProcessRunner.run(
+            executable: URL(fileURLWithPath: "/usr/bin/xcrun"),
+            arguments: ["simctl", "io", deviceUDID, "screenshot", "--type=png", url.path],
+            timeoutSeconds: timeoutSeconds
+        )
         guard output.status == 0 else {
             throw SimToolError(output.stderrString.isEmpty ? "simctl screenshot failed" : output.stderrString)
         }

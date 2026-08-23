@@ -177,10 +177,19 @@ public final class StreamServer: @unchecked Sendable {
 
         server.POST["/api/v1/explore/start"] = { request in
             do {
-                let body = (try? self.decodeJSON(ExploreStartRequest.self, from: request)) ?? ExploreStartRequest()
+                // An empty body means "crawl with the defaults"; a body that
+                // does not decode means the caller asked for something and got
+                // it wrong. Substituting the defaults for it started a
+                // 200-step crawl over a typo in `maxSteps` and said nothing —
+                // and a typo is what `ExploreStartRequest.init(from:)` is for,
+                // since `Codable` would otherwise skip the misspelled key and
+                // decode the same silent default run out of `{"maxStep": 60}`.
+                let body = request.body.isEmpty
+                    ? ExploreStartRequest()
+                    : try self.decodeJSON(ExploreStartRequest.self, from: request)
                 return try self.jsonEncodedResponse(try self.explorer.start(body))
             } catch {
-                return self.errorResponse(error, statusCode: 409, reason: "Conflict")
+                return self.exploreErrorResponse(error)
             }
         }
 
@@ -194,7 +203,7 @@ public final class StreamServer: @unchecked Sendable {
                 let body = try self.decodeJSON(ExploreLayoutRequest.self, from: request)
                 return try self.jsonEncodedResponse(try self.explorer.saveLayout(body.positions))
             } catch {
-                return self.errorResponse(error, statusCode: 400, reason: "Bad Request")
+                return self.exploreErrorResponse(error)
             }
         }
 
@@ -211,7 +220,7 @@ public final class StreamServer: @unchecked Sendable {
                 let body = try self.decodeJSON(ExploreGroupNamesRequest.self, from: request)
                 return try self.jsonEncodedResponse(try self.explorer.saveGroupNames(body.names))
             } catch {
-                return self.errorResponse(error, statusCode: 400, reason: "Bad Request")
+                return self.exploreErrorResponse(error)
             }
         }
 
@@ -1080,6 +1089,28 @@ public final class StreamServer: @unchecked Sendable {
             // Anything else (store I/O) is a server-side failure.
             return errorResponse(error)
         }
+    }
+
+    /// Explore failures answer in their own classes, because the three mean
+    /// different things to whoever asked: a request that can be fixed and
+    /// resent (400), a state that cannot serve it (409), and a failure of ours
+    /// (500). All of them used to arrive as one code — `start` answered 409
+    /// even for an unknown profile name, and a `layout.json` that could not be
+    /// written answered "bad request".
+    private func exploreErrorResponse(_ error: Error) -> HttpResponse {
+        if let explore = error as? ExploreRequestError {
+            switch explore {
+            case .badRequest: return errorResponse(error, statusCode: 400, reason: "Bad Request")
+            case .conflict: return errorResponse(error, statusCode: 409, reason: "Conflict")
+            case .failure: return errorResponse(error)
+            }
+        }
+        // A body that is not JSON, or is JSON of the wrong shape, and the
+        // validation the controller states as plain `SimToolError`.
+        if error is DecodingError || error is SimToolError {
+            return errorResponse(error, statusCode: 400, reason: "Bad Request")
+        }
+        return errorResponse(error)
     }
 
     private func videoFileResponse(_ url: URL, rangeHeader: String?) -> HttpResponse {

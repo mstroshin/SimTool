@@ -4,6 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Картограф</title>
+  <!-- Inline, because the alternative is a GET /favicon.ico the server answers
+       with 404 — the one error in the console on every open of the tab. -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='4' fill='%230b1020'/%3E%3Cpath d='M2.5 12.2 6 4.4l4 7.4 3.5-6.6' stroke='%237dd3fc' stroke-width='1.7' fill='none' stroke-linejoin='round'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="https://unpkg.com/@xyflow/react@12.8.2/dist/style.css">
   <style>{{css}}</style>
 </head>
@@ -15,8 +18,64 @@
     <span id="stats" class="stats"></span>
     <span class="grow"></span>
     <span id="message" class="msg"></span>
+    <!-- The map and the arrangement of it are two subjects, and one must not be
+         able to silence the other: this line is the arrangement's. -->
+    <span id="layout" class="msg warn"></span>
   </header>
-  <div id="root"></div>
+  <div id="root">
+    <!-- Replaced by the app on its first render; the only thing on screen until
+         then, and the only thing on screen ever if the app cannot load. -->
+    <div id="boot" class="boot"><span class="spin"></span>Загружаю карту…</div>
+  </div>
+  <noscript>
+    <div class="boot err">Карте нужен JavaScript: она рисуется в браузере из данных обхода.</div>
+  </noscript>
+  <script>
+    // The tab has no build step: React, React Flow and its stylesheet come off
+    // the network (see CartographerViewer.swift — that is a deliberate trade).
+    // When the network is not there, a <script type="module"> fails without a
+    // word and #root simply stays empty, so the page keeps its own diagnostic
+    // until the app replaces it.
+    window.__cartographerBoot = { failed: [], loaded: false, onFail: null };
+    (function () {
+      var boot = window.__cartographerBoot;
+      function show(text) {
+        var node = document.getElementById("boot");
+        if (!node) return;          // the map is up: it has its own header line
+        node.className = "boot err";
+        node.textContent = text;
+      }
+      function offline() {
+        show("Не удалось загрузить карту: нет доступа к " +
+          (boot.failed.join(", ") || "esm.sh, unpkg.com") +
+          ". Странице нужен интернет — React и React Flow грузятся оттуда, сборки в комплекте нет.");
+      }
+      window.addEventListener("error", function (event) {
+        var target = event.target;
+        if (target && (target.tagName === "SCRIPT" || target.tagName === "LINK")) {
+          var url = target.src || target.href || "";
+          var host = url ? url.replace(/^\w+:\/\//, "").split("/")[0] : "";
+          if (host && boot.failed.indexOf(host) < 0) boot.failed.push(host);
+          // The app may already be running with a stylesheet that never
+          // arrived; then it is the one that has to say so.
+          if (boot.onFail) boot.onFail();
+          offline();
+          return;
+        }
+        if (event.message) show("Карта не запустилась: " + event.message + ". Подробности в консоли браузера.");
+      }, true);
+      // A dependency that never arrives throws nothing at all. The only signal
+      // left is that after a while nothing has rendered.
+      setTimeout(function () {
+        if (!document.getElementById("boot") || boot.failed.length > 0) return;
+        if (boot.loaded) {
+          show("Карта загрузилась, но не отрисовалась. Подробности в консоли браузера.");
+          return;
+        }
+        offline();
+      }, 10000);
+    })();
+  </script>
   <script type="module">{{js}}</script>
 </body>
 </html>

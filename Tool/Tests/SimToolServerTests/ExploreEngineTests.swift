@@ -61,6 +61,43 @@ final class ExploreEngineTests: XCTestCase {
         XCTAssertEqual(actions.map(\.targetId), ["Ids.cell-0", "Ids.cell-7"])
     }
 
+    // Two elements framed alike are one tap: the same pixel, the same gesture,
+    // the same result. Template limiting cannot fold them — their identifiers
+    // differ — so each spent a step re-tapping what the one before it had
+    // already tapped. A real app hands out plenty: every cell wrapped in a
+    // same-sized `TouchRecognizingView`, and a screen carrying a SceneKit
+    // animation publishing the scene's lights as identically framed Groups.
+    func testOneTapPointIsProbedOnce() {
+        var snapshot = [node(id: nil, type: "Other", depth: 0, frame: [0, 0, 402, 874])]
+        // The scene's lights and geometry, all reported at one rect.
+        for name in ["left spot", "right spot", "front line", "CUBE", "ambient"] {
+            snapshot.append(node(id: name, type: "Group", depth: 20, frame: [124, 200, 154, 147]))
+        }
+        // A cell and the gesture view wrapping it, in the order a tree lists
+        // them: the container first, and it carries the better name.
+        snapshot.append(node(id: "ProfileScreen-PlataPlusHolaCell", type: "Group", depth: 8, frame: [20, 400, 362, 56]))
+        snapshot.append(node(id: "TouchRecognizingView", type: "Group", depth: 9, frame: [20, 400, 362, 56]))
+        // A control of its own, at a rect nothing else claims.
+        snapshot.append(node(id: "ProfileScreen-SettingsCell", type: "Cell", depth: 8, frame: [20, 500, 362, 56]))
+
+        let actions = ExploreEngine.actions(from: snapshot)
+        XCTAssertEqual(
+            actions.map(\.targetId),
+            ["left spot", "ProfileScreen-PlataPlusHolaCell", "ProfileScreen-SettingsCell"]
+        )
+    }
+
+    // The point a candidate is folded into is its own, not the screen's: two
+    // controls of one size on different rows stay two probes.
+    func testCandidatesAtDifferentPointsAreAllKept() {
+        let snapshot = [
+            node(id: nil, type: "Other", depth: 0, frame: [0, 0, 402, 874]),
+            node(id: "First", type: "Cell", depth: 4, frame: [20, 100, 362, 56]),
+            node(id: "Second", type: "Cell", depth: 4, frame: [20, 160, 362, 56]),
+        ]
+        XCTAssertEqual(ExploreEngine.actions(from: snapshot).map(\.targetId), ["First", "Second"])
+    }
+
     // Back/dismiss vocabulary matters twice: those taps run last, and the
     // transitions they cause never become edges — the map draws only forward.
     func testBackActionsAreRecognizedAndDeprioritized() {
@@ -315,9 +352,17 @@ final class ExploreEngineTests: XCTestCase {
     // bar jumps the queue: tabs are the widest doors in the app.
     func testActionsCapGridsAndPutTabsFirst() {
         var snapshot = [node(id: nil, type: "Other", depth: 0, frame: [0, 0, 402, 874])]
-        for first in "abcde" {
-            for second in "abcdefgh" {
-                snapshot.append(node(id: "avatar-\(first)\(second)", type: "Group", depth: 5, frame: [20, 100, 44, 44]))
+        // Laid out as a grid really is — five rows of eight, each cell its own
+        // square. Stacked at one rect they would be one tap point, and the cap
+        // this test is about would never be reached to be tested.
+        for (row, first) in "abcde".enumerated() {
+            for (column, second) in "abcdefgh".enumerated() {
+                snapshot.append(node(
+                    id: "avatar-\(first)\(second)",
+                    type: "Group",
+                    depth: 5,
+                    frame: [20 + column * 46, 100 + row * 46, 44, 44]
+                ))
             }
         }
         snapshot.append(node(id: "platform_tabbar_pay", type: "RadioButton", depth: 3, frame: [116, 795, 101, 54]))
@@ -526,6 +571,300 @@ final class ExploreEngineTests: XCTestCase {
         XCTAssertEqual(ExploreEngine.counted(0, "переход", "перехода", "переходов"), "0 переходов")
     }
 
+    // MARK: budgets
+
+    // A number nobody means still has to be answered: multiplying
+    // `budgetMinutes` out into seconds in `Int` trapped, and the trap took the
+    // whole simtool process down with it — stream, mocks, the run watching them.
+    func testAbsurdBudgetsAreRefusedInsteadOfOverflowing() {
+        for request in [
+            ExploreStartRequest(budgetMinutes: 1_000_000_000_000_000_000),
+            ExploreStartRequest(budgetMinutes: Int.max),
+            ExploreStartRequest(budgetMinutes: 0),
+            ExploreStartRequest(budgetMinutes: -5),
+            ExploreStartRequest(maxScreens: 0),
+            ExploreStartRequest(maxScreens: Int.max),
+            ExploreStartRequest(maxSteps: -1),
+            ExploreStartRequest(maxSteps: Int.max),
+        ] {
+            XCTAssertThrowsError(try ExploreController.budgets(for: request)) { error in
+                // The client can fix its own request, and has to be told so.
+                guard case ExploreRequestError.badRequest = error else {
+                    return XCTFail("expected a bad-request refusal, got \(error)")
+                }
+            }
+        }
+    }
+
+    // The ceiling is not a clamp: what a caller may ask for it still gets, and
+    // the widest allowed budget still lands on a real date.
+    func testAcceptedBudgetsKeepTheirNumbers() throws {
+        let defaults = try ExploreController.budgets(for: ExploreStartRequest())
+        XCTAssertEqual(defaults.maxScreens, 40)
+        XCTAssertEqual(defaults.maxSteps, 200)
+        XCTAssertEqual(defaults.deadline.timeIntervalSinceNow, 15 * 60, accuracy: 30)
+
+        let widest = try ExploreController.budgets(for: ExploreStartRequest(
+            maxScreens: ExploreController.maxScreensLimit,
+            maxSteps: ExploreController.maxStepsLimit,
+            budgetMinutes: ExploreController.budgetMinutesLimit
+        ))
+        XCTAssertEqual(widest.maxScreens, ExploreController.maxScreensLimit)
+        XCTAssertEqual(widest.maxSteps, ExploreController.maxStepsLimit)
+        XCTAssertEqual(
+            widest.deadline.timeIntervalSinceNow,
+            Double(ExploreController.budgetMinutesLimit) * 60,
+            accuracy: 30
+        )
+    }
+
+    // MARK: the descent
+
+    // The nearest screen with work left can sit behind a scroll, and a scroll
+    // records nothing to aim at. The search used to answer "no descent anywhere"
+    // on the strength of that one edge, the pass went barren, and two of those
+    // ended the run with "дальше идти некуда" over untapped screens.
+    func testDescentSkipsAScrollHopItCannotReplayAndTakesAnotherPath() {
+        let descent = ExploreController.descentAction(
+            from: "s-main",
+            actions: [action(key: "MainScreen-Cards", targetId: "MainScreen-Cards", label: "Карты")],
+            edges: [
+                edge(from: "s-main", to: "s-feed", kind: "scroll", targetId: nil, label: nil),
+                edge(from: "s-main", to: "s-cards", kind: "tap", targetId: "MainScreen-Cards", label: "Карты"),
+            ],
+            targets: ["s-feed", "s-cards"]
+        )
+        XCTAssertEqual(descent?.key, "MainScreen-Cards")
+    }
+
+    // A scroll hop is replayable after all when the screen still offers a scroll
+    // — that is the action that recorded the edge.
+    func testDescentReplaysAScrollHopWithAScroll() {
+        let descent = ExploreController.descentAction(
+            from: "s-main",
+            actions: [action(key: "scroll:1", targetId: nil, label: nil, isScroll: true)],
+            edges: [edge(from: "s-main", to: "s-feed", kind: "scroll", targetId: nil, label: nil)],
+            targets: ["s-feed"]
+        )
+        XCTAssertEqual(descent?.key, "scroll:1")
+    }
+
+    // Two hops away is still a descent: what comes back is the first of them,
+    // because that is all this screen can do about it.
+    func testDescentReturnsTheFirstHopOfALongerPath() {
+        let descent = ExploreController.descentAction(
+            from: "s-main",
+            actions: [action(key: "MainScreen-Cards", targetId: "MainScreen-Cards", label: "Карты")],
+            edges: [
+                edge(from: "s-main", to: "s-cards", kind: "tap", targetId: "MainScreen-Cards", label: "Карты"),
+                edge(from: "s-cards", to: "s-limit", kind: "tap", targetId: "Cards-Limit", label: "Лимит"),
+            ],
+            targets: ["s-limit"]
+        )
+        XCTAssertEqual(descent?.key, "MainScreen-Cards")
+    }
+
+    func testNoRecordedPathMeansNoDescent() {
+        XCTAssertNil(ExploreController.descentAction(
+            from: "s-main",
+            actions: [action(key: "MainScreen-Cards", targetId: "MainScreen-Cards", label: "Карты")],
+            edges: [edge(from: "s-cards", to: "s-limit", kind: "tap", targetId: "x", label: "y")],
+            targets: ["s-limit"]
+        ))
+    }
+
+    // MARK: the frontier
+
+    // A screen with several states was judged by the state in hand: the crawl
+    // called it finished and stopped, while the map — reading the node's stored
+    // key sets — went on showing untried taps on that very card.
+    func testAVisitedScreenIsJudgedByItsStoredKeysToo() {
+        let node = screenNode(
+            actionsTotal: 3, actionsTried: 1,
+            actionKeys: ["tab", "profile", "card"], triedActionKeys: ["tab"]
+        )
+        let seenState = ExploreController.ScreenState(
+            nodeId: "s-main",
+            depth: 0,
+            actions: [action(key: "tab", targetId: "tab", label: nil)],
+            triedKeys: ["tab"]
+        )
+        XCTAssertEqual(
+            ExploreController.nodesWithUntried(states: ["fingerprint": seenState], nodes: [node]),
+            ["s-main"]
+        )
+        XCTAssertTrue(ExploreEngine.hasUntriedActions(node), "the map and the crawl answer alike")
+    }
+
+    func testAScreenWhoseStoredKeysWereAllTriedLeavesTheFrontier() {
+        let node = screenNode(
+            actionsTotal: 2, actionsTried: 2,
+            actionKeys: ["tab", "profile"], triedActionKeys: ["tab", "profile"]
+        )
+        let seenState = ExploreController.ScreenState(
+            nodeId: "s-main",
+            depth: 0,
+            actions: [action(key: "tab", targetId: "tab", label: nil)],
+            triedKeys: ["tab"]
+        )
+        XCTAssertTrue(
+            ExploreController.nodesWithUntried(states: ["fingerprint": seenState], nodes: [node]).isEmpty
+        )
+    }
+
+    // MARK: counters across runs
+
+    // The second run extends what the first recorded rather than restating it:
+    // both key sets are unions, and neither counter the map already showed can
+    // fall.
+    func testASecondRunExtendsTheStoredKeySets() {
+        var node = screenNode(
+            actionsTotal: 2, actionsTried: 2,
+            actionKeys: ["profile", "tab"], triedActionKeys: ["profile", "tab"]
+        )
+        // This run finds the screen again, with one tappable more than before.
+        ExploreController.catalogue(["tab", "profile", "card"], on: &node)
+        XCTAssertEqual(node.actionKeys, ["card", "profile", "tab"])
+        XCTAssertEqual(node.actionsTotal, 3)
+        XCTAssertEqual(node.actionsTried, 2)
+        XCTAssertTrue(ExploreEngine.hasUntriedActions(node))
+
+        ExploreController.markTried("card", on: &node)
+        XCTAssertEqual(node.triedActionKeys, ["card", "profile", "tab"])
+        XCTAssertEqual(node.actionsTried, 3)
+        XCTAssertEqual(node.actionsTotal, 3)
+        XCTAssertFalse(ExploreEngine.hasUntriedActions(node))
+    }
+
+    // A schema-1 node published `5/8` with no keys behind either number.
+    // Rebuilding its key set is deliberate; publishing `1/10` on the first tap
+    // of the next run is not — the share the map showed walked backwards.
+    func testALegacyTriedCountNeverWalksBackwards() {
+        var node = screenNode(actionsTotal: 8, actionsTried: 5, actionKeys: nil, triedActionKeys: nil)
+        let legacyTried = node.actionsTried
+
+        ExploreController.catalogue((1...10).map { "key-\($0)" }, on: &node)
+        XCTAssertEqual(node.actionsTotal, 10, "the keys are known now, and there are ten of them")
+        XCTAssertEqual(node.actionsTried, 5)
+
+        ExploreController.markTried("key-1", on: &node, legacyTriedCount: legacyTried)
+        XCTAssertEqual(node.actionsTried, 5, "5/10 after one tap, never 1/10")
+        XCTAssertEqual(node.triedActionKeys, ["key-1"])
+
+        for key in ["key-2", "key-3", "key-4", "key-5", "key-6"] {
+            ExploreController.markTried(key, on: &node, legacyTriedCount: legacyTried)
+        }
+        XCTAssertEqual(node.actionsTried, 6, "the rebuilt set overtakes the history and takes over")
+    }
+
+    // A schema-1 node also published a tried count with no keys behind it, and
+    // the screen it describes can have fewer taps on it than the count claims —
+    // the app changed, or the count was a per-state sum that double-counted one
+    // button. The total is a set size and the tried count is not, so the total
+    // has to cover it: `3/5` says the map has lost track of five taps it made,
+    // and the canvas was quietly clamping the number to keep the bar drawable.
+    func testACataloguedSetSmallerThanTheHistoryStillCoversIt() {
+        var node = screenNode(actionsTotal: 8, actionsTried: 5, actionKeys: nil, triedActionKeys: nil)
+
+        ExploreController.catalogue(["tab", "profile", "card"], on: &node)
+        XCTAssertEqual(node.actionKeys, ["card", "profile", "tab"])
+        XCTAssertEqual(node.actionsTried, 5)
+        XCTAssertGreaterThanOrEqual(node.actionsTotal, node.actionsTried, "5 taps out of 3 is not a share")
+        XCTAssertEqual(node.actionsTotal, 5)
+    }
+
+    // MARK: is this the app we launched
+
+    // The screen names the app: the ordinary case, and case-insensitively,
+    // because the root label is the localized display name.
+    func testAScreenThatNamesTheAppIsTheApp() {
+        let match = ExploreController.appMatch(rootLabel: "banco plata debug", expected: ["Banco Plata Debug"])
+        XCTAssertTrue(match.isApp)
+        XCTAssertEqual(match.label, "banco plata debug")
+    }
+
+    func testAScreenThatNamesSomethingElseIsNotTheApp() {
+        let match = ExploreController.appMatch(rootLabel: "Safari", expected: ["Banco Plata Debug"])
+        XCTAssertFalse(match.isApp)
+        XCTAssertEqual(match.label, "Safari", "the name it did show is what the failure gets to report")
+    }
+
+    // A blank root label is SpringBoard's answer, not the absence of one:
+    // measured on a booted simulator, the app reports its display name and
+    // SpringBoard reports a single space. Reading the space as "undecidable,
+    // carry on" let a crawl map `SBSwitcherWindow:Main` as one of the app's own
+    // screens — and the permission alert iOS puts over a freshly installed app
+    // is that same screen.
+    func testAScreenThatNamesNothingIsSpringBoardAndNotTheApp() {
+        for blank in [" ", "", "\n  \t"] {
+            let match = ExploreController.appMatch(rootLabel: blank, expected: ["Banco Plata Debug"])
+            XCTAssertFalse(match.isApp, "a blank label is not the app, got acceptance for \(blank.debugDescription)")
+            XCTAssertNil(match.label, "and nothing may narrow the expectation down to whitespace")
+        }
+    }
+
+    // Nothing was read at all — no root node in the snapshot. Not the app
+    // either, and with nothing to report about what was on screen.
+    func testASnapshotWithNoRootIsNotTheApp() {
+        let match = ExploreController.appMatch(rootLabel: nil, expected: ["Banco Plata Debug"])
+        XCTAssertFalse(match.isApp)
+        XCTAssertNil(match.label)
+    }
+
+    // An app that names itself nowhere leaves nothing to check against, and
+    // every screen passes — as it did before the launch was checked at all.
+    func testWithNothingToCheckAgainstEveryScreenPasses() {
+        XCTAssertTrue(ExploreController.appMatch(rootLabel: "Safari", expected: []).isApp)
+    }
+
+    // MARK: the depth a landing leaves behind
+
+    // A pass that walks to a known screen by a shorter route than before has
+    // found something out about the app. A pass that *lands* on it has not: the
+    // landing is at distance zero from itself, and taking that for a shorter
+    // path flattened a screen charted one tap in to depth 0. The map is measured
+    // from its openings, and the recorded depth is what decides which of two
+    // openings that reach each other it hangs on — so the flattened screen won
+    // that decision and the arrow into it stopped being drawn. See
+    // `ExploreGroupingTests.testTheRecordedDepthDecidesWhichOfTwoOpeningsTheMapHangsOn`.
+    func testALandingKeepsTheDepthTheScreenWasChartedAt() {
+        XCTAssertEqual(ExploreController.settledDepth(recorded: 3, reached: 0, isLanding: true), 3)
+        XCTAssertEqual(
+            ExploreController.settledDepth(recorded: 3, reached: 1, isLanding: false),
+            1,
+            "a shorter walk is news about the app"
+        )
+        XCTAssertEqual(
+            ExploreController.settledDepth(recorded: 1, reached: 4, isLanding: false),
+            1,
+            "a longer one is not"
+        )
+    }
+
+    // MARK: the relaunch profile
+
+    // The convention pairs a profile with its own `-resume`. It used to hand
+    // every run `explore-resume` from the second pass on, so a crawl asked for
+    // by name came up under another configuration halfway through and the map
+    // was glued together from two.
+    func testResumeProfileIsTheChosenProfilesOwnPair() {
+        let profiles = [
+            LaunchProfile(name: "explore"),
+            LaunchProfile(name: "explore-resume"),
+            LaunchProfile(name: "qa"),
+        ]
+        XCTAssertEqual(
+            ExploreController.resumeProfile(for: profiles[0], in: profiles)?.name,
+            "explore-resume"
+        )
+        XCTAssertNil(
+            ExploreController.resumeProfile(for: profiles[2], in: profiles),
+            "a profile with no pair of its own relaunches through itself"
+        )
+        XCTAssertNil(ExploreController.resumeProfile(for: nil, in: profiles))
+    }
+
+
     // MARK: helpers
 
     private func screenNode(
@@ -550,6 +889,41 @@ final class ExploreEngineTests: XCTestCase {
             actionKeys: actionKeys
         )
     }
+
+    private func action(
+        key: String,
+        targetId: String?,
+        label: String?,
+        isScroll: Bool = false
+    ) -> ExploreEngine.Action {
+        ExploreEngine.Action(
+            key: key,
+            targetId: targetId,
+            targetLabel: label,
+            x: 100,
+            y: 200,
+            isBack: false,
+            isScroll: isScroll,
+            endY: isScroll ? 100 : 0
+        )
+    }
+
+    private func edge(
+        from: String,
+        to: String,
+        kind: String,
+        targetId: String?,
+        label: String?
+    ) -> ExploreTransitionEdge {
+        ExploreTransitionEdge(
+            id: "e-\(from)-\(to)",
+            from: from,
+            to: to,
+            action: ExploreTransitionAction(kind: kind, targetId: targetId, targetLabel: label),
+            count: 1
+        )
+    }
+
 
     private func node(
         id: String?,

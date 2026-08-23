@@ -580,11 +580,13 @@ swift run simtool open Settings --json
 
 ## Картограф — the screen map
 
-The viewer's 🗺️ Картограф tab draws the app as a map: one node per screen, with
-its screenshot, the share of its taps already tried, the deeplinks and
-localization keys attributed to it, and the features it belongs to; one arrow
-per transition a tap opened. The whole map lives in a single store per project,
-so a later crawl extends the picture instead of starting a new one:
+The viewer's 🗺️ Картограф link opens `/cartographer`, a separate page (not a tab
+of the viewer) that draws the app as a map: one node per screen, with its
+screenshot, the share of its taps already tried, the deeplinks and
+localization keys attributed to it, and the features it belongs to; screens
+joined by more than one transition still draw as a single arrow, labeled with
+one control and a count of the rest. The whole map lives in a single store per
+project, so a later crawl extends the picture instead of starting a new one:
 
 ```text
 .simtool/explore/
@@ -598,16 +600,32 @@ Two things can fill it, and they share the store. The built-in crawler taps
 everything reachable — `POST /api/v1/explore/start` (`{"profile": "explore",
 "maxScreens": 40, "maxSteps": 200, "budgetMinutes": 15}`), stopped with
 `POST /api/v1/explore/stop`; an agent can also walk the app itself and write the
-same files. The tab has no start button on purpose: a crawl taps through a real
-app, so it is started by whoever knows what that app is doing. The `cartograph.md`
-skill (installed by `simtool init` next to `SKILL.md`) carries the agent-side
+same files. The page has no start button on purpose: a crawl taps through a real
+app, so it is started by whoever knows what that app is doing. Starting the
+crawler on a different app than the store holds discards that app's leftovers
+first — `graph.json`, `shots/`, `layout.json`, `groups.json`, all of it — rather
+than merging into a map that is not this app's. The `cartograph.md` skill
+(installed by `simtool init` next to `SKILL.md`) carries the agent-side
 procedure, including how to name the features.
+
+Each of the three budgets above must be a positive integer under its own
+ceiling (20 000 screens, 1 000 000 steps, 10 080 minutes) — past that, a body
+that will not parse, or a body naming a field this version does not know
+(`{"maxStep": 60}` is refused too, naming the field and listing the ones it
+does recognize), `start` refuses the request instead of clamping or running on
+defaults. Every `/api/v1/explore/*` write answers in one of three classes: 400
+for a request nothing about the state can fix (bad budgets, an unknown
+profile, a malformed or unrecognized body), 409 for a state that cannot serve
+it right now (a crawl already running, a `layout.json`/`groups.json` a newer
+simtool wrote), 500 for a failure of simtool's own (a write that did not
+happen).
 
 By convention the crawl launches through a profile named `explore` in
 `.simtool/config.yml` — a mock backend and an auto-login, so nothing stops on a
-passcode — and relaunches through `explore-resume`.
+passcode — and relaunches through `<profile>-resume`: `explore-resume` for that
+default profile, or `qa-resume` for a run started with `"profile": "qa"`.
 
-Two ideas keep the map honest as it grows:
+Three ideas keep the map honest as it grows:
 
 - **The store keeps every transition; the canvas draws the descents.** Which
   arrows are worth drawing depends on how far each screen sits from the app's
@@ -617,6 +635,12 @@ Two ideas keep the map honest as it grows:
   forward is a fork, and what lies behind one of its buttons is a feature;
   `GET`/`POST /api/v1/explore/groups` reads those and records human names for
   them. Nothing here matches screens against a list of known features.
+- **Openings are the store's own marks, thinned to the ones that matter.** A
+  screen a launch or a relaunch landed on is marked `entryPoint` in the file —
+  a fact, never erased, whether or not a tap also reaches it — and the map is
+  measured from every marked screen except the ones a better-ranked marked
+  screen already leads to. So a relaunch that happens to land back on a screen
+  the map already charted costs the map nothing.
 
 ## HTTP API
 
@@ -629,8 +653,6 @@ GET /api/v1/status
 GET /api/v1/devices
 GET /api/v1/metrics
 GET /stream.avcc
-GET /stream.jpeg
-GET /stream.mjpeg
 POST /api/v1/input
 GET /api/v1/ax/tree?raw=1&format=flat&labeled=1
 GET /api/v1/ax/raw
