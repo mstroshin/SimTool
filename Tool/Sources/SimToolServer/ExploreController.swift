@@ -380,20 +380,23 @@ public enum ExploreEngine {
     /// What scrolling this screen takes, and what the tree says about the page
     /// under the window.
     ///
-    /// The gesture advances the page by about a third of the window: short
-    /// enough that consecutive frames of a long screenshot keep a wide band in
-    /// common, long enough that a tall page does not cost a dozen swipes.
+    /// The gesture advances the page by about a fifth of the window, drawn
+    /// slowly. Measured rather than guessed: on a heavy list the same drag done
+    /// quickly travels twice as far as it was asked to, and two frames that
+    /// share nothing cannot be spliced at all — whereas an overlap larger than
+    /// needed costs only a frame or two more per page.
     public struct Scroll: Sendable {
         public var gesture: LongScreenshotCapture.Scroll
         /// The tree lists elements well under the fold — taps a scroll probe
         /// can bring within reach.
+        ///
+        /// Its silence proves nothing about the page, which is why nothing else
+        /// here asks it whether the screen scrolls: a list builds its cells as
+        /// they come into view and publishes no more than it has built, so the
+        /// richest screens in an app — feeds, catalogues, statements — look
+        /// exactly like a screen that ends at the fold. Only a swipe can tell
+        /// the two apart.
         public var contentBelowFold: Bool
-        /// Something is drawn past the bottom edge, so the screen probably
-        /// scrolls. Only probably: a list that builds its cells as they come
-        /// into view publishes no more than it has built, so the tree can
-        /// neither prove nor deny that a page continues below. Scrolling once
-        /// and looking is the only answer it cannot fake.
-        public var mayScroll: Bool
     }
 
     public static func scroll(of nodes: [AccessibilityFlatNode]) -> Scroll? {
@@ -401,23 +404,17 @@ public enum ExploreEngine {
         let top = Double(bounds[1])
         let height = Double(bounds[3])
         let bottom = top + height
-        var contentBelowFold = false
-        var mayScroll = false
-        for node in nodes {
-            guard let frame = node.frame, frame.count == 4 else { continue }
-            let nodeBottom = Double(frame[1] + frame[3])
-            if Double(frame[1]) > bottom || nodeBottom > bottom + 100 { contentBelowFold = true }
-            if nodeBottom > bottom + 4 { mayScroll = true }
+        let contentBelowFold = nodes.contains { node in
+            guard let frame = node.frame, frame.count == 4 else { return false }
+            return Double(frame[1]) > bottom || Double(frame[1] + frame[3]) > bottom + 100
         }
-        guard contentBelowFold || mayScroll else { return nil }
         return Scroll(
             gesture: LongScreenshotCapture.Scroll(
                 x: Double(bounds[0]) + Double(bounds[2]) / 2,
-                from: top + height * 0.62,
-                to: top + height * 0.28
+                from: top + height * 0.60,
+                to: top + height * 0.38
             ),
-            contentBelowFold: contentBelowFold,
-            mayScroll: mayScroll
+            contentBelowFold: contentBelowFold
         )
     }
 
@@ -1140,8 +1137,12 @@ public final class ExploreController: @unchecked Sendable {
         /// The picture of the screen on display: the whole page when it scrolls,
         /// a plain frame when it fits. Returns whether the page needed more than
         /// one screenful, so the map can say so on the card.
+        ///
+        /// Every screen is offered a scroll, because no cheaper test exists —
+        /// see `ExploreEngine.Scroll`. One that does not move costs a swipe and
+        /// a frame, and is never swiped back.
         func shot(of snapshot: [AccessibilityFlatNode]) async -> (png: Data, long: Bool)? {
-            if let scroll = ExploreEngine.scroll(of: snapshot), scroll.mayScroll,
+            if let scroll = ExploreEngine.scroll(of: snapshot),
                let capture = try? await LongScreenshotCapture.capture(
                    deviceUDID: configuration.device.udid,
                    scroll: scroll.gesture,

@@ -14,17 +14,23 @@ public enum LongScreenshotCapture {
         public var x: Double
         public var from: Double
         public var to: Double
-        /// Slow enough that the list arrives where the finger left it: a flick
-        /// hands the distance over to inertia, and inertia is not repeatable.
+        /// Slow enough that the list arrives roughly where the finger left it:
+        /// a flick hands the distance over to inertia, and a heavy list carries
+        /// it past a whole screenful — leaving two frames with nothing in
+        /// common and a picture that ends at its first page.
         public var duration: Double
 
-        public init(x: Double, from: Double, to: Double, duration: Double = 0.4) {
+        public init(x: Double, from: Double, to: Double, duration: Double = 0.7) {
             self.x = x
             self.from = from
             self.to = to
             self.duration = duration
         }
     }
+
+    /// Pixels a scroll must move the content to count as a scroll at all.
+    /// Below this the page is at its end and only its rendering is twitching.
+    static let minimumAdvance = 8
 
     public struct Capture: Sendable {
         public var png: Data
@@ -47,20 +53,29 @@ public enum LongScreenshotCapture {
     public static func capture(
         deviceUDID: String,
         scroll: Scroll,
-        frameBudget: Int = 4,
+        frameBudget: Int = 5,
         settle: Duration = .milliseconds(700),
         viewportHeight: Int? = nil
     ) async throws -> Capture {
-        var frames = [try await SimulatorScreenshotClient.png(deviceUDID: deviceUDID)]
+        // The opening frame waits for the screen to hold still like every other
+        // one. A screen that is still filling in from the network hands back a
+        // frame the scrolled ones have nothing in common with, and the picture
+        // ends after one screenful for want of anything to splice it to.
+        var frames = [try await steadyShot(deviceUDID: deviceUDID)]
         var scrolls = 0
         var reachedBottom = false
         while frames.count < max(1, frameBudget) {
             try await advance(deviceUDID: deviceUDID, scroll: scroll, reverse: false, settle: settle)
             scrolls += 1
             let next = try await steadyShot(deviceUDID: deviceUDID)
-            // The page stopped moving under the same gesture: this is its end,
-            // and the frame holds nothing the picture does not already have.
-            if LongScreenshot.settled(frames[frames.count - 1], next) {
+            // The same gesture stopped moving the page: it is at its end, and
+            // the frame holds nothing the picture does not already have. Judged
+            // by how far the content actually travelled, not by whether the two
+            // frames differ — a page pinned at its bottom still repaints a few
+            // pixels, and chasing those burns the whole frame budget one pixel
+            // at a time.
+            let travelled = LongScreenshot.advance(frames[frames.count - 1], next) ?? 0
+            if Double(travelled) < Double(minimumAdvance) {
                 reachedBottom = true
                 break
             }

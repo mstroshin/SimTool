@@ -63,13 +63,19 @@ public enum LongScreenshot {
     /// Mean per-pixel difference under which an alignment is believed. Above
     /// it the frames share no common region — an animation, a reload, or a
     /// swipe that overshot the whole viewport — and splicing them would invent
-    /// content that was never on screen.
-    static let alignmentTolerance = 9.0
+    /// content that was never on screen. Loose enough for a real screen, where
+    /// a correct alignment measures a few units rather than zero: text renders
+    /// against a different backdrop once it moves, and translucency repaints
+    /// with it. A wrong alignment scores an order of magnitude higher.
+    static let alignmentTolerance = 12.0
     /// Neither edge of a frame may claim more than this share of its height as
     /// chrome, and the two together no more than `chromeCeiling`. A screen with
     /// a large flat background repeats identical rows far past its furniture.
     static let chromeLimit = 0.30
     static let chromeCeiling = 0.55
+    /// The most one row may contribute to an alignment score. See
+    /// ``meanDifference(_:_:rows:against:rowStride:rowCap:)``.
+    static let alignmentRowCap = 40
     /// The frames must keep at least this share of the scrolling band in
     /// common. A shorter overlap makes the match a coincidence of a few rows.
     static let minimumOverlap = 0.2
@@ -102,22 +108,27 @@ public enum LongScreenshot {
         let grids = images.compactMap { grid(of: $0) }
         guard grids.count == images.count else { throw SimToolError("Failed to read frame pixels") }
 
-        let chrome = chrome(of: grids)
+        let runChrome = chrome(of: grids)
         // What each frame adds under what the picture already shows. The first
         // frame brings everything down to the bottom chrome; the rest bring the
         // rows the scroll revealed.
         let frameHeight = images[0].height
-        let contentBottom = frameHeight - chrome.bottom
+        let contentBottom = frameHeight - runChrome.bottom
         var slices: [(image: CGImage, top: Int, height: Int)] = [
             (images[0], 0, contentBottom),
         ]
         for index in 1..<images.count {
-            guard let shift = offset(from: grids[index - 1], to: grids[index], chrome: chrome), shift > 0 else { break }
+            // Measured against the furniture of this pair, not of the run: how
+            // much of a frame is furniture depends on where the page happened
+            // to be, and a band borrowed from another pair can hide the very
+            // rows that would have lined these two up.
+            let pair = chrome(between: grids[index - 1], and: grids[index])
+            guard let shift = offset(from: grids[index - 1], to: grids[index], chrome: pair), shift > 0 else { break }
             slices.append((images[index], contentBottom - shift, shift))
         }
         // The bottom furniture, once, from the last frame that made it in.
-        if chrome.bottom > 0, let last = slices.last?.image {
-            slices.append((last, contentBottom, chrome.bottom))
+        if runChrome.bottom > 0, let last = slices.last?.image {
+            slices.append((last, contentBottom, runChrome.bottom))
         }
 
         let total = slices.reduce(0) { $0 + $1.height }
@@ -125,7 +136,7 @@ public enum LongScreenshot {
         let scaled = try viewportHeight.map { try resized(composed, byHeightOf: frameHeight, to: $0) } ?? composed
         return Stitched(
             png: try encode(scaled),
-            frames: slices.count - (chrome.bottom > 0 ? 1 : 0),
+            frames: slices.count - (runChrome.bottom > 0 ? 1 : 0),
             viewports: Double(total) / Double(frameHeight)
         )
     }
@@ -137,6 +148,20 @@ public enum LongScreenshot {
               let left = grid(of: first), let right = grid(of: second),
               left.height == right.height, left.width == right.width else { return false }
         return meanDifference(left, right, rows: 0..<left.height, against: 0) <= sameRowTolerance
+    }
+
+    /// How far the page travelled between two frames of the same screen, or nil
+    /// when they cannot be lined up at all.
+    ///
+    /// What tells a capture it is done: a page at its end gives back a frame
+    /// that has moved by a pixel or two of rendering noise rather than by a
+    /// scroll, and one that cannot be lined up has nothing left to contribute
+    /// to the picture either.
+    public static func advance(_ a: Data, _ b: Data) -> Int? {
+        guard let first = decode(a), let second = decode(b),
+              let left = grid(of: first), let right = grid(of: second),
+              left.height == right.height, left.width == right.width else { return nil }
+        return offset(from: left, to: right, chrome: chrome(between: left, and: right))
     }
 
     /// True when two frames of a screen that is no longer moving agree
@@ -164,20 +189,25 @@ public enum LongScreenshot {
 
     // MARK: - Alignment
 
-    /// The chrome shared by a run of frames, measured on a pair the collapsing
-    /// header has already settled over: between the first two frames a large
-    /// title is still shrinking, and a navigation bar caught mid-collapse would
-    /// read as scrolling content and land in the band.
+    /// Where the run as a whole is cut: the median of what each consecutive
+    /// pair reports.
+    ///
+    /// One pair is not enough to go by. Furniture shows itself only against the
+    /// content that moved past it, so a pair that happened to scroll through a
+    /// flat stretch of page can miss a navigation bar entirely, and the picture
+    /// would then be spliced along a line no frame agrees with. A median keeps
+    /// such a pair from deciding for the others.
     static func chrome(of grids: [Grid]) -> Chrome {
         guard grids.count > 1 else { return .none }
-        // The pair after the first, by which a collapsing header has settled —
-        // then the opening pair, for a run of two frames or one whose later
-        // frames turn out to share nothing.
-        for (left, right) in grids.count > 2 ? [(1, 2), (0, 1)] : [(0, 1)] {
-            let found = chrome(between: grids[left], and: grids[right])
-            if found != .none { return found }
+        let measured = (1..<grids.count)
+            .map { chrome(between: grids[$0 - 1], and: grids[$0]) }
+            .filter { $0 != .none }
+        guard !measured.isEmpty else { return .none }
+        func median(_ values: [Int]) -> Int {
+            let sorted = values.sorted()
+            return sorted[sorted.count / 2]
         }
-        return .none
+        return Chrome(top: median(measured.map(\.top)), bottom: median(measured.map(\.bottom)))
     }
 
     /// A row belongs to the window rather than to the page when it did not
@@ -270,8 +300,13 @@ public enum LongScreenshot {
         let ceiling = band - Int(Double(band) * minimumOverlap)
         guard ceiling > 1 else { return nil }
 
+        // The coarse pass steps finely and samples densely for a reason: a list
+        // repeats its cells at a fixed pitch, and a search that skips rows in
+        // multiples of that pitch reads one cell as the next and settles a whole
+        // cell away from the truth — somewhere the refinement below can no
+        // longer reach back from.
         var best = (shift: 0, score: Double.greatestFiniteMagnitude)
-        let coarse = max(1, band / 160)
+        let coarse = max(1, band / 400)
         var shift = coarse
         while shift <= ceiling {
             let score = alignmentScore(previous, next, band: start..<end, shift: shift, rowStride: coarse * 2)
@@ -280,7 +315,7 @@ public enum LongScreenshot {
         }
         guard best.shift > 0 else { return nil }
         var refined = (shift: best.shift, score: Double.greatestFiniteMagnitude)
-        for candidate in max(1, best.shift - coarse)...min(ceiling, best.shift + coarse) {
+        for candidate in max(1, best.shift - coarse * 2)...min(ceiling, best.shift + coarse * 2) {
             let score = alignmentScore(previous, next, band: start..<end, shift: candidate, rowStride: 1)
             if score < refined.score { refined = (candidate, score) }
         }
@@ -304,18 +339,28 @@ public enum LongScreenshot {
             next,
             rows: (band.lowerBound + shift)..<(band.lowerBound + shift + overlap),
             against: -shift,
-            rowStride: rowStride
+            rowStride: rowStride,
+            rowCap: alignmentRowCap
         )
     }
 
     /// Mean absolute luminance difference between rows of `a` and the rows of
     /// `b` sitting `displacement` further down.
+    ///
+    /// `rowCap` bounds what a single row may contribute. Alignment uses it, and
+    /// needs it: a correct alignment still carries rows that disagree wildly —
+    /// a header caught mid-collapse, a sticky bar, an ad that rotated — and an
+    /// honest average lets a handful of them outvote a thousand rows that match
+    /// to the pixel. Capped, those rows say their piece and no more, while a
+    /// wrong alignment still scores far above any threshold because *every* row
+    /// disagrees.
     private static func meanDifference(
         _ a: Grid,
         _ b: Grid,
         rows: Range<Int>,
         against displacement: Int,
-        rowStride: Int = 1
+        rowStride: Int = 1,
+        rowCap: Int? = nil
     ) -> Double {
         var total = 0
         var counted = 0
@@ -326,12 +371,16 @@ public enum LongScreenshot {
             guard mirrored >= 0, mirrored < b.height else { row += rowStride; continue }
             let left = row * a.width
             let right = mirrored * b.width
+            var rowTotal = 0
+            var rowCount = 0
             var column = 0
             while column < a.width {
-                total += abs(Int(a.pixels[left + column]) - Int(b.pixels[right + column]))
-                counted += 1
+                rowTotal += abs(Int(a.pixels[left + column]) - Int(b.pixels[right + column]))
+                rowCount += 1
                 column += columnStride
             }
+            total += rowCap.map { min(rowTotal, $0 * rowCount) } ?? rowTotal
+            counted += rowCount
             row += rowStride
         }
         guard counted > 0 else { return .greatestFiniteMagnitude }
