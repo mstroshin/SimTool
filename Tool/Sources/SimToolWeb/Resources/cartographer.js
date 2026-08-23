@@ -10,10 +10,11 @@ const html = htm.bind(React.createElement);
 function ScreenNode({ data, selected }) {
   return html`<div class="screen-node ${selected ? "selected" : ""}">
     <${Handle} type="target" position=${Position.Left} style=${{ opacity: 0 }} />
-    <img src=${"/api/v1/explore/shot?node=" + data.id} loading="lazy" alt="" />
+    <img class=${data.longShot ? "long" : ""} src=${"/api/v1/explore/shot?node=" + data.id} loading="lazy" alt="" />
     <div class="screen-title" title=${data.title}>${data.title}</div>
     <div class="screen-meta">
       ${data.actionsTried}/${data.actionsTotal} действий
+      ${data.longShot && html`<span class="long-tag" title="Экран длиннее одного экрана телефона — целиком виден в панели справа">↕ скролл<//>`}
       ${data.bridge && html`<span class="bridge-tag" title="Транзит: путь в фичу лежит через этот экран, но он не входит в неё">транзит<//>`}
     </div>
     <${Handle} type="source" position=${Position.Right} style=${{ opacity: 0 }} />

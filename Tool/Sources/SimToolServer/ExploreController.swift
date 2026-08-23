@@ -79,6 +79,10 @@ public struct ExploreScreenNode: Codable, Sendable {
     /// launch or after a relaunch rather than reached by a tap. Nil rather
     /// than false so the field stays out of every other node's JSON.
     public var entryPoint: Bool?
+    /// True when the screenshot is the whole scrolled page rather than one
+    /// screenful, so the canvas can show the card cropped and say there is more
+    /// to see. Nil rather than false, like `entryPoint`.
+    public var longShot: Bool?
 }
 
 public struct ExploreTransitionAction: Codable, Sendable, Equatable {
@@ -356,31 +360,65 @@ public enum ExploreEngine {
         // on screen can be tapped — a couple of scroll probes reveal the rest.
         // Appended last, so visible taps run first (`untriedAction` keeps
         // catalog order for non-back actions).
-        if let bounds, bounds.count == 4 {
-            let bottom = Double(bounds[1] + bounds[3])
-            let overflows = nodes.contains { node in
-                guard let frame = node.frame, frame.count == 4 else { return false }
-                return Double(frame[1]) > bottom || Double(frame[1] + frame[3]) > bottom + 100
-            }
-            if overflows {
-                let centerX = Double(bounds[0]) + Double(bounds[2]) / 2
-                let top = Double(bounds[1])
-                let height = Double(bounds[3])
-                for index in 1...2 {
-                    limited.append(Action(
-                        key: "scroll:\(index)",
-                        targetId: nil,
-                        targetLabel: nil,
-                        x: centerX,
-                        y: top + height * 0.62,
-                        isBack: false,
-                        isScroll: true,
-                        endY: top + height * 0.28
-                    ))
-                }
+        if let scroll = scroll(of: nodes), scroll.contentBelowFold {
+            for index in 1...2 {
+                limited.append(Action(
+                    key: "scroll:\(index)",
+                    targetId: nil,
+                    targetLabel: nil,
+                    x: scroll.gesture.x,
+                    y: scroll.gesture.from,
+                    isBack: false,
+                    isScroll: true,
+                    endY: scroll.gesture.to
+                ))
             }
         }
         return limited
+    }
+
+    /// What scrolling this screen takes, and what the tree says about the page
+    /// under the window.
+    ///
+    /// The gesture advances the page by about a third of the window: short
+    /// enough that consecutive frames of a long screenshot keep a wide band in
+    /// common, long enough that a tall page does not cost a dozen swipes.
+    public struct Scroll: Sendable {
+        public var gesture: LongScreenshotCapture.Scroll
+        /// The tree lists elements well under the fold — taps a scroll probe
+        /// can bring within reach.
+        public var contentBelowFold: Bool
+        /// Something is drawn past the bottom edge, so the screen probably
+        /// scrolls. Only probably: a list that builds its cells as they come
+        /// into view publishes no more than it has built, so the tree can
+        /// neither prove nor deny that a page continues below. Scrolling once
+        /// and looking is the only answer it cannot fake.
+        public var mayScroll: Bool
+    }
+
+    public static func scroll(of nodes: [AccessibilityFlatNode]) -> Scroll? {
+        guard let bounds = nodes.first(where: { $0.depth == 0 })?.frame, bounds.count == 4 else { return nil }
+        let top = Double(bounds[1])
+        let height = Double(bounds[3])
+        let bottom = top + height
+        var contentBelowFold = false
+        var mayScroll = false
+        for node in nodes {
+            guard let frame = node.frame, frame.count == 4 else { continue }
+            let nodeBottom = Double(frame[1] + frame[3])
+            if Double(frame[1]) > bottom || nodeBottom > bottom + 100 { contentBelowFold = true }
+            if nodeBottom > bottom + 4 { mayScroll = true }
+        }
+        guard contentBelowFold || mayScroll else { return nil }
+        return Scroll(
+            gesture: LongScreenshotCapture.Scroll(
+                x: Double(bounds[0]) + Double(bounds[2]) / 2,
+                from: top + height * 0.62,
+                to: top + height * 0.28
+            ),
+            contentBelowFold: contentBelowFold,
+            mayScroll: mayScroll
+        )
     }
 
     /// Whole identifiers that name a convention, not a screen: reverse-DNS
@@ -1099,14 +1137,34 @@ public final class ExploreController: @unchecked Sendable {
             try? data.write(to: directory.appendingPathComponent("graph.json"), options: [.atomic])
         }
 
+        /// The picture of the screen on display: the whole page when it scrolls,
+        /// a plain frame when it fits. Returns whether the page needed more than
+        /// one screenful, so the map can say so on the card.
+        func shot(of snapshot: [AccessibilityFlatNode]) async -> (png: Data, long: Bool)? {
+            if let scroll = ExploreEngine.scroll(of: snapshot), scroll.mayScroll,
+               let capture = try? await LongScreenshotCapture.capture(
+                   deviceUDID: configuration.device.udid,
+                   scroll: scroll.gesture,
+                   viewportHeight: 700
+               ) {
+                return (capture.png, capture.frames > 1)
+            }
+            guard let png = try? await SimulatorScreenshotClient.png(
+                deviceUDID: configuration.device.udid,
+                maxDimension: 700
+            ) else { return nil }
+            return (png, false)
+        }
+
         /// Retakes a node's screenshot once per run, so the store's pictures
         /// track the app as it is now instead of freezing at first discovery.
-        func refreshShot(_ nodeId: String) async {
+        func refreshShot(_ index: Int, snapshot: [AccessibilityFlatNode]) async {
+            let nodeId = nodes[index].id
             guard !refreshedShots.contains(nodeId) else { return }
             refreshedShots.insert(nodeId)
-            if let png = try? await SimulatorScreenshotClient.png(deviceUDID: configuration.device.udid, maxDimension: 700) {
-                try? png.write(to: directory.appendingPathComponent("shots/\(nodeId).png"), options: [.atomic])
-            }
+            guard let shot = await shot(of: snapshot) else { return }
+            try? shot.png.write(to: directory.appendingPathComponent("shots/\(nodeId).png"), options: [.atomic])
+            nodes[index].longShot = shot.long ? true : nil
         }
 
         /// Records the screen a snapshot shows and returns its fingerprint. A
@@ -1122,7 +1180,7 @@ public final class ExploreController: @unchecked Sendable {
                 if let index = nodeIndex[fingerprint] {
                     nodes[index].visits += 1
                     nodes[index].depth = min(nodes[index].depth, known.depth)
-                    await refreshShot(nodes[index].id)
+                    await refreshShot(index, snapshot: snapshot)
                 }
                 return fingerprint
             }
@@ -1156,22 +1214,23 @@ public final class ExploreController: @unchecked Sendable {
                     mergedKeys.append(key)
                 }
                 nodes[index].localizationKeys = mergedKeys.isEmpty ? nil : mergedKeys
-                await refreshShot(nodes[index].id)
+                await refreshShot(index, snapshot: snapshot)
                 return fingerprint
             }
             let nodeId = "s-\(fingerprint.prefix(10))"
             screens[fingerprint] = ScreenState(nodeId: nodeId, depth: depth, actions: actions)
-            let shot = "shots/\(nodeId).png"
+            let path = "shots/\(nodeId).png"
             refreshedShots.insert(nodeId)
-            if let png = try? await SimulatorScreenshotClient.png(deviceUDID: configuration.device.udid, maxDimension: 700) {
-                try? png.write(to: directory.appendingPathComponent(shot), options: [.atomic])
+            let picture = await shot(of: snapshot)
+            if let picture {
+                try? picture.png.write(to: directory.appendingPathComponent(path), options: [.atomic])
             }
             nodes.append(ExploreScreenNode(
                 id: nodeId,
                 title: ExploreEngine.title(for: snapshot, fallback: "Экран \(fingerprint.prefix(6))"),
                 fingerprint: fingerprint,
                 key: key,
-                screenshot: shot,
+                screenshot: path,
                 depth: depth,
                 visits: 1,
                 states: 1,
@@ -1181,7 +1240,8 @@ public final class ExploreController: @unchecked Sendable {
                 triedActionKeys: nil,
                 actionKeys: Set(actions.map(\.key)).sorted(),
                 deeplinks: nil,
-                localizationKeys: localizationKeys.isEmpty ? nil : localizationKeys
+                localizationKeys: localizationKeys.isEmpty ? nil : localizationKeys,
+                longShot: picture?.long == true ? true : nil
             ))
             nodeIndex[fingerprint] = nodes.count - 1
             nodeIndexByKey[key] = nodes.count - 1

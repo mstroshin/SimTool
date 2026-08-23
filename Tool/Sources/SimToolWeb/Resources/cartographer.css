@@ -21,6 +21,10 @@ header { flex: 0 0 auto; display: flex; align-items: center; gap: 14px; padding:
 /* Full-height screenshot: the natural ratio once loaded, a phone-ish
    placeholder ratio before, so the layout does not jump. */
 .screen-node img { display: block; width: 100%; height: auto; aspect-ratio: auto 9 / 19.5; background: #05070d; }
+/* A whole scrolled page is many screenfuls tall: the card shows the screenful
+   a person recognises the screen by, the drawer keeps the rest. */
+.screen-node img.long { max-height: 380px; object-fit: cover; object-position: top center; }
+.long-tag { margin-left: 6px; padding: 1px 5px; border-radius: 999px; background: rgba(125,211,252,0.16); color: #7dd3fc; font-size: 9px; }
 .screen-title { padding: 6px 8px 2px; font-size: 11px; font-weight: 600; color: #e8eefb; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .screen-meta { padding: 0 8px 7px; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; color: rgba(244,247,251,0.5); }
 .react-flow__attribution { display: none; }

@@ -524,6 +524,37 @@ extension AgentSkill {
         Node ids may contain only letters, digits, `-` and `_` — they become file
         names and the shot URL (`/api/v1/explore/shot?node=<id>`).
 
+        A screen whose content runs past the fold is photographed **whole**: shoot,
+        scroll by about a third of the window, shoot again, until the page stops
+        moving, then splice the frames into one tall picture and set the node's
+        `longShot` to `true`. Three rules keep the splice honest:
+
+        - Align the frames by their **pixels**, not by the distance the swipe asked
+          for — inertia and rubber banding mean the content lands somewhere else.
+        - The **earlier frame wins** the rows the two share, so a navigation bar that
+          collapses after the first scroll stays as it was first seen.
+        - Rows that do not travel with the content belong to the window, not to the
+          page. Two kinds qualify: the ones that stand perfectly still (status bar,
+          navigation bar, tab bar) and the ones that refuse to line up with where
+          the content went (a home indicator, or any translucent bar the page slides
+          under — they change with what is behind them yet never move). Keep the top
+          ones from the first frame, append the bottom ones from the last, and take
+          only the scrolling middle from the frames between. Otherwise a tab bar
+          bands the picture once per scroll.
+
+        Whether a screen scrolls at all is a question the accessibility tree cannot
+        answer — a list builds its cells as they come into view, so the tree holds no
+        more than what is on display. Scroll once and compare: frames that came out
+        the same mean the page has no more to give, and that first swipe was the
+        whole test.
+
+        Put the screen back where you found it, and check rather than count: the taps
+        you catalogued came from the snapshot taken before the picture, and a screen
+        left halfway down its content sends every one of them somewhere else. Stop as
+        soon as the screen matches its opening frame again — a blind extra swipe past
+        the top is precisely the drag a sheet dismisses on. A screen that never moved
+        needs no swipe back at all.
+
         **5. Deeplinks — from the source code, never by opening them.** In the project
         checkout, find out whether a deeplink opens this screen: URL literals
         (`grep -rn "myapp://"` — the schemes are in the app's Info.plist under
@@ -606,6 +637,7 @@ extension AgentSkill {
               "actionsTotal": 8,
               "actionsTried": 5,
               "firstSeenAt": "2026-08-19T11:03:20Z",
+              "longShot": true,
               "deeplinks": ["myapp://main"],
               "localizationKeys": ["main.title", "main.transfer_button"]
             },
@@ -637,8 +669,8 @@ extension AgentSkill {
 
         - Node — required: `id`, `title`, `fingerprint`, `screenshot`, `depth`,
           `visits`, `actionsTotal`, `actionsTried`, `firstSeenAt`; optional: `key`,
-          `states`, `triedActionKeys`, `deeplinks`, `localizationKeys`. `fingerprint`
-          is the robot's structural hash and `key` its screen-identity hash — the
+          `states`, `triedActionKeys`, `deeplinks`, `localizationKeys`, `longShot`.
+          `fingerprint` is the robot's structural hash and `key` its screen-identity hash — the
           robot resumes by them; in an agent pass any stable unique string works for
           both — reuse the node id. `triedActionKeys` is the robot's persisted
           frontier; leave it alone if you did not compute it.
