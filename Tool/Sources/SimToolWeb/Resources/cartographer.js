@@ -7,14 +7,37 @@ import htm from "https://esm.sh/htm@3.1.1";
 
 const html = htm.bind(React.createElement);
 
+// A card of a scrolling screen keeps the phone's proportions and holds the rest
+// of the page inside it: `nowheel` hands the wheel to the card instead of to the
+// canvas' zoom, so pointing at a card and scrolling reads the screen. Expanding
+// gives up the phone shape and draws the whole page at once, for reading a form
+// end to end or comparing two screens side by side.
 function ScreenNode({ data, selected }) {
+  const long = Boolean(data.longShot);
+  const expanded = long && Boolean(data.expanded);
   return html`<div class="screen-node ${selected ? "selected" : ""}">
     <${Handle} type="target" position=${Position.Left} style=${{ opacity: 0 }} />
-    <img class=${data.longShot ? "long" : ""} src=${"/api/v1/explore/shot?node=" + data.id} loading="lazy" alt="" />
+    <div class=${"shot" + (long ? " long nowheel" : "") + (expanded ? " expanded" : "")}>
+      <img src=${"/api/v1/explore/shot?node=" + data.id} loading="lazy" alt="" />
+    </div>
+    ${long && html`<button
+      class="expand nodrag"
+      title=${expanded ? "Вернуть карточке размер экрана" : "Показать всю страницу целиком"}
+      onClick=${(event) => {
+        event.stopPropagation();
+        // How much taller the card is about to get, measured off the picture
+        // itself: the image is laid out at its full height and the frame
+        // around it clips to one screenful, so the difference is the growth
+        // the cards below have to make room for.
+        const frame = event.currentTarget.closest(".screen-node").querySelector(".shot");
+        const picture = frame.querySelector("img");
+        data.onExpand(data.id, Math.max(0, picture.clientHeight - frame.clientHeight));
+      }}
+    >${expanded ? "↥ свернуть" : "↧ развернуть"}<//>`}
     <div class="screen-title" title=${data.title}>${data.title}</div>
     <div class="screen-meta">
       ${data.actionsTried}/${data.actionsTotal} действий
-      ${data.longShot && html`<span class="long-tag" title="Экран длиннее одного экрана телефона — целиком виден в панели справа">↕ скролл<//>`}
+      ${long && html`<span class="long-tag" title="Экран длиннее одного экрана телефона — прокрутите карточку или разверните её">↕ скролл<//>`}
       ${data.bridge && html`<span class="bridge-tag" title="Транзит: путь в фичу лежит через этот экран, но он не входит в неё">транзит<//>`}
     </div>
     <${Handle} type="source" position=${Position.Right} style=${{ opacity: 0 }} />
@@ -154,6 +177,17 @@ function App() {
   // Which feature the canvas is showing; null is the whole map, and the whole
   // map is a choice in the same row rather than a mode with a way back out.
   const [activeGroupKey, setActiveGroupKey] = useState(null);
+  // Cards drawn at their full page height, by node id, each with how many
+  // pixels it grew by. Kept here rather than in the card so a poll rebuilding
+  // the graph cannot fold them back up, and so the layout can read it.
+  const [expanded, setExpanded] = useState(() => new Map());
+  const toggleExpanded = useCallback((id, grown) => {
+    setExpanded((current) => {
+      const next = new Map(current);
+      if (!next.delete(id)) next.set(id, grown);
+      return next;
+    });
+  }, []);
   const searchInput = useRef(null);
   // Where the user left the whole map, so returning to it lands where they
   // were instead of at fitView.
@@ -329,22 +363,44 @@ function App() {
   // by where the user dragged them on the whole map, and they do not move. That
   // is what keeps one arrangement — the whole map's — the only one to persist.
   const view = useMemo(() => {
-    if (!activeGroup) return { nodes: flow.nodes, edges: flow.edges };
+    // A card drawn at its full page height takes the room out of its column
+    // rather than out of the cards under it: everything below it in the same
+    // column moves down by exactly what it grew by. Measured against whatever
+    // arrangement is on screen — the feature view places its cards itself, and
+    // a card dragged out of its column is no longer under anything.
+    const arrange = (placed, extraFor) => {
+      const growth = placed
+        .filter((node) => (expanded.get(node.id) || 0) > 0)
+        .map((node) => ({ grown: expanded.get(node.id), at: node.position }));
+      return placed.map((node) => {
+        const shift = growth.reduce(
+          (total, one) => total + (one.at.x === node.position.x && one.at.y < node.position.y ? one.grown : 0),
+          0
+        );
+        return {
+          ...node,
+          position: { x: node.position.x, y: node.position.y + shift },
+          // An expanded card still reaches past whatever is beside it, so it
+          // draws in front rather than behind.
+          zIndex: expanded.has(node.id) ? 10 : undefined,
+          data: {
+            ...node.data,
+            ...(extraFor ? extraFor(node) : {}),
+            expanded: expanded.has(node.id),
+            onExpand: toggleExpanded,
+          },
+        };
+      });
+    };
+    if (!activeGroup) return { nodes: arrange(flow.nodes), edges: flow.edges };
     const bridges = new Set(activeGroup.bridges || []);
     const visible = new Set([...(activeGroup.members || []), ...bridges]);
     const nodes = flow.nodes.filter((node) => visible.has(node.id));
     const edges = flow.edges.filter((edge) => visible.has(edge.source) && visible.has(edge.target));
     const positions = subtreeLayout(nodes, edges, [...bridges, activeGroup.entry]);
-    return {
-      nodes: nodes.map((node) => ({
-        ...node,
-        position: positions.get(node.id) || node.position,
-        draggable: false,
-        data: { ...node.data, bridge: bridges.has(node.id) },
-      })),
-      edges,
-    };
-  }, [flow, activeGroup]);
+    const placed = nodes.map((node) => ({ ...node, position: positions.get(node.id) || node.position, draggable: false }));
+    return { nodes: arrange(placed, (node) => ({ bridge: bridges.has(node.id) })), edges };
+  }, [flow, activeGroup, expanded, toggleExpanded]);
 
   // What a query can match, per node: the node's own record plus the labels of
   // the transitions touching it, so "оплатить" finds the screen a button of
