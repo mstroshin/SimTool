@@ -31,6 +31,14 @@ public enum LongScreenshotCapture {
     /// Pixels a scroll must move the content to count as a scroll at all.
     /// Below this the page is at its end and only its rendering is twitching.
     static let minimumAdvance = 8
+    /// How much longer the opening frame may be waited on after the arrival
+    /// floor, for the screen to hold still.
+    static let arrivalDeadline = Duration.seconds(5)
+    /// How long a frame after a scroll may be waited on. Short, because by then
+    /// the screen has arrived and only the scroll itself is being waited out —
+    /// deceleration and the indicator fading. Paying the arrival deadline once
+    /// per frame would cost a minute on a screen that never holds still.
+    static let scrollDeadline = Duration.seconds(3)
 
     public struct Capture: Sendable {
         public var png: Data
@@ -44,16 +52,38 @@ public enum LongScreenshotCapture {
     /// Captures the screen under the cursor of `scroll`.
     ///
     /// - Parameters:
-    ///   - frameBudget: How many screenfuls to photograph at most. An infinite
-    ///     feed has no bottom to reach, and every extra frame costs a scroll,
-    ///     a settle and a scroll back.
+    ///   - screenfuls: How tall the picture may grow. A cap, not a cost: a page
+    ///     that ends sooner stops sooner, and only a page that really is this
+    ///     deep pays for it.
+    ///
+    ///     Something has to bound this. A feed that fetches its next page as
+    ///     the bottom comes into view has no bottom to reach, and the capture
+    ///     would scroll until it ran out of memory; every scroll also has to be
+    ///     walked back afterwards, and the picture is composed at full
+    ///     resolution before it is scaled. The limit is counted in screenfuls
+    ///     rather than in frames because that is what those costs follow — how
+    ///     far one swipe happens to travel differs from screen to screen, so a
+    ///     frame count cuts different pages at different depths.
+    ///   - frameLimit: A backstop on the number of frames, for a page that
+    ///     inches forward a few pixels at a time without ever quite stopping.
+    ///   - arrival: How long to wait before the opening frame no matter how
+    ///     still the screen looks. Stillness alone cannot say a screen has
+    ///     arrived — a skeleton holds perfectly still while its content is in
+    ///     flight, and a frame of skeleton is one the scrolled frames have
+    ///     never seen, which ends the picture at its first page. The default
+    ///     covers what any screen takes to load and any animation that plays
+    ///     once; a caller that has already waited for the screen itself (the
+    ///     crawl settles the accessibility tree before it records anything)
+    ///     should pass a short one and keep its time.
     ///   - settle: How long a scroll is given to decelerate before the shutter
     ///     starts watching for the frame to hold still.
     ///   - viewportHeight: Pixel height one screenful takes in the result.
     public static func capture(
         deviceUDID: String,
         scroll: Scroll,
-        frameBudget: Int = 5,
+        screenfuls: Double = 12,
+        frameLimit: Int = 40,
+        arrival: Duration = .seconds(10),
         settle: Duration = .milliseconds(700),
         viewportHeight: Int? = nil
     ) async throws -> Capture {
@@ -61,24 +91,35 @@ public enum LongScreenshotCapture {
         // one. A screen that is still filling in from the network hands back a
         // frame the scrolled ones have nothing in common with, and the picture
         // ends after one screenful for want of anything to splice it to.
-        var frames = [try await steadyShot(deviceUDID: deviceUDID)]
+        try await Task.sleep(for: arrival)
+        var frames = [try await steadyShot(deviceUDID: deviceUDID, deadline: arrivalDeadline)]
         var scrolls = 0
         var reachedBottom = false
-        while frames.count < max(1, frameBudget) {
+        // Every frame is a screenful tall; the picture's height is the first
+        // one plus what each scroll added.
+        let screenful = LongScreenshot.decode(frames[0])?.height ?? 1
+        var height = 1.0
+        while frames.count < max(1, frameLimit), height < max(1, screenfuls) {
             try await advance(deviceUDID: deviceUDID, scroll: scroll, reverse: false, settle: settle)
             scrolls += 1
-            let next = try await steadyShot(deviceUDID: deviceUDID)
+            let next = try await steadyShot(deviceUDID: deviceUDID, deadline: scrollDeadline)
             // The same gesture stopped moving the page: it is at its end, and
             // the frame holds nothing the picture does not already have. Judged
             // by how far the content actually travelled, not by whether the two
             // frames differ — a page pinned at its bottom still repaints a few
             // pixels, and chasing those burns the whole frame budget one pixel
             // at a time.
-            let travelled = LongScreenshot.advance(frames[frames.count - 1], next) ?? 0
-            if Double(travelled) < Double(minimumAdvance) {
+            // Two outcomes end the capture, and only one of them is the end of
+            // the page. A frame that cannot be lined up at all — the screen
+            // changed under the gesture — is a frame nothing can be spliced to,
+            // so the picture stops there, but it stops short rather than
+            // finished.
+            guard let travelled = LongScreenshot.advance(frames[frames.count - 1], next) else { break }
+            if travelled < minimumAdvance {
                 reachedBottom = true
                 break
             }
+            height += Double(travelled) / Double(screenful)
             frames.append(next)
         }
         // A screen that never moved has nothing to put back — and must not be
@@ -97,19 +138,25 @@ public enum LongScreenshotCapture {
         )
     }
 
-    /// Waits out what a scroll leaves behind before taking the frame. The
-    /// deceleration is the short part; the scroll indicator lingers about a
-    /// second after it, longer on a loaded machine, and a lazily built row
-    /// arriving late is the same kind of straggler. Rather than guess a
-    /// duration, watch until two frames in a row agree.
+    /// Waits for the screen to hold still before taking the frame, up to
+    /// `deadline`.
+    ///
+    /// Watching two frames agree beats guessing a duration: deceleration, a
+    /// scroll indicator fading, a row that arrived late all take as long as
+    /// they take. But some screens never agree — a looping animation, a
+    /// shimmer, a carousel — so the wait is bounded and what it has at the
+    /// deadline is what the picture gets. Catching one arbitrary frame of an
+    /// animation is a fair price; waiting forever is not.
     private static func steadyShot(
         deviceUDID: String,
         pause: Duration = .milliseconds(350),
-        patience: Int = 5
+        deadline: Duration
     ) async throws -> Data {
         var frame = try await SimulatorScreenshotClient.png(deviceUDID: deviceUDID)
-        for _ in 0..<patience {
+        var waited = Duration.zero
+        while waited < deadline {
             try await Task.sleep(for: pause)
+            waited += pause
             let next = try await SimulatorScreenshotClient.png(deviceUDID: deviceUDID)
             if LongScreenshot.steady(frame, next) { return next }
             frame = next

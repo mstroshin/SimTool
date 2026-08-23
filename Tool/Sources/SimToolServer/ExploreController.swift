@@ -1146,6 +1146,10 @@ public final class ExploreController: @unchecked Sendable {
                let capture = try? await LongScreenshotCapture.capture(
                    deviceUDID: configuration.device.udid,
                    scroll: scroll.gesture,
+                   // The snapshot this screen was recorded from is already a
+                   // settled one — the crawl waited out its loading before it
+                   // got here — so the picture does not pay for that wait twice.
+                   arrival: .seconds(1),
                    viewportHeight: 700
                ) {
                 return (capture.png, capture.frames > 1)

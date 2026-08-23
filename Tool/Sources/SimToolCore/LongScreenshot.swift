@@ -76,6 +76,10 @@ public enum LongScreenshot {
     /// The most one row may contribute to an alignment score. See
     /// ``meanDifference(_:_:rows:against:rowStride:rowCap:)``.
     static let alignmentRowCap = 40
+    /// The widest run of moving page that may sit between two layers of
+    /// furniture and still count as one region — a home indicator's clearance
+    /// above the bottom edge.
+    static let chromeBridge = 0.015
     /// The frames must keep at least this share of the scrolling band in
     /// common. A shorter overlap makes the match a coincidence of a few rows.
     static let minimumOverlap = 0.2
@@ -249,10 +253,11 @@ public enum LongScreenshot {
         // How far the furniture reaches, not how long its unbroken run is: a
         // home indicator floats above the bottom edge, and the page showing
         // through beneath it belongs to the last frame just as the indicator
-        // does. The gap that may be bridged is small enough that furniture
-        // never links up with the page beyond it.
+        // does. The gap that may be bridged stays small — every row claimed as
+        // furniture is a row each frame stops contributing, so a generous
+        // bridge buys nothing and costs frames.
         let limit = Int(Double(a.height) * chromeLimit)
-        let bridge = max(4, Int(Double(a.height) * 0.015))
+        let bridge = max(8, Int(Double(a.height) * chromeBridge))
         var top = 0
         var slack = bridge
         for row in 0..<limit {
