@@ -205,6 +205,7 @@ public enum SimulatorAccessibilityClient {
                 value: node.value,
                 title: node.title,
                 type: node.type ?? node.role,
+                subrole: node.subrole,
                 depth: depth,
                 frame: node.frame.flatMap(cornerArray),
                 enabled: node.enabled == false ? false : nil
@@ -256,6 +257,7 @@ public enum SimulatorAccessibilityClient {
             title: object["title"]?.stringValue,
             role: object["role"]?.stringValue,
             roleDescription: object["role_description"]?.stringValue,
+            subrole: object["subrole"]?.stringValue,
             type: object["type"]?.stringValue,
             enabled: object["enabled"]?.boolValue,
             pid: object["pid"]?.doubleValue.map(Int.init),

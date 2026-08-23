@@ -331,6 +331,233 @@ final class ExploreEngineTests: XCTestCase {
         XCTAssertEqual(actions.map(\.targetId), ["platform_tabbar_invite", "TouchRecognizingView"])
     }
 
+    // A tab is told from every other selectable control by its subrole, and by
+    // nothing else: the type says RadioButton for a tab and for a form's radio
+    // group both, so a settings screen's "Español / English" pair must not
+    // spawn a root of the map per option.
+    func testOnlyTheTabButtonSubroleMarksAnActionAsATab() {
+        let snapshot = [
+            node(id: nil, type: "Other", depth: 0, frame: [0, 0, 402, 874]),
+            node(id: "platform_tabbar_invest", type: "RadioButton", subrole: "AXTabButton", depth: 3, frame: [166, 764, 69, 49]),
+            node(id: "settings-language-spanish", type: "RadioButton", depth: 4, frame: [20, 300, 362, 44]),
+            node(id: "MainScreen-TransferButton", type: "Button", depth: 4, frame: [20, 400, 100, 44]),
+        ]
+        let byId = Dictionary(
+            ExploreEngine.actions(from: snapshot).map { ($0.targetId ?? $0.key, $0.isTab) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        XCTAssertEqual(byId["platform_tabbar_invest"], true)
+        XCTAssertEqual(byId["settings-language-spanish"], false)
+        XCTAssertEqual(byId["MainScreen-TransferButton"], false)
+    }
+
+    // MARK: system dialogs
+
+    // Measured on a booted simulator: iOS presents a permission alert in its
+    // own process, so the snapshot's root names nothing and the alert itself
+    // comes back as a `Sheet` whose label is the question, with the buttons in
+    // its subtree. Read off exactly that, because a crawl that took it for
+    // «the tap left the app» relaunched into the same alert until the run died.
+    func testASystemPermissionAlertIsReadOffTheSnapshotWithItsButtons() {
+        let dialog = ExploreEngine.systemDialog(in: cameraAlert(), expectedApp: ["Banco Plata Debug"])
+        XCTAssertEqual(dialog?.message, "“Banco Plata Debug” would like to access the Camera.")
+        XCTAssertEqual(dialog?.buttons.map(\.label), ["Don’t Allow", "Allow"])
+        // The centre of «Don’t Allow», which is where the tap goes.
+        XCTAssertEqual(dialog?.answer?.label, "Don’t Allow")
+        XCTAssertEqual(dialog?.answer?.x, 127)
+        XCTAssertEqual(dialog?.answer?.y, 573)
+    }
+
+    // The refusal is what gets tapped, whatever the other button is called and
+    // however many of them there are: the location alert offers two ways to say
+    // yes. Granting is not a crawler's decision to make — the contacts alert
+    // offers to upload the address book to a server.
+    func testTheRefusingButtonIsTheOneTapped() {
+        let contacts = ExploreEngine.systemDialog(
+            in: alert(message: "“App” would like to access your Contacts.", buttons: ["Don’t Allow", "Continue"]),
+            expectedApp: ["Banco Plata Debug"]
+        )
+        XCTAssertEqual(contacts?.answer?.label, "Don’t Allow")
+
+        let location = ExploreEngine.systemDialog(
+            in: alert(
+                message: "Allow “App” to use your location?",
+                buttons: ["Allow Once", "Allow While Using App", "Don’t Allow"]
+            ),
+            expectedApp: ["Banco Plata Debug"]
+        )
+        XCTAssertEqual(location?.answer?.label, "Don’t Allow")
+
+        let spanish = ExploreEngine.systemDialog(
+            in: alert(message: "¿Permitir el acceso?", buttons: ["Permitir", "No permitir"]),
+            expectedApp: ["Banco Plata Debug"]
+        )
+        XCTAssertEqual(spanish?.answer?.label, "No permitir")
+    }
+
+    // One button is not a choice: an "OK" over a system error grants nothing,
+    // and tapping it is the only way back to the app.
+    func testASingleButtonDialogIsTappedBecauseThereIsNoChoice() {
+        let dialog = ExploreEngine.systemDialog(
+            in: alert(message: "Cannot connect to server", buttons: ["OK"]),
+            expectedApp: ["Banco Plata Debug"]
+        )
+        XCTAssertEqual(dialog?.answer?.label, "OK")
+    }
+
+    // A dialog whose buttons say nothing this vocabulary knows is reported and
+    // left alone. Tapping the wrong one of two unknown buttons is how a tool
+    // grants something on a person's behalf; the message it produces instead
+    // names the buttons, which is what makes the locale fixable.
+    func testADialogWithUnreadableButtonsIsReportedAndNotAnswered() {
+        let dialog = ExploreEngine.systemDialog(
+            in: alert(message: "Хочет доступ", buttons: ["Ага", "Валяй"]),
+            expectedApp: ["Banco Plata Debug"]
+        )
+        XCTAssertEqual(dialog?.buttons.map(\.label), ["Ага", "Валяй"])
+        XCTAssertNil(dialog?.answer, "two buttons nobody can read are not answered by guessing")
+    }
+
+    // The app's own action sheet is one of its screens and belongs on the map.
+    // Only something *other* than the app holding a dialog in front of us is
+    // this function's business — which is why it is handed the expectation.
+    func testTheAppsOwnSheetIsNoSystemDialog() {
+        var snapshot = alert(message: "Удалить карту?", buttons: ["Отмена", "Удалить"])
+        snapshot[0] = node(id: nil, label: "Banco Plata Debug", type: "Application", depth: 0, frame: [0, 0, 402, 874])
+        XCTAssertNil(ExploreEngine.systemDialog(in: snapshot, expectedApp: ["Banco Plata Debug"]))
+    }
+
+    // Read while it was still being presented: one button laid out, the other at
+    // zero size. «The only button there is» would have pressed «Allow» here, so
+    // the shortcut counts the buttons the dialog *holds*, and a dialog that is
+    // not laid out yet says so instead of being answered.
+    func testADialogCaughtMidPresentationIsNotAnswered() {
+        let snapshot = [
+            node(id: nil, label: " ", type: "Application", depth: 0, frame: [0, 0, 402, 874]),
+            node(id: nil, label: "“App” would like to access the Camera.", type: "Sheet", depth: 3, frame: [41, 289, 320, 323]),
+            node(id: nil, label: "Don’t Allow", type: "Button", depth: 10, frame: [57, 549, 0, 0]),
+            node(id: nil, label: "Allow", type: "Button", depth: 10, frame: [205, 549, 140, 48]),
+        ]
+        let dialog = ExploreEngine.systemDialog(in: snapshot, expectedApp: ["Banco Plata Debug"])
+        XCTAssertEqual(dialog?.buttons.map(\.label), ["Allow"])
+        XCTAssertEqual(dialog?.buttonsInDialog, 2)
+        XCTAssertFalse(dialog?.isLaidOut ?? true, "half-presented is a reason to look again")
+        XCTAssertNil(dialog?.answer, "and never a reason to press the one button that says yes")
+    }
+
+    // Two dialogs are in the tree while one alert replaces another, and the flat
+    // tree lists the front one last. Answering the one behind taps into the
+    // dimming over it and spends an attempt on nothing.
+    func testTheFrontDialogIsTheOneAnswered() {
+        var snapshot = alert(message: "Первый", buttons: ["Allow", "Don’t Allow"])
+        snapshot += [
+            node(id: nil, label: "Второй", type: "Sheet", depth: 3, frame: [41, 289, 320, 323]),
+            node(id: nil, label: "Continue", type: "Button", depth: 10, frame: [57, 549, 140, 48]),
+            node(id: nil, label: "Не разрешать", type: "Button", depth: 10, frame: [205, 549, 140, 48]),
+        ]
+        let dialog = ExploreEngine.systemDialog(in: snapshot, expectedApp: ["Banco Plata Debug"])
+        XCTAssertEqual(dialog?.message, "Второй")
+        XCTAssertEqual(dialog?.answer?.label, "Не разрешать")
+    }
+
+    // A button whose centre is off the screen is not a button to press: an alert
+    // on its way out reports frames nobody can tap.
+    func testAButtonOffTheScreenIsNoButtonToPress() {
+        let snapshot = [
+            node(id: nil, label: " ", type: "Application", depth: 0, frame: [0, 0, 402, 874]),
+            node(id: nil, label: "Уходящий алерт", type: "Sheet", depth: 3, frame: [41, 900, 320, 323]),
+            node(id: nil, label: "Don’t Allow", type: "Button", depth: 10, frame: [57, 1160, 140, 48]),
+            node(id: nil, label: "Allow", type: "Button", depth: 10, frame: [205, 1160, 140, 48]),
+        ]
+        XCTAssertNil(ExploreEngine.systemDialog(in: snapshot, expectedApp: ["Banco Plata Debug"]))
+    }
+
+    // Which of a screen's taps are the bar in the corner is a fact the crawl
+    // holds when it catalogues them, and the map has to carry it: the same key
+    // is a tab's own name on one screen and furniture on every other.
+    func testTabsOfAScreenAreRecordedAmongItsCatalogue() {
+        var node = ExploreScreenNode(
+            id: "s-main", title: "MainScreen", fingerprint: "f", key: "MainScreen",
+            screenshot: "shots/s-main.png", depth: 0, visits: 1, states: 1,
+            actionsTotal: 2, actionsTried: 0, firstSeenAt: "2026-08-23T10:00:00Z",
+            triedActionKeys: nil, deeplinks: nil, localizationKeys: nil
+        )
+        let tab = ExploreEngine.Action(
+            key: "platform_tabbar_invest", targetId: "platform_tabbar_invest", targetLabel: nil,
+            x: 0, y: 0, isBack: false, isTab: true
+        )
+        let button = ExploreEngine.Action(
+            key: "MainScreen-TransferButton", targetId: "MainScreen-TransferButton", targetLabel: nil,
+            x: 0, y: 0, isBack: false
+        )
+        ExploreController.catalogueTabs([tab, button], on: &node)
+        XCTAssertEqual(node.tabActionKeys, ["platform_tabbar_invest"])
+
+        ExploreController.catalogueTabs([button], on: &node)
+        XCTAssertEqual(node.tabActionKeys, ["platform_tabbar_invest"], "a state that hides the bar does not unlearn it")
+    }
+
+    // Another app is another app, not a dialog over ours. A tap on «поддержка»
+    // lands in a messenger whose onboarding sheet has buttons too; pressing one
+    // presses a stranger's button, and reporting «поверх приложения системный
+    // алерт» hides the plain truth the failure could have told: «на экране
+    // «Telegram»». Only a screen that names *nothing* is SpringBoard's.
+    func testASheetInAnotherAppIsNoSystemDialog() {
+        var snapshot = alert(message: "Welcome to Telegram", buttons: ["Cancel", "Continue"])
+        snapshot[0] = node(id: nil, label: "Telegram", type: "Application", depth: 0, frame: [0, 0, 402, 874])
+        XCTAssertNil(ExploreEngine.systemDialog(in: snapshot, expectedApp: ["Banco Plata Debug"]))
+    }
+
+    // A button past the end of the dialog's subtree belongs to whatever is
+    // behind it — the app switcher's own controls sit in the same snapshot.
+    func testOnlyTheDialogsOwnButtonsCount() {
+        var snapshot = alert(message: "Allow access?", buttons: ["Don’t Allow", "Allow"])
+        snapshot.append(node(id: nil, label: "Открыть", type: "Button", depth: 1, frame: [10, 800, 100, 40]))
+        let dialog = ExploreEngine.systemDialog(in: snapshot, expectedApp: ["Banco Plata Debug"])
+        XCTAssertEqual(dialog?.buttons.map(\.label), ["Don’t Allow", "Allow"])
+    }
+
+    // A dialog with no button to press is not something to press: reported as
+    // absent, so the pass relaunches instead of tapping at nothing.
+    func testADialogWithoutButtonsIsNotOne() {
+        let snapshot = [
+            node(id: nil, label: " ", type: "Application", depth: 0, frame: [0, 0, 402, 874]),
+            node(id: nil, label: "Подождите…", type: "Sheet", depth: 3, frame: [41, 289, 320, 120]),
+        ]
+        XCTAssertNil(ExploreEngine.systemDialog(in: snapshot, expectedApp: ["Banco Plata Debug"]))
+    }
+
+    // MARK: tab identity
+
+    // What makes «the same tab» the same across screens — the tap the crawl
+    // spends once per run, and the landing the map keeps one root for, have to
+    // agree on it.
+    func testATabIsKnownByItsIdentifierThenByItsWords() {
+        let identified = ExploreEngine.Action(
+            key: "platform_tabbar_invest", targetId: "platform_tabbar_invest", targetLabel: "Invest",
+            x: 0, y: 0, isBack: false, isTab: true
+        )
+        XCTAssertEqual(ExploreController.tabIdentity(of: identified), "platform_tabbar_invest")
+
+        let labelled = ExploreEngine.Action(
+            key: "Invest@RadioButton", targetId: nil, targetLabel: "Invest",
+            x: 0, y: 0, isBack: false, isTab: true
+        )
+        XCTAssertEqual(ExploreController.tabIdentity(of: labelled), "Invest")
+
+        let anonymous = ExploreEngine.Action(
+            key: "@RadioButton", targetId: nil, targetLabel: nil,
+            x: 0, y: 0, isBack: false, isTab: true
+        )
+        XCTAssertNil(ExploreController.tabIdentity(of: anonymous), "two nameless tabs cannot be told apart")
+
+        let notATab = ExploreEngine.Action(
+            key: "MainScreen-TransferButton", targetId: "MainScreen-TransferButton", targetLabel: nil,
+            x: 0, y: 0, isBack: false
+        )
+        XCTAssertNil(ExploreController.tabIdentity(of: notATab))
+    }
+
     // The tree lists content far below the fold, but only what is on screen
     // can be tapped: overflow earns the state a pair of scroll probes.
     func testActionsAppendScrollProbesWhenContentOverflows() {
@@ -712,6 +939,40 @@ final class ExploreEngineTests: XCTestCase {
         )
     }
 
+    // A tab this pass has already opened is work the pass will not do, and the
+    // frontier has to agree — otherwise every screen carrying the bar keeps
+    // calling the crawl back to a tap it has decided to skip, and no pass can
+    // ever call the map finished. Told through `spent`, never by writing
+    // «tried» into the store: the card on the canvas prints that number, and it
+    // would be claiming a tap nobody made.
+    func testATabSpentThisPassLeavesTheFrontierWithoutBeingCalledTried() {
+        let node = screenNode(
+            actionsTotal: 2, actionsTried: 1,
+            actionKeys: ["platform_tabbar_invest", "profile"], triedActionKeys: ["profile"]
+        )
+        let seenState = ExploreController.ScreenState(
+            nodeId: "s-main",
+            depth: 0,
+            actions: [action(key: "platform_tabbar_invest", targetId: "platform_tabbar_invest", label: nil)],
+            triedKeys: []
+        )
+        XCTAssertEqual(
+            ExploreController.nodesWithUntried(states: ["fingerprint": seenState], nodes: [node]),
+            ["s-main"],
+            "before the tab is spent, the screen has work left"
+        )
+        XCTAssertTrue(
+            ExploreController.nodesWithUntried(
+                states: ["fingerprint": seenState],
+                nodes: [node],
+                spent: ["platform_tabbar_invest"]
+            ).isEmpty,
+            "and once it is spent, the screen stops calling the crawl back"
+        )
+        XCTAssertEqual(node.actionsTried, 1, "the store still says one tap, because one tap is what happened")
+        XCTAssertEqual(node.triedActionKeys, ["profile"])
+    }
+
     // MARK: counters across runs
 
     // The second run extends what the first recorded rather than restating it:
@@ -925,14 +1186,59 @@ final class ExploreEngineTests: XCTestCase {
     }
 
 
+    /// The camera permission alert exactly as a booted simulator reports it:
+    /// a root that names nothing, the alert as a `Sheet` three levels in whose
+    /// label is the question, its texts, and its two buttons — apostrophe and
+    /// all (iOS ships «Don’t» with U+2019, a vocabulary is written with U+0027).
+    private func cameraAlert() -> [AccessibilityFlatNode] {
+        [
+            node(id: nil, label: " ", type: "Application", depth: 0, frame: [0, 0, 402, 874]),
+            node(id: "SBSwitcherWindow:Main", label: nil, type: "Group", depth: 1, frame: [0, 0, 402, 874]),
+            node(id: nil, label: "“Banco Plata Debug” would like to access the Camera.", type: "Sheet", depth: 3, frame: [41, 289, 320, 323]),
+            node(id: nil, label: "“Banco Plata Debug” would like to access the Camera.", type: "StaticText", depth: 9, frame: [71, 400, 260, 42]),
+            node(id: nil, label: "This will allow you to scan QR and barcodes and take selfies", type: "StaticText", depth: 9, frame: [71, 450, 260, 78]),
+            node(id: nil, label: "Don’t Allow", type: "Button", depth: 10, frame: [57, 549, 140, 48]),
+            node(id: nil, label: "Allow", type: "Button", depth: 10, frame: [205, 549, 140, 48]),
+        ]
+    }
+
+    /// The same shape with a message and buttons of one's choosing.
+    private func alert(message: String, buttons: [String]) -> [AccessibilityFlatNode] {
+        var snapshot = [
+            node(id: nil, label: " ", type: "Application", depth: 0, frame: [0, 0, 402, 874]),
+            node(id: nil, label: message, type: "Sheet", depth: 3, frame: [41, 289, 320, 323]),
+        ]
+        for (index, label) in buttons.enumerated() {
+            snapshot.append(node(
+                id: nil,
+                label: label,
+                type: "Button",
+                depth: 10,
+                frame: [57, 549 + index * 56, 288, 48]
+            ))
+        }
+        return snapshot
+    }
+
     private func node(
         id: String?,
         label: String? = nil,
         type: String?,
+        subrole: String? = nil,
         depth: Int,
         frame: [Int]? = nil,
         enabled: Bool? = nil
     ) -> AccessibilityFlatNode {
-        AccessibilityFlatNode(id: id, label: label, value: nil, title: nil, type: type, depth: depth, frame: frame, enabled: enabled)
+        AccessibilityFlatNode(
+            id: id,
+            label: label,
+            value: nil,
+            title: nil,
+            type: type,
+            subrole: subrole,
+            depth: depth,
+            frame: frame,
+            enabled: enabled
+        )
     }
 }

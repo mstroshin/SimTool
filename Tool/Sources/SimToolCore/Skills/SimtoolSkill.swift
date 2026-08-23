@@ -584,6 +584,15 @@ extension AgentSkill {
         - **A known screen** → no new node, and usually no edge (see the rules).
         - **The same screen** → a state change, not a transition; keep tapping, or
           scroll to reveal content below the fold.
+        - **A dialog iOS raised** (a permission prompt: the snapshot's root names
+          nothing and the dialog comes back as a `Sheet`/`Alert` whose label is the
+          question) → answer it with the button that **refuses** (`Don't Allow`,
+          `No permitir`, `Ask App Not to Track`), then carry on from the screen
+          underneath. The dialog is not a screen of the app: it gets no node and no
+          edge, and the tap that raised it is a tap on the app's own screen. Never
+          press the granting button — a contacts prompt offers to upload an address
+          book to a server. If a flow needs the permission, grant it before the pass
+          (`xcrun simctl privacy grant <service> <bundle id>`) rather than in it.
         - **Outside the app** (app switcher, Safari, a crash to SpringBoard) →
           relaunch and continue, marking the screen you land back on
           `entryPoint: true` the same way step 0 does; what is not the app is not
@@ -700,6 +709,8 @@ extension AgentSkill {
           screens nothing leads into.
         - Edge — required: `id`, `from`, `to`, `action` (`kind` plus optional
           `targetId`/`targetLabel` — the page renders them as the arrow label), `count`.
+          One more optional flag on `action`: `"tab": true`, when the tap was on an
+          item of a tab bar (see the tab-root note below).
         - Keep `stats.screens`/`stats.steps`/`stats.relaunches` accurate as you go —
           nothing recomputes them for you. `stats.transitions` is different: simtool
           overwrites it with a fresh count of the transitions it draws every time it
@@ -721,6 +732,15 @@ extension AgentSkill {
           it never erases the mark or the arrows into the ones it drops. Miss the
           mark everywhere and simtool falls back to guessing openings from recorded
           `depth`, which is not always the same screen.
+        - A tab bar's landings are openings too, and those are the one kind nothing
+          drops. Mark the transition, not the screen: `"tab": true` on the action of
+          the tap that opened it, and simtool reads the roots back out of the
+          transitions on every read. The robot sets it from the platform's
+          `AXTabButton` subrole; in an agent pass, set it when the control you tapped
+          really is an item of the app's tab bar — a segmented control inside a
+          screen is not one. The price is the same one every opening pays: an arrow
+          into that screen from elsewhere in the app stays in the file and stops
+          being drawn.
 
         ## Naming the feature groups
 

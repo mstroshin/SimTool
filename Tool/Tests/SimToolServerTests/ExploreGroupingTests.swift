@@ -581,6 +581,129 @@ final class ExploreGroupingTests: XCTestCase {
         }
     }
 
+    // MARK: tab bars
+
+    // The tab bar is the app's own top level: its items sit side by side, so
+    // every one of them opens a root of the map. Measured from the home screen
+    // alone, four fifths of the app hung off it as if the user had walked
+    // there from home — the invest tab three columns in behind a home widget,
+    // the chat tab behind whatever screen happened to reach it first.
+    func testEveryTabOfTheTabBarIsARootOfItsOwn() {
+        let shown = ExploreGrouping.annotatedWithGroups(tabRootMap(), names: ExploreGroupNames()).graph
+        func depth(_ id: String) -> Int? { shown.nodes.first { $0.id == id }?.depth }
+
+        for tab in ["s-home", "s-pay", "s-invest", "s-invite"] {
+            XCTAssertEqual(depth(tab), 0, tab)
+        }
+        // And each of them measures its own feature from itself, rather than
+        // from the tab the crawl happened to launch into.
+        XCTAssertEqual(depth("s-amount"), 1)
+        XCTAssertEqual(depth("s-detail"), 1)
+        XCTAssertEqual(depth("s-cards"), 1)
+    }
+
+    // Every screen carrying the tab bar leads to every tab, so a root chosen by
+    // reach would keep one tab and peel the rest. The tab bar says otherwise,
+    // and it is the app talking.
+    func testATabsLandingIsNoLessARootForBeingReachableFromAnotherTab() {
+        let map = tabRootMap(extraEdges: [edge("s-amount", "s-invest", "Invertir")])
+        let shown = ExploreGrouping.annotatedWithGroups(map, names: ExploreGroupNames()).graph
+        XCTAssertEqual(shown.nodes.first { $0.id == "s-invest" }?.depth, 0)
+    }
+
+    // The cost of the rule, kept where it can be read: an arrow into a tab's
+    // landing from elsewhere in the app is no longer drawn — a widget on the
+    // home screen opening the same investment screen the invest tab shows. The
+    // store keeps the transition; the map draws five roots instead of one tree.
+    func testAWidgetOpeningATabsLandingStaysInTheStoreButIsNotDrawn() {
+        let map = tabRootMap(extraEdges: [edge("s-home", "s-invest", "PortfolioWidget")])
+        let drawn = ExploreGrouping.descending(map)
+
+        XCTAssertTrue(map.edges.contains { $0.from == "s-home" && $0.to == "s-invest" })
+        XCTAssertFalse(drawn.edges.contains { $0.from == "s-home" && $0.to == "s-invest" })
+        XCTAssertEqual(drawn.stats.transitions, drawn.edges.count)
+    }
+
+    // A tab bar the app builds out of its own buttons carries no subrole, and
+    // then nothing at the accessibility layer says these screens are roots —
+    // the map is the one it always was. What the reading may not do is invent
+    // the mark: that is how a store where every screen is an opening drew
+    // nothing at all.
+    func testAMapWithNoTabTransitionsIsMeasuredExactlyAsBefore() {
+        let plain = untabbing(tabRootMap())
+        let shown = ExploreGrouping.annotatedWithGroups(plain, names: ExploreGroupNames()).graph
+        func depth(_ id: String) -> Int? { shown.nodes.first { $0.id == id }?.depth }
+
+        XCTAssertEqual(depth("s-home"), 0)
+        for tab in ["s-pay", "s-invest", "s-invite"] {
+            XCTAssertEqual(depth(tab), 1, tab)
+        }
+        XCTAssertEqual(ExploreGrouping.tabRoots(edges: plain.edges, nodes: plain.nodes), [])
+    }
+
+    // One tab, one root. Tapped mid-flow, the home tab came back to the flow's
+    // own screen instead of home — and that screen, three taps deep, stood in
+    // the map as a root beside the real ones.
+    func testATabThatLandsSomewhereElseOnceStillOwnsOneRoot() {
+        let map = tabRootMap(
+            extraNodes: [node("s-form", title: "ApplicationFormScreen", depth: 3)],
+            extraEdges: [tabEdge("s-detail", "s-form", "platform_tabbar_main")]
+        )
+        let shown = ExploreGrouping.annotatedWithGroups(map, names: ExploreGroupNames()).graph
+        func depth(_ id: String) -> Int? { shown.nodes.first { $0.id == id }?.depth }
+
+        XCTAssertEqual(depth("s-home"), 0, "the shallowest landing of the home tab stays its root")
+        XCTAssertNotEqual(depth("s-form"), 0, "the screen it came back to once is no root")
+        XCTAssertTrue(
+            ExploreGrouping.descending(map).edges.contains { $0.from == "s-detail" && $0.to == "s-form" },
+            "and the tap that reached it is drawn as the arrow it is"
+        )
+    }
+
+    // The drawn map has no arrow into a tab's landing — it is an opening, and
+    // nothing descends into one — so the canvas has nowhere to learn that this
+    // screen is what «invest» opens. The shown map tells it outright; the store
+    // keeps the transitions and needs no copy of their names.
+    func testTheShownMapTellsEachScreenWhichTabOpensIt() {
+        let map = tabRootMap()
+        let shown = ExploreGrouping.annotatedWithGroups(map, names: ExploreGroupNames()).graph
+        func tabs(_ id: String) -> [String]? { shown.nodes.first { $0.id == id }?.tabKeys }
+
+        XCTAssertEqual(tabs("s-pay"), ["platform_tabbar_payments"])
+        XCTAssertEqual(tabs("s-home"), ["platform_tabbar_main"])
+        XCTAssertNil(tabs("s-amount"), "a screen no tab opens claims no tab")
+
+        // And the landing the map refused as a root does not go on claiming the
+        // tab's name either: one source answers both questions.
+        let withStray = tabRootMap(
+            extraNodes: [node("s-form", title: "ApplicationFormScreen", depth: 3)],
+            extraEdges: [tabEdge("s-detail", "s-form", "platform_tabbar_main")]
+        )
+        let strayShown = ExploreGrouping.annotatedWithGroups(withStray, names: ExploreGroupNames()).graph
+        XCTAssertNil(
+            strayShown.nodes.first { $0.id == "s-form" }?.tabKeys,
+            "the home tab's root is the home screen, not the form it came back to once"
+        )
+        XCTAssertEqual(strayShown.nodes.first { $0.id == "s-home" }?.tabKeys, ["platform_tabbar_main"])
+        XCTAssertTrue(
+            ExploreGrouping.annotated(map).nodes.allSatisfy { $0.tabKeys == nil },
+            "and the store carries the transitions, not a second copy of their names"
+        )
+    }
+
+    // Marks accumulate: pass after pass lands on screens the map already holds,
+    // and every one of them is written down. A map where the tabs *and* every
+    // screen behind them are marked must still draw itself.
+    func testAMapWhereEveryScreenIsMarkedStillDrawsItsTabs() {
+        let map = marking(tabRootMap().nodes.map(\.id), in: tabRootMap())
+        let shown = ExploreGrouping.annotatedWithGroups(map, names: ExploreGroupNames()).graph
+
+        XCTAssertFalse(ExploreGrouping.descending(map).edges.isEmpty, "a map that draws nothing is the bug")
+        for tab in ["s-home", "s-pay", "s-invest", "s-invite"] {
+            XCTAssertEqual(shown.nodes.first { $0.id == tab }?.depth, 0, tab)
+        }
+    }
+
     // MARK: what is stored vs what is drawn
 
     func testATransitionOntoAShallowerScreenStaysInTheStoreButIsNotDrawn() {
@@ -909,6 +1032,57 @@ final class ExploreGroupingTests: XCTestCase {
         )
     }
 
+    /// A tab bar as the crawl really records one: the pass launched into the
+    /// home tab, and from there a tap on each of the bar's items opened that
+    /// tab's own screen one tap deep. The bar is on every screen, so every
+    /// screen has a way back to home.
+    ///
+    ///     s-home ─┬(tab)─ s-pay ──── s-amount
+    ///             ├(tab)─ s-invest ─ s-detail
+    ///             ├(tab)─ s-invite
+    ///             └────── s-cards ── s-limits
+    private func tabRootMap(
+        extraNodes: [ExploreScreenNode] = [],
+        extraEdges: [ExploreTransitionEdge] = []
+    ) -> ExploreGraph {
+        graph(
+            nodes: [
+                node("s-home", title: "MainScreenV2View", depth: 0, entryPoint: true),
+                node("s-cards", title: "CardDetailsScreen", depth: 1),
+                node("s-limits", title: "CardLimitsScreen", depth: 2),
+                node("s-pay", title: "MainPaymentsScreen", depth: 1),
+                node("s-amount", title: "AmountInputScreen", depth: 2),
+                node("s-invest", title: "InvestMainScreen", depth: 1),
+                node("s-detail", title: "PortfolioDetailScreen", depth: 2),
+                node("s-invite", title: "BringAFriendMainScreen", depth: 1),
+            ] + extraNodes,
+            edges: [
+                tabEdge("s-home", "s-pay", "platform_tabbar_payments"),
+                tabEdge("s-home", "s-invest", "platform_tabbar_invest"),
+                tabEdge("s-home", "s-invite", "platform_tabbar_invite"),
+                edge("s-home", "s-cards", "Card"),
+                edge("s-cards", "s-limits", "Limits"),
+                edge("s-pay", "s-amount", "Transfer"),
+                edge("s-invest", "s-detail", "Portfolio"),
+            ] + ["s-cards", "s-limits", "s-pay", "s-amount", "s-invest", "s-detail", "s-invite"]
+                .map { tabEdge($0, "s-home", "platform_tabbar_main") }
+                + extraEdges
+        )
+    }
+
+    /// The same map recorded by a crawl that could not tell a tab from any
+    /// other button — a tab bar the app draws itself, or a store written before
+    /// tabs were told apart.
+    private func untabbing(_ map: ExploreGraph) -> ExploreGraph {
+        var copy = map
+        copy.edges = map.edges.map { edge in
+            var edge = edge
+            edge.action.tab = nil
+            return edge
+        }
+        return copy
+    }
+
     /// The same map with nothing marked as an opening — a store written before
     /// openings were marked, or one an agent pass wrote by hand.
     private func withoutOpenings(_ map: ExploreGraph) -> ExploreGraph {
@@ -949,6 +1123,18 @@ final class ExploreGroupingTests: XCTestCase {
             from: from,
             to: to,
             action: ExploreTransitionAction(kind: "tap", targetId: nil, targetLabel: label),
+            count: 1
+        )
+    }
+
+    /// A transition a tap on a tab bar's item opened — what the crawl writes
+    /// down when the tapped control carries the tab subrole.
+    private func tabEdge(_ from: String, _ to: String, _ identifier: String) -> ExploreTransitionEdge {
+        ExploreTransitionEdge(
+            id: "\(from)->\(to)-\(identifier)",
+            from: from,
+            to: to,
+            action: ExploreTransitionAction(kind: "tap", targetId: identifier, targetLabel: nil, tab: true),
             count: 1
         )
     }

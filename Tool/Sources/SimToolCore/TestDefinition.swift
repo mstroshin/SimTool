@@ -230,10 +230,14 @@ public struct TestReset: Equatable, Sendable {
     }
 }
 
-/// One pre-answered permission. A system alert cannot be driven through the
-/// accessibility API — while one is up, the tree is unreadable and a run reads
-/// exactly like "the claim does not hold" — so answering them up front is part
-/// of staging, not a convenience.
+/// One pre-answered permission. A system alert is readable — measured on a
+/// booted simulator, it comes back as a `Sheet` whose label is the question and
+/// whose buttons are Buttons, and a tap by coordinates presses them (that is how
+/// the crawl gets past one; see `ExploreEngine.systemDialog`). What cannot be
+/// done is address it: its buttons carry no identifiers, so `--id` has nothing
+/// to aim at, and its words are the device's locale rather than the app's. And a
+/// test that only ever pressed «refuse» would be staging its own preconditions
+/// by guesswork, which is why answering them up front stays part of staging.
 public struct TestPermission: Equatable, Sendable {
     public enum Decision: String, Equatable, Sendable, CaseIterable {
         case grant

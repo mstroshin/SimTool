@@ -641,6 +641,41 @@ Three ideas keep the map honest as it grows:
   measured from every marked screen except the ones a better-ranked marked
   screen already leads to. So a relaunch that happens to land back on a screen
   the map already charted costs the map nothing.
+- **A dialog iOS puts over the app is answered, not mistaken for leaving it.**
+  A permission alert belongs to the system, so the snapshot names nothing and
+  the crawl used to read it as "the tap left the app" — it relaunched, iOS held
+  the alert across the relaunch, and the run ended (with a map on a later pass,
+  with nothing at all on the first). Such a dialog is now answered with the
+  button that refuses (`Don't Allow`, `No permitir`, `Ask App Not to Track`, …),
+  or with its only button when the dialog holds exactly one — counted over the
+  buttons the dialog *has*, not the ones already laid out, because a dialog read
+  half-presented shows one button and it is as likely to be `Allow`; a dialog
+  whose buttons none of that
+  vocabulary reads is left alone and quoted in the closing message, buttons and
+  all, instead of "системный экран без названия". Answering never grants: a
+  contacts prompt offers to upload an address book to a server, and that is not
+  a crawler's decision. So an app that gates a flow behind a permission needs it
+  granted before the crawl — `xcrun simctl privacy grant … <bundle id>` — and the
+  run says how many dialogs it closed, so a small map has a visible cause.
+- **A tab is tapped once per pass, not once per screen.** The bar is on every
+  screen and every tap on one lands back at that tab's root, so the frontier
+  handed out five teleports per screen: 55 of 122 taps of a real run went nowhere
+  new. One tap is what finds the tab's root — and per *pass*, because a pass
+  always starts at a launch screen, which is where a tab's landing is worth
+  recording; one landing per run would leave the ranking that picks a tab's root
+  nothing to rank. A skipped tap is not written down as tried: the card on the
+  canvas prints that number and it may not claim a tap nobody made, so the
+  crawl's own frontier is told separately.
+- **Every tab of a tab bar is a root of its own.** A tab bar is the app's own
+  top level: its items sit side by side, and the screen each one shows is a
+  place the app opens at, not a screen hanging off whatever screen the tab was
+  tapped from. A tap on a tab is recorded as such (`"tab": true` on the
+  transition, read off the platform's `AXTabButton` subrole rather than any
+  identifier the app chose), and such a landing is an opening no better-ranked
+  root peels away — otherwise reach alone would keep one tab and hang the whole
+  app off it, since every screen carrying the bar leads to every tab. The price
+  is the same one every opening pays: an arrow into a tab's landing from
+  elsewhere in the app stays in the file but is no longer drawn.
 
 ## HTTP API
 

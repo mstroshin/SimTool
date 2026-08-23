@@ -201,7 +201,12 @@ public enum ExploreGrouping {
     /// leaving it unmeasured cost it every chip it had.
     static func measured(edges: [ExploreTransitionEdge], nodes: [ExploreScreenNode]) -> Measure {
         let (outgoing, incoming) = adjacency(edges: edges, nodes: nodes)
-        let opened = openings(nodes: nodes, incoming: incoming, outgoing: outgoing)
+        let opened = openings(
+            nodes: nodes,
+            incoming: incoming,
+            outgoing: outgoing,
+            tabRoots: tabRoots(edges: edges, nodes: nodes)
+        )
         var level = depths(from: opened, outgoing: outgoing)
         var sources = opened
         let past = (level.values.max() ?? 0) + 1
@@ -269,14 +274,24 @@ public enum ExploreGrouping {
     ///    screen is an island the crawl relaunched into, not an opening.
     /// 3. Failing even that — every screen has a way in, and none is marked —
     ///    one screen stands in for the root; see `anchor`.
+    ///
+    /// A tab bar's landings count as marks too, and as the one kind no better
+    /// root peels away — see `tabRoots`.
     static func openings(
         nodes: [ExploreScreenNode],
         incoming: [String: [String]],
-        outgoing: [String: [String]]
+        outgoing: [String: [String]],
+        tabRoots: Set<String> = []
     ) -> [String] {
-        let marked = nodes.filter { $0.entryPoint == true }.map(\.id)
+        let marked = nodes.filter { $0.entryPoint == true || tabRoots.contains($0.id) }.map(\.id)
         if !marked.isEmpty {
-            return rootmost(marked, among: nodes, incoming: incoming, outgoing: outgoing)
+            return rootmost(
+                marked,
+                among: nodes,
+                incoming: incoming,
+                outgoing: outgoing,
+                keeping: tabRoots
+            )
         }
         let shallowest = nodes.map(\.depth).min() ?? 0
         let unentered = nodes
@@ -284,6 +299,67 @@ public enum ExploreGrouping {
             .map(\.id)
         if !unentered.isEmpty { return unentered }
         return [anchor(among: nodes, incoming: incoming, outgoing: outgoing)].compactMap { $0 }
+    }
+
+    /// The screens a tab bar's items open — one root per tab.
+    ///
+    /// A tab bar is the app's own top level: its items sit side by side, none
+    /// of them behind another, and the screen each one shows is a place the app
+    /// opens at. Read off the transitions rather than kept on the screens,
+    /// because that is where the crawl wrote it down — a tap on a tab button
+    /// opened this screen — and because a reading recomputed on every pass
+    /// cannot drift: a map whose tab transitions are gone stops claiming their
+    /// landings as roots, instead of carrying a mark nothing supports any more.
+    ///
+    /// The cost is real and taken deliberately: the arrows into a tab's landing
+    /// from elsewhere in the app — a widget on the home screen opening the
+    /// same investment screen the invest tab shows — stop being drawn, the way
+    /// an arrow into any opening does. The store keeps them; what the map draws
+    /// is five separate features instead of one tree pretending the whole app
+    /// hangs off the home screen.
+    /// One root per *tab*, not per landing. A tab tapped from twenty screens
+    /// almost always shows the same one, but not always: tapped while the app
+    /// was mid-flow, the home tab came back to the flow's own screen, and that
+    /// screen — an application form three taps deep — stood in the map as a
+    /// root of its own beside the five real ones. So the landings of one tab
+    /// are ranked and one is kept: the shallowest the crawl recorded, since a
+    /// tab's own screen is the one it is met at first and a state it comes back
+    /// to is met further in; the id only breaks a tie, so the choice cannot
+    /// wobble between reads. The landings not kept are ordinary screens — the
+    /// tap that reached one is drawn as the arrow it is.
+    ///
+    /// A tab carrying neither identifier nor label cannot be told from another
+    /// one, so each of its landings stands alone — the same answer as before
+    /// this ranking existed.
+    static func tabRoots(edges: [ExploreTransitionEdge], nodes: [ExploreScreenNode]) -> Set<String> {
+        Set(tabLandings(edges: edges, nodes: nodes).values)
+    }
+
+    /// The same answer keyed by the tab, for a reader that needs to know *which*
+    /// tab opens a screen and not merely that one does. One source for both, so
+    /// «this screen is a tab's root» and «this screen is what that tab opens»
+    /// cannot come apart — a screen the map refused as a root must not go on
+    /// claiming the tab's name on the canvas.
+    static func tabLandings(
+        edges: [ExploreTransitionEdge],
+        nodes: [ExploreScreenNode]
+    ) -> [String: String] {
+        let known = Set(nodes.map(\.id))
+        let depth = Dictionary(nodes.map { ($0.id, $0.depth) }, uniquingKeysWith: { first, _ in first })
+        func rank(_ id: String) -> (Int, String) { (depth[id] ?? Int.max, id) }
+        var landing: [String: String] = [:]
+        for edge in edges
+        where edge.action.tab == true && edge.from != edge.to && known.contains(edge.to) {
+            let tab = edge.action.targetId?.nilIfEmpty
+                ?? edge.action.targetLabel?.nilIfEmpty
+                ?? edge.to
+            guard let kept = landing[tab] else {
+                landing[tab] = edge.to
+                continue
+            }
+            if rank(edge.to) < rank(kept) { landing[tab] = edge.to }
+        }
+        return landing
     }
 
     /// Of the openings the store marks, the ones a better root does not lead
@@ -316,7 +392,8 @@ public enum ExploreGrouping {
         _ marked: [String],
         among nodes: [ExploreScreenNode],
         incoming: [String: [String]],
-        outgoing: [String: [String]]
+        outgoing: [String: [String]],
+        keeping: Set<String> = []
     ) -> [String] {
         guard marked.count > 1 else { return marked }
         let byId = Dictionary(nodes.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
@@ -327,7 +404,15 @@ public enum ExploreGrouping {
         var kept: Set<String> = []
         var better: Set<String> = []
         for candidate in bestFirst {
-            if better.isEmpty || !leadsTo(candidate.id, from: better, incoming: incoming) {
+            // A tab's landing is kept whatever reaches it. Peeling by reach is
+            // what a *landing* deserves — the crawl happened to relaunch onto a
+            // screen the map already held — but a tab is not that: the tab bar
+            // is the app's own statement that this screen is a place to open at,
+            // and every screen carrying the bar leads to it, so reach would peel
+            // away every tab but one and hang the whole app off the first.
+            if keeping.contains(candidate.id)
+                || better.isEmpty
+                || !leadsTo(candidate.id, from: better, incoming: incoming) {
                 kept.insert(candidate.id)
             }
             // Dropped or kept, it still stands between a worse opening and the
@@ -469,11 +554,25 @@ public enum ExploreGrouping {
         for flow in flows {
             for member in flow.members { memberOf[member, default: []].append(flow.key) }
         }
+        // Which tab opens which screen, for the map on its way to a reader only
+        // — the store keeps the transitions themselves and needs no copy of
+        // their names. See `ExploreScreenNode.tabKeys` for why a reader does.
+        var tabNames: [String: [String]] = [:]
+        if measuringDepth {
+            for (tab, landing) in tabLandings(edges: graph.edges, nodes: graph.nodes) {
+                tabNames[landing, default: []].append(tab)
+            }
+            // Sorted, like `groups` beside it: the canvas hands a card back
+            // untouched only while its data compares equal, and an order taken
+            // from the order of the edges reshuffles as the crawl records more.
+            for (id, names) in tabNames { tabNames[id] = names.sorted() }
+        }
         var copy = graph
         copy.nodes = graph.nodes.map { node in
             var node = node
             let joined = memberOf[node.id] ?? []
             node.groups = joined.isEmpty ? nil : joined.sorted()
+            node.tabKeys = tabNames[node.id]
             // Distance from the nearest screen the app opens into — what the
             // canvas puts in columns. Only for a map on its way to a reader:
             // see `annotated(_:)` on why the store keeps the recorded depth.

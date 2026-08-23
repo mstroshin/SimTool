@@ -75,6 +75,28 @@ public struct ExploreScreenNode: Codable, Sendable {
     /// features share carries all of theirs. Nil in maps recorded before
     /// screens were grouped.
     public var groups: [String]?
+    /// Which of `actionKeys` are a tab bar's items — the app's furniture on this
+    /// screen. A fact the crawl holds at catalog time (the platform's
+    /// `AXTabButton`) and no reader can recover: the same key is the way into a
+    /// tab on one screen and the bar in the corner on every other, and a search
+    /// that cannot tell the two apart either rings every card at once or loses
+    /// the tab's own screen. Guessing it from how many screens carry the key
+    /// does not work — a tab bar sits on the app's roots and on nothing modal,
+    /// which on a forty-screen map is a fifth of it. Nil in maps recorded before
+    /// tabs were told apart.
+    public var tabActionKeys: [String]?
+    /// The tab bar items that open this screen, by whatever names them — the
+    /// words a person searches this screen by. Derived, and only in the map as
+    /// it is *shown*: the store keeps the transitions these come from.
+    ///
+    /// Needed because of what the drawn map leaves out. A tab's landing is an
+    /// opening, so no arrow into it descends and none of them reaches the
+    /// canvas — which is where a card's searchable words about how it is
+    /// reached come from. Meanwhile the tab's identifier sits in the catalog of
+    /// every screen carrying the bar, so the search drops it as furniture
+    /// (`mapWideActionKeys`). Between the two, «invest» stopped finding the
+    /// invest tab's own screen. This is that screen's claim to its tab's name.
+    public var tabKeys: [String]?
     /// True when the app opens on this screen: it was recorded on a launch or
     /// a relaunch rather than reached by a tap. The store says so because the
     /// crawl was there when it happened — which is why grouping trusts this
@@ -89,6 +111,13 @@ public struct ExploreTransitionAction: Codable, Sendable, Equatable {
     public var kind: String
     public var targetId: String?
     public var targetLabel: String?
+    /// The tap was on a tab bar's item — a fact about the control, recorded so
+    /// the reading can treat what it opened as a place the app opens into
+    /// rather than as a screen hanging off whatever screen the tab was tapped
+    /// from. Carried on the transition and not on the screen, because that is
+    /// where the fact belongs: the same screen can be a tab's landing and an
+    /// ordinary destination of a widget one tap away.
+    public var tab: Bool?
 }
 
 public struct ExploreTransitionEdge: Codable, Sendable {
@@ -280,6 +309,8 @@ public enum ExploreEngine {
         public var isBack: Bool
         public var isScroll: Bool = false
         public var endY: Double = 0
+        /// A tab bar's item — see `tabButtonSubrole`.
+        public var isTab: Bool = false
     }
 
     /// Digit runs collapse to `N` so `Ids.cell-3` and `Ids.cell-17` are the
@@ -327,6 +358,17 @@ public enum ExploreEngine {
     /// tabs are the widest doors in the app.
     static let tappableTypes: Set<String> = ["Button", "Cell", "Link", "RadioButton"]
 
+    /// What UIKit puts on a tab bar's items, and nothing else — the one signal
+    /// that names a tab without knowing anything about the app.
+    ///
+    /// Not the type (`RadioButton` is a tab and a form's radio group both), not
+    /// the role description (`"tab"` is localized, so a Spanish device says
+    /// `"pestaña"`), and not the identifier (a name only this app's developers
+    /// chose). A control the app draws to look like a tab bar but builds out of
+    /// buttons carries no subrole and is read as the buttons it is — which is
+    /// the honest answer: nothing at the accessibility layer says otherwise.
+    static let tabButtonSubrole = "AXTabButton"
+
     /// The most taps one screen state may claim from the step budget.
     public static let maxActionsPerState = 24
 
@@ -338,11 +380,14 @@ public enum ExploreEngine {
     /// old per-state sums, where the total can even sit below the tried count,
     /// so there the answer is "assume there is work left" rather than a
     /// comparison that means nothing.
-    public static func hasUntriedActions(_ node: ExploreScreenNode) -> Bool {
+    /// - Parameter spent: keys a caller has decided it will not tap after all —
+    ///   see `ExploreController.nodesWithUntried(states:nodes:spent:)`. Empty for
+    ///   every reader that only wants to know what the store says.
+    public static func hasUntriedActions(_ node: ExploreScreenNode, spent: Set<String> = []) -> Bool {
         guard let catalogued = node.actionKeys else {
             return node.actionsTried != node.actionsTotal
         }
-        return !Set(catalogued).subtracting(node.triedActionKeys ?? []).isEmpty
+        return !Set(catalogued).subtracting(node.triedActionKeys ?? []).subtracting(spent).isEmpty
     }
 
     static let backTokens = ["back", "close", "dismiss", "cancel", "назад", "закрыть", "отмена", "отменить", "chevron.backward", "xmark"]
@@ -407,15 +452,20 @@ public enum ExploreEngine {
             // as its label, so vocabulary alone cannot catch it — but its home
             // is always the top-left corner.
             let looksLikeNavbarBack = type == "Button" && centerX < 100 && centerY < 120
+            let isTab = node.subrole == tabButtonSubrole
             let action = Action(
                 key: id ?? "\(label ?? "")@\(type)",
                 targetId: id,
                 targetLabel: label,
                 x: centerX,
                 y: centerY,
-                isBack: looksLikeNavbarBack || isBack(id: id, label: label)
+                isBack: looksLikeNavbarBack || isBack(id: id, label: label),
+                isTab: isTab
             )
-            if type == "RadioButton" { tabCandidates.append(action) } else { candidates.append(action) }
+            // Ordering still goes by type as well: a tab bar the app builds out
+            // of radio buttons of its own carries no subrole, and it was first
+            // in the catalog before this signal existed.
+            if isTab || type == "RadioButton" { tabCandidates.append(action) } else { candidates.append(action) }
         }
 
         // One tap point, one probe. Two candidates whose frames share a centre
@@ -659,6 +709,198 @@ public enum ExploreEngine {
     /// app's map.
     public static func applicationLabel(of nodes: [AccessibilityFlatNode]) -> String? {
         nodes.first { $0.depth == 0 }?.label
+    }
+
+    /// A dialog the system put over the app, with the buttons it offers and
+    /// which of them gets out of it without granting anything.
+    public struct SystemDialog: Equatable, Sendable {
+        public struct Button: Equatable, Sendable {
+            public var label: String
+            public var x: Double
+            public var y: Double
+        }
+
+        /// What the dialog says — so a message to a person can quote it instead
+        /// of calling the screen «системный экран без названия».
+        public var message: String
+        /// Every button it offers that can be pressed — labelled, enabled, and
+        /// big enough to aim at — in the order the platform lists them.
+        public var buttons: [Button]
+        /// How many buttons its subtree holds at all, readable or not. A dialog
+        /// caught mid-presentation has its second button at zero size, and
+        /// «one button is not a choice» read off the readable ones would then
+        /// press whatever happened to be laid out first — «Allow», half the
+        /// time. So the shortcut asks this number instead.
+        public var buttonsInDialog: Int
+        /// The one to tap. Nil when the dialog offers a choice this cannot read
+        /// — then nothing is tapped and the run says what it saw.
+        public var answer: Button?
+
+        /// Whether every button it holds is one this can aim at. False while the
+        /// dialog is still being presented, which is a reason to look again
+        /// rather than to answer.
+        public var isLaidOut: Bool { buttons.count == buttonsInDialog }
+
+        /// What the dialog is, without where it is: the same prompt raised
+        /// twice is the same dialog even if it settled a point lower. Geometry
+        /// is deliberately out — a dialog that came back because the tap did
+        /// not take must not read as a new one, or the pass presses the same
+        /// pixel until its budget is gone.
+        public var signature: String {
+            ([message] + buttons.map(\.label)).joined(separator: "|")
+        }
+    }
+
+    /// The types iOS presents a permission dialog as. Measured on a booted
+    /// simulator: the alert asking for the camera comes back as a `Sheet`
+    /// (`AXSheet`) whose own label is the question it asks, with the buttons
+    /// under it. `Alert` is here because XCTest has both element types and
+    /// nothing promises which one a given iOS build uses for which dialog.
+    static let systemDialogTypes: Set<String> = ["Sheet", "Alert"]
+
+    /// Words that answer a permission dialog without granting anything, best
+    /// first: an outright refusal, then a deferral, then a plain way out.
+    ///
+    /// Vocabulary is a weak signal and it is used as one: a dialog whose
+    /// buttons none of these words match is not tapped at all (see
+    /// `systemDialog`), because on a system dialog the other button is the one
+    /// that grants something — the contacts alert offers to upload the address
+    /// book to a server, and a crawler must not answer that for anybody. Three
+    /// languages are covered because a simulator runs in whatever locale the
+    /// project tests in; a fourth locale reaches a person through the message,
+    /// which quotes the buttons it could not read.
+    static let dialogRefusals: [[String]] = [
+        ["don't allow", "dont allow", "no permitir", "nao permitir", "não permitir", "запретить", "не разрешать", "deny", "denegar", "reject"],
+        // App Tracking Transparency words its refusal as a request rather than
+        // a refusal — «Ask App Not to Track» — and it is the dialog a freshly
+        // installed app raises first.
+        ["not to track", "no rastrear", "no rastree", "não rastrear", "не отслеживать"],
+        ["not now", "ahora no", "no por ahora", "agora não", "не сейчас", "later", "más tarde", "mas tarde", "позже", "no thanks", "no gracias"],
+        ["cancel", "cancelar", "отмена", "отменить", "close", "cerrar", "fechar", "закрыть", "dismiss", "skip", "omitir", "пропустить"],
+    ]
+
+    /// The system dialog standing over the app in this snapshot, if one is.
+    ///
+    /// Why this exists: iOS presents a permission alert in its own process, so
+    /// the snapshot's root names nothing (see `appMatch`) and the crawl read it
+    /// as «the tap left the app» — it relaunched, the alert survived the
+    /// relaunch, and the run ended with a map or without one depending on which
+    /// pass it happened on. On a real banking app on a real backend that
+    /// finished every run of a day's testing.
+    ///
+    /// `expectedApp` is taken rather than assumed, because a dialog *inside*
+    /// the app is one of its screens and belongs on the map: the app's own
+    /// action sheet reports the app as its root and must not be answered by
+    /// this. So the question this asks is not "is there a dialog" but "is
+    /// something other than the app holding one in front of us".
+    ///
+    /// One case is knowingly out of reach: `applicationLabel` reads the first root
+    /// of the snapshot, so if a build ever reported the app's own window first and
+    /// the dialog's second, the caller would never ask. Every measurement on this
+    /// platform puts the front window first, and the rest of the crawl already
+    /// trusts that; the note is here so the day it stops being true is a day
+    /// someone can find.
+    ///
+    /// And not just anything else: only a screen whose root names *nothing*,
+    /// which is SpringBoard's own answer (see `appMatch`). A screen that names
+    /// another app is another app — a tap on «написать в поддержку» lands in a
+    /// messenger, whose onboarding sheet has buttons too. Answering there would
+    /// press a stranger's button and, worse, report «поверх приложения
+    /// системный алерт» over what is plainly «на экране «Telegram»».
+    public static func systemDialog(
+        in nodes: [AccessibilityFlatNode],
+        expectedApp: Set<String>
+    ) -> SystemDialog? {
+        let match = ExploreController.appMatch(
+            rootLabel: applicationLabel(of: nodes),
+            expected: expectedApp
+        )
+        guard !match.isApp, match.label == nil else { return nil }
+        let screen = nodes.first { $0.depth == 0 }?.frame
+        func onScreen(_ frame: [Int]) -> Bool {
+            guard let screen, screen.count == 4 else { return true }
+            let centerX = Double(frame[0]) + Double(frame[2]) / 2
+            let centerY = Double(frame[1]) + Double(frame[3]) / 2
+            return centerX >= Double(screen[0]) && centerX <= Double(screen[0] + screen[2])
+                && centerY >= Double(screen[1]) && centerY <= Double(screen[1] + screen[3])
+        }
+        // The *last* dialog of the snapshot that has something to press. Two of
+        // them are in the tree while one alert replaces another, and a flat tree
+        // lists the front one last: answering the one behind taps into the
+        // dimming over it and spends an attempt on nothing.
+        var found: SystemDialog?
+        for (index, dialog) in nodes.enumerated()
+        where systemDialogTypes.contains(dialog.type ?? "") {
+            var buttons: [SystemDialog.Button] = []
+            var inDialog = 0
+            var texts: [String] = []
+            for node in nodes[(index + 1)...] {
+                // The dialog's own subtree, and nothing past it: a flat snapshot
+                // lists a subtree as the run of nodes deeper than its root.
+                guard node.depth > dialog.depth else { break }
+                if let label = node.label?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
+                   node.type == "StaticText" {
+                    texts.append(label)
+                }
+                guard node.type == "Button" else { continue }
+                inDialog += 1
+                guard node.enabled != false else { continue }
+                guard let label = node.label?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty else { continue }
+                guard let frame = node.frame, frame.count == 4, frame[2] >= 10, frame[3] >= 10 else { continue }
+                guard onScreen(frame) else { continue }
+                buttons.append(SystemDialog.Button(
+                    label: label,
+                    x: Double(frame[0]) + Double(frame[2]) / 2,
+                    y: Double(frame[1]) + Double(frame[3]) / 2
+                ))
+            }
+            guard !buttons.isEmpty else { continue }
+            let message = dialog.label?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+                ?? texts.first
+                ?? ExploreController.unnamedScreenDescription
+            found = SystemDialog(
+                message: message,
+                buttons: buttons,
+                buttonsInDialog: inDialog,
+                answer: dialogAnswer(among: buttons, inDialog: inDialog)
+            )
+        }
+        return found
+    }
+
+    /// Which button of a system dialog to tap.
+    ///
+    /// One button is not a choice — an "OK" over an error grants nothing and
+    /// tapping it is the only way back to the app, so it is tapped. With two or
+    /// more, only a word that reads as a refusal is tapped; anything else is
+    /// left alone deliberately, because the button beside it is the one that
+    /// says yes to something on the user's behalf.
+    ///
+    /// `inDialog` is how many buttons the dialog holds, readable or not, and the
+    /// one-button shortcut asks for it rather than for `buttons.count`: a dialog
+    /// read while it was still being presented has one button laid out and one at
+    /// zero size, and «the only button there is» would then have pressed «Allow».
+    static func dialogAnswer(among buttons: [SystemDialog.Button], inDialog: Int) -> SystemDialog.Button? {
+        if buttons.count == 1, inDialog == 1 { return buttons[0] }
+        for words in dialogRefusals {
+            if let match = buttons.first(where: { button in
+                let text = normalizedButtonLabel(button.label)
+                return words.contains { text.contains($0) }
+            }) {
+                return match
+            }
+        }
+        return nil
+    }
+
+    /// A button's words, comparable: lowercased, and with the typographic
+    /// apostrophe iOS actually ships («Don’t Allow») folded onto the plain one
+    /// a vocabulary is written with.
+    static func normalizedButtonLabel(_ label: String) -> String {
+        label
+            .replacingOccurrences(of: "\u{2019}", with: "'")
+            .replacingOccurrences(of: "\u{2018}", with: "'")
+            .lowercased()
     }
 
     /// Navigation-bar text: below the status bar (whose clock and battery
@@ -1479,13 +1721,25 @@ public final class ExploreController: @unchecked Sendable {
     /// asked by the map over the same node — still showed untried taps on that
     /// card. Two answers to one question is a bug wherever they differ, so
     /// there is one, and it is the one the map shows.
-    static func nodesWithUntried(states: [String: ScreenState], nodes: [ExploreScreenNode]) -> Set<String> {
-        var result = Set(nodes.filter(ExploreEngine.hasUntriedActions).map(\.id))
+    /// - Parameter spent: action keys this pass has decided it will not tap —
+    ///   the tab bar's items, once the tab they open has been opened (see
+    ///   `tabsOpened`). Subtracted here and nowhere else: writing them into the
+    ///   store as "tried" would say the crawl tapped what it skipped, and the
+    ///   card on the canvas prints that number. A screen whose only work left
+    ///   is a tab already opened has no work left *for this pass*, and the
+    ///   frontier has to agree, or every screen carrying the bar keeps calling
+    ///   the crawl back to it.
+    static func nodesWithUntried(
+        states: [String: ScreenState],
+        nodes: [ExploreScreenNode],
+        spent: Set<String> = []
+    ) -> Set<String> {
+        var result = Set(nodes.filter { ExploreEngine.hasUntriedActions($0, spent: spent) }.map(\.id))
         // A key tried in another state of the same screen is tried as far as the
         // store is concerned, and untried in the state in hand — where the crawl
         // can still act on it. That is work left, so it counts.
         for state in states.values
-        where state.actions.contains(where: { !state.triedKeys.contains($0.key) }) {
+        where state.actions.contains(where: { !state.triedKeys.contains($0.key) && !spent.contains($0.key) }) {
             result.insert(state.nodeId)
         }
         return result
@@ -1583,6 +1837,17 @@ public final class ExploreController: @unchecked Sendable {
     /// be could not (one button in two states counted twice in the total and
     /// once among the tried, and the total could even end up below the tried
     /// count).
+    /// Records which of a screen's catalogued taps are a tab bar's items — see
+    /// `ExploreScreenNode.tabActionKeys`. Merged, never replaced: a state of the
+    /// screen that happens to hide the bar does not unlearn it.
+    static func catalogueTabs(_ actions: [ExploreEngine.Action], on node: inout ExploreScreenNode) {
+        let tabs = actions.filter(\.isTab).map(\.key)
+        guard !tabs.isEmpty else { return }
+        var known = Set(node.tabActionKeys ?? [])
+        known.formUnion(tabs)
+        node.tabActionKeys = known.sorted()
+    }
+
     static func catalogue(_ keys: [String], on node: inout ExploreScreenNode) {
         var known = Set(node.actionKeys ?? [])
         // A store from before the keys were kept knows only its old total; the
@@ -1615,6 +1880,17 @@ public final class ExploreController: @unchecked Sendable {
     /// screen into the hub it landed on stopped being drawn.
     static func settledDepth(recorded: Int, reached: Int, isLanding: Bool) -> Int {
         isLanding ? recorded : min(recorded, reached)
+    }
+
+    /// What tells one tab bar item from another across screens — the tab's own
+    /// identifier, else the words on it. Nil for a tab carrying neither: two
+    /// such tabs cannot be told apart, and refusing to tap either would lose
+    /// real doors, so those keep being tapped wherever they are met. The same
+    /// identity `ExploreGrouping.tabRoots` groups a tab's landings by, so the
+    /// tap the crawl spends and the root the map draws mean the same thing.
+    static func tabIdentity(of action: ExploreEngine.Action) -> String? {
+        guard action.isTab else { return nil }
+        return action.targetId?.nilIfEmpty ?? action.targetLabel?.nilIfEmpty
     }
 
     static func markTried(_ key: String, on node: inout ExploreScreenNode, legacyTriedCount: Int = 0) {
@@ -1688,6 +1964,12 @@ public final class ExploreController: @unchecked Sendable {
         /// the run reaches gets one fresh shot, so the store's pictures track
         /// the app as it is now.
         var refreshedShots: Set<String> = []
+        /// Tab bar items this *pass* has already opened, by `tabIdentity`, and
+        /// the action keys skipped because of them. Both per pass and neither in
+        /// the store: see `untriedAction` for why a pass is the right unit, and
+        /// `nodesWithUntried(spent:)` for how the frontier is told.
+        var tabsOpened: Set<String> = []
+        var spentTabKeys: Set<String> = []
         /// The names the launched app may present as its accessibility root.
         /// Seeded from the installed bundle, because the first snapshot cannot
         /// be trusted to vouch for itself: a launch that silently failed
@@ -1715,6 +1997,127 @@ public final class ExploreController: @unchecked Sendable {
             }
             return match.isApp
         }
+        /// How many system dialogs one pass answers before it gives up and
+        /// relaunches. An app that asks for three permissions in a row is
+        /// ordinary; a dialog that comes back after every answer is a loop, and
+        /// the pass has to stop being the thing that spins in it.
+        let maxDialogsPerPass = 4
+        /// And a ceiling over the whole run, because answering costs seconds of
+        /// settling and no steps at all: an app that raises a dialog after every
+        /// tap would otherwise spend the whole clock without the step budget
+        /// noticing.
+        let maxDialogsPerRun = 12
+        /// Answered this pass, and the last one seen — the latter so a pass that
+        /// could not get past a dialog says which dialog it was instead of
+        /// «системный экран без названия». Both reset per pass: a dialog answered
+        /// two passes ago says nothing about this one.
+        var dialogsAnswered = 0
+        var dialogsAnsweredInRun = 0
+        var lastSystemDialog: ExploreEngine.SystemDialog?
+        /// How many times each dialog was answered this pass, by signature.
+        /// Twice, not once: `axe` drops a call now and then (see `AxeClient`),
+        /// and a tap that never left the machine looks exactly like a dialog
+        /// that ignored it. The third sighting of the same dialog is the loop,
+        /// and there the pass stops.
+        var dialogAttempts: [String: Int] = [:]
+        let maxAttemptsPerDialog = 2
+
+        /// Answers the system dialogs standing over the app and returns the
+        /// screen that was underneath, or nil when the way back to the app is
+        /// not a dialog this can answer.
+        ///
+        /// Relaunching cannot do this job: iOS holds a permission alert over
+        /// the app across a relaunch, so the pass that met one met it again on
+        /// every following pass and the run ended — with a map on a later pass,
+        /// with nothing at all on the first. Answering is also not a step: no
+        /// screen of the app is reached by it, and it must not spend the step
+        /// budget the app's own buttons are metered by.
+        /// What came of trying to get past whatever iOS put in front of the app.
+        enum PastDialogs {
+            /// The app is in front again, and this is its screen.
+            case app([AccessibilityFlatNode])
+            /// A dialog is still standing, and the message about it is already
+            /// published — a caller that adds its own would overwrite the true
+            /// reason with a guess («тап увёл из приложения» never happened).
+            case blocked
+            /// Nothing in front of us is a dialog. Whatever it is, this cannot
+            /// help, and the caller's own explanation is the right one.
+            case notADialog
+        }
+
+        func pastSystemDialogs(_ snapshot: [AccessibilityFlatNode]) async throws -> PastDialogs {
+            var current = snapshot
+            var looks = 0
+            while !Task.isCancelled, !budgetsExhausted() {
+                guard let dialog = ExploreEngine.systemDialog(in: current, expectedApp: expectedApp) else {
+                    // Nothing there now. Whatever a previous round of this pass
+                    // met, it is not what is in the way — so it must not be what
+                    // the closing message blames.
+                    lastSystemDialog = nil
+                    return .notADialog
+                }
+                lastSystemDialog = dialog
+                // Presented, not yet laid out: its other button is still at zero
+                // size, and answering now is how «the only button» becomes
+                // «Allow». Looking again costs a read and is bounded.
+                if !dialog.isLaidOut, looks < 3 {
+                    looks += 1
+                    try await Task.sleep(for: .milliseconds(400))
+                    current = await unsettledSnapshot() ?? current
+                    continue
+                }
+                let attempts = dialogAttempts[dialog.signature] ?? 0
+                guard attempts < maxAttemptsPerDialog else {
+                    publish("Системный алерт не закрывается — перезапускаю…")
+                    return .blocked
+                }
+                guard dialogsAnswered < maxDialogsPerPass, dialogsAnsweredInRun < maxDialogsPerRun else {
+                    publish("Системные алерты не кончаются — перезапускаю…")
+                    return .blocked
+                }
+                guard let answer = dialog.answer else {
+                    let buttons = dialog.buttons.map { "«\($0.label)»" }.joined(separator: ", ")
+                    publish("Системный алерт \(ExploreEngine.displayTitle(dialog.message)): не знаю, какая из кнопок \(buttons) отказывает")
+                    return .blocked
+                }
+                publish("Системный алерт «\(ExploreEngine.displayTitle(dialog.message))» — жму «\(answer.label)»")
+                do {
+                    _ = try await SimulatorInputClient.tap(
+                        deviceUDID: configuration.device.udid,
+                        x: answer.x,
+                        y: answer.y
+                    )
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    // The tap never left the machine. Saying so beats a silent
+                    // second round that reads as «the dialog ignored us» — and
+                    // nothing is counted, because nothing was pressed.
+                    publish("Не удалось нажать «\(answer.label)»: \(error.localizedDescription)")
+                    return .blocked
+                }
+                // Counted only now: a burnt attempt over a tap that never
+                // happened is how two dropped axe calls end a pass, and how the
+                // closing note claims dialogs it never answered.
+                dialogAttempts[dialog.signature] = attempts + 1
+                dialogsAnswered += 1
+                dialogsAnsweredInRun += 1
+                // The next dialog of a chain can stand over a screen with no
+                // identifiers of its own, and then nothing settles — the same
+                // reason the callers reach for an unsettled read before calling
+                // this at all.
+                var after = try await settledSnapshot(stableReads: 4, deadline: budgets.deadline)
+                if after == nil { after = await unsettledSnapshot() }
+                guard let after else { return .blocked }
+                current = after
+                if isExpectedApp(current) {
+                    lastSystemDialog = nil
+                    return .app(current)
+                }
+            }
+            return .blocked
+        }
+
         // One scan of the checkout per run: visible strings on every screen
         // reverse-map to the localization keys that mint them.
         let localization = configuration.projectRoot.map(LocalizationIndex.build) ?? .empty
@@ -1816,6 +2219,7 @@ public final class ExploreController: @unchecked Sendable {
                     nodes[index].states = (nodes[index].states ?? 1) + 1
                 }
                 catalogue(actions.map(\.key), on: index)
+                catalogueTabs(actions, on: index)
                 nodes[index].visits += 1
                 nodes[index].depth = settled(nodes[index].depth)
                 if isEntry { nodes[index].entryPoint = true }
@@ -1852,6 +2256,9 @@ public final class ExploreController: @unchecked Sendable {
                 localizationKeys: localizationKeys.isEmpty ? nil : localizationKeys,
                 entryPoint: isEntry ? true : nil
             ))
+            if actions.contains(where: \.isTab) {
+                Self.catalogueTabs(actions, on: &nodes[nodes.count - 1])
+            }
             nodeIndex[fingerprint] = nodes.count - 1
             nodeIndexByKey[key] = nodes.count - 1
             return fingerprint
@@ -1870,6 +2277,12 @@ public final class ExploreController: @unchecked Sendable {
             let key = "\(fromId)→\(toId)→\(action.kind)|\(action.targetId ?? action.targetLabel ?? "")"
             if let index = edgeIndex[key] {
                 edges[index].count += 1
+                // A transition the store already holds can still learn what it
+                // is: a map recorded before tabs were told apart carries this
+                // very hop without the mark, and dropping the mark here left it
+                // unmarked for ever — no tab root, no tab name on the card, on
+                // every map that existed before this could see one.
+                if action.tab == true { edges[index].action.tab = true }
                 return
             }
             edges.append(ExploreTransitionEdge(id: "e-\(edges.count + 1)", from: fromId, to: toId, action: action, count: 1))
@@ -1878,6 +2291,10 @@ public final class ExploreController: @unchecked Sendable {
 
         func catalogue(_ keys: [String], on index: Int) {
             Self.catalogue(keys, on: &nodes[index])
+        }
+
+        func catalogueTabs(_ actions: [ExploreEngine.Action], on index: Int) {
+            Self.catalogueTabs(actions, on: &nodes[index])
         }
 
         func markTried(_ fingerprint: String, key: String) {
@@ -1891,9 +2308,46 @@ public final class ExploreController: @unchecked Sendable {
 
         func untriedAction(on fingerprint: String) -> ExploreEngine.Action? {
             guard let state = screens[fingerprint] else { return nil }
+            // A tab this pass already opened is spent for this pass. The bar is
+            // on every screen and every tap on one lands back at that tab's
+            // root, so the frontier handed out five teleports per screen and
+            // the crawl walked back down for each: 55 of 122 taps of a real run
+            // went nowhere new. One tap per tab per pass is what finds the tab's
+            // root — and per *pass*, not per run, because a pass always starts
+            // at a launch screen, which is where a tab's landing is worth
+            // recording (`ExploreGrouping.tabRoots` ranks the landings of one
+            // tab and keeps the shallowest; one landing a run leaves it nothing
+            // to rank).
+            //
+            // Skipped, never written down as tried: the store would then say
+            // the crawl tapped what it declined to tap, and the canvas prints
+            // that number on the card. `nodesWithUntried(spent:)` is where the
+            // frontier is told instead — and it is told about every spent tab of
+            // the screen at once, before anything is chosen, because a tab found
+            // one at a time (behind an untried button) would stay unspent, keep
+            // the screen on the frontier, and buy it a descent that arrives to
+            // find nothing to do.
+            for action in state.actions where !state.triedKeys.contains(action.key) {
+                // Only a tab that carries an identifier goes into the shared set.
+                // A key is `id ?? "label@type"`, and the shared set is the first
+                // thing in this crawl to compare keys *across* screens: a tab
+                // known only by the word on it («Ещё@Button») has the same key as
+                // an ordinary «Ещё» button three screens away, and spending one
+                // would refuse to tap the other and take its screen off the
+                // frontier. An identifier a developer chose does not collide.
+                guard let tab = Self.tabIdentity(of: action), tabsOpened.contains(tab) else { continue }
+                if action.targetId?.nilIfEmpty != nil { spentTabKeys.insert(action.key) }
+            }
             // Non-back actions first: back closes the screen we are mining.
-            return state.actions.first { !$0.isBack && !state.triedKeys.contains($0.key) }
-                ?? state.actions.first { $0.isBack && !state.triedKeys.contains($0.key) }
+            func available(_ action: ExploreEngine.Action) -> Bool {
+                guard !state.triedKeys.contains(action.key) else { return false }
+                // The nameless tab is skipped here rather than through the shared
+                // set — see above.
+                if let tab = Self.tabIdentity(of: action), tabsOpened.contains(tab) { return false }
+                return !spentTabKeys.contains(action.key)
+            }
+            return state.actions.first { !$0.isBack && available($0) }
+                ?? state.actions.first { $0.isBack && available($0) }
         }
 
         /// When the current screen is exhausted, a tried action can still be
@@ -1918,11 +2372,17 @@ public final class ExploreController: @unchecked Sendable {
         /// finished the moment its start screen was exhausted, while every
         /// screen one tap deeper still had most of its actions untried.
         func nodesWithUntried() -> Set<String> {
-            Self.nodesWithUntried(states: screens, nodes: nodes)
+            Self.nodesWithUntried(states: screens, nodes: nodes, spent: spentTabKeys)
         }
 
+        /// Whether the *map* still has work, ignoring what this pass decided to
+        /// skip. A tab spent inside a pass is re-armed by the next one, so
+        /// counting it as finished let a pass that stumbled right after a tab tap
+        /// end the whole run with «Все доступные действия испробованы» over a map
+        /// missing that tab's subtree. Saving steps inside a pass may not become
+        /// a verdict about the run.
         func anyUntriedRemains() -> Bool {
-            !nodesWithUntried().isEmpty
+            !Self.nodesWithUntried(states: screens, nodes: nodes).isEmpty
         }
 
         /// A close/back control to re-tap on a screen that has nothing untried
@@ -1957,6 +2417,14 @@ public final class ExploreController: @unchecked Sendable {
             passes: while !Task.isCancelled, !budgetsExhausted(), relaunches < budgets.maxRelaunches {
                 if relaunches > 0, !anyUntriedRemains() { break }
                 relaunches += 1
+                dialogsAnswered = 0
+                lastSystemDialog = nil
+                dialogAttempts.removeAll()
+                // Every pass meets the tab bar from its own launch screen, and
+                // that is where a tab's landing is worth recording — see
+                // `tabsOpened`.
+                tabsOpened.removeAll()
+                spentTabKeys.removeAll()
                 publish("Запуск \(relaunches): жду стабилизации экрана…")
                 // Auto-login profiles (fast login, auto-passcode) can spend
                 // most of a minute before the first identified screen shows
@@ -1971,9 +2439,18 @@ public final class ExploreController: @unchecked Sendable {
                     // the app is not there after all, the launch below runs.
                     attachToCurrentScreen = false
                     publish("Продолжаю с текущего экрана: жду стабилизации…")
-                    if let settled = try await settledSnapshot(stableReads: 4, deadline: budgets.deadline),
-                       isExpectedApp(settled) {
-                        launched = settled
+                    // Someone staged this session by hand and iOS put a dialog
+                    // over it: answering keeps their staging, launching throws it
+                    // away. A dialog over a screen with no identifiers settles
+                    // into nothing, so the unsettled read stands in.
+                    var staged = try await settledSnapshot(stableReads: 4, deadline: budgets.deadline)
+                    if staged == nil { staged = await unsettledSnapshot() }
+                    if let current = staged, !isExpectedApp(current),
+                       case let .app(past) = try await pastSystemDialogs(current) {
+                        staged = past
+                    }
+                    if let staged, isExpectedApp(staged) {
+                        launched = staged
                     } else {
                         publish("На экране не \(app) — запускаю приложение…")
                     }
@@ -2002,7 +2479,20 @@ public final class ExploreController: @unchecked Sendable {
                         launchError = error.localizedDescription
                         publish("Запуск \(relaunches) не удался, пробую снова…")
                     }
-                    let settled = try await settledSnapshot(stableReads: 8, deadline: budgets.deadline)
+                    var settled = try await settledSnapshot(stableReads: 8, deadline: budgets.deadline)
+                    // A permission alert is not a failed launch — the app is up,
+                    // something else is in front of it — so it does not cost
+                    // this pass one of its three launch attempts. A dialog whose
+                    // own nodes carry no identifiers can leave nothing settled at
+                    // all, and then the unsettled read is the only way to see it.
+                    if settled == nil, let raw = await unsettledSnapshot(),
+                       ExploreEngine.systemDialog(in: raw, expectedApp: expectedApp) != nil {
+                        settled = raw
+                    }
+                    if let current = settled, !isExpectedApp(current),
+                       case let .app(past) = try await pastSystemDialogs(current) {
+                        settled = past
+                    }
                     if let settled, isExpectedApp(settled) {
                         launched = settled
                     }
@@ -2011,6 +2501,17 @@ public final class ExploreController: @unchecked Sendable {
                     let failure: String
                     if let launchError {
                         failure = "Не удалось запустить \(app): \(launchError)"
+                    } else if let dialog = lastSystemDialog {
+                        // What was actually in front of us, quoted: «системный
+                        // экран без названия» sent a reader looking for a bug in
+                        // the app, when the answer was a permission dialog and
+                        // one `simctl privacy` away.
+                        let buttons = dialog.buttons.map { "«\($0.label)»" }.joined(separator: ", ")
+                        failure = """
+                            После запуска \(app) поверх него системный алерт \
+                            «\(ExploreEngine.displayTitle(dialog.message))» \
+                            с кнопками \(buttons) — закрыть его не удалось.
+                            """
                     } else if let lastSettledLabel, !expectedApp.isEmpty {
                         // The screen did settle — on something that is not the
                         // app. Naming both sides is the difference between a
@@ -2061,7 +2562,7 @@ public final class ExploreController: @unchecked Sendable {
                 /// its whole relaunch budget re-tapping it.
                 var escapeSteps = 0
 
-                while !Task.isCancelled, !budgetsExhausted() {
+                walk: while !Task.isCancelled, !budgetsExhausted() {
                     let fresh = untriedAction(on: current)
                     // One BFS per step: the descent is asked for once and the
                     // answer reused, both to decide whether an escape is needed
@@ -2098,26 +2599,53 @@ public final class ExploreController: @unchecked Sendable {
                         publish("Шаг \(steps): \(intent)tap «\(described)»")
                         _ = try? await SimulatorInputClient.tap(deviceUDID: configuration.device.udid, x: action.x, y: action.y)
                     }
-                    guard let after = try await settledSnapshot() else {
-                        // A webview, or a native screen carrying no identifiers
-                        // at all, is invisible to the snapshot reader — and
-                        // whatever this one is, we no longer know what is in
-                        // front of us. Going back to the top of the loop kept
-                        // tapping the catalog of the screen we just left, blind,
-                        // by its coordinates, with the denylist filtering a
-                        // snapshot nobody is looking at. Relaunching is the
-                        // honest way out; the tap that got us here is already
-                        // marked tried, so the next pass walks past it.
-                        publish("Экран не распознан — перезапускаю…")
-                        break
+                    // A webview, or a native screen carrying no identifiers at
+                    // all, is invisible to the snapshot reader — and whatever
+                    // this one is, we no longer know what is in front of us.
+                    // Going back to the top of the loop kept tapping the catalog
+                    // of the screen we just left, blind, by its coordinates, with
+                    // the denylist filtering a snapshot nobody is looking at.
+                    // Relaunching is the honest way out; the tap that got us here
+                    // is already marked tried, so the next pass walks past it.
+                    //
+                    // Unless what is in front of us is a dialog carrying no
+                    // identifiers of its own — iOS writes none, so a permission
+                    // alert over a screen with none either reads as «nothing
+                    // settled» — and then there is something to press rather than
+                    // nothing to see.
+                    // A tap that made the app ask for a permission did not leave
+                    // the app: the dialog belongs to iOS, and the screen under it
+                    // is still the one the crawl is mapping. Answered here, so
+                    // what `record` sees below is the app's screen and never the
+                    // dialog. A dialog whose own nodes carry no identifiers — iOS
+                    // writes none — settles into nothing at all, so the unsettled
+                    // read is the only way to see that one.
+                    var screen: [AccessibilityFlatNode]
+                    if let settled = try await settledSnapshot() {
+                        screen = settled
+                    } else if let raw = await unsettledSnapshot(),
+                              case let .app(past) = try await pastSystemDialogs(raw) {
+                        screen = past
+                    } else {
+                        // Nothing settled and no dialog to answer: the message
+                        // about a dialog that blocked us, if there was one, is
+                        // already published — see `PastDialogs.blocked`.
+                        if lastSystemDialog == nil { publish("Экран не распознан — перезапускаю…") }
+                        break walk
                     }
-                    if !isExpectedApp(after) {
+                    if !isExpectedApp(screen), case let .app(past) = try await pastSystemDialogs(screen) {
+                        screen = past
+                    }
+                    if !isExpectedApp(screen) {
                         // The tap left the app (switcher, external link, crash):
                         // SpringBoard is not part of the map — relaunch instead.
-                        publish("Тап увёл из приложения — перезапускаю…")
-                        break
+                        // Unless a dialog is what stopped us, which said so
+                        // itself: overwriting that with «тап увёл из приложения»
+                        // blames the app for what iOS did.
+                        if lastSystemDialog == nil { publish("Тап увёл из приложения — перезапускаю…") }
+                        break walk
                     }
-                    let next = await record(after, depth: (screens[current]?.depth ?? 0) + 1)
+                    let next = await record(screen, depth: (screens[current]?.depth ?? 0) + 1)
                     if next != current {
                         // The map only draws forward transitions. A retreat is
                         // either a back-looking tap or any tap that lands on
@@ -2128,18 +2656,35 @@ public final class ExploreController: @unchecked Sendable {
                         // a return.
                         let currentNode = screens[current]?.nodeId
                         let nextNode = screens[next]?.nodeId
-                        let isReturn = action.isBack
-                            || (currentNode != nil && arrivedFrom[currentNode!] == nextNode)
+                        // A tab is a teleport, not a retreat. Every screen opened
+                        // from the home tab has the home screen as the one it was
+                        // arrived from, so the return rule read a tap on the home
+                        // tab as coming back and dropped the transition — and with
+                        // it the only record that this screen is what that tab
+                        // opens. The drawn map loses nothing: a landing is an
+                        // opening, and no arrow into an opening is drawn anyway.
+                        let isReturn = !action.isTab
+                            && (action.isBack
+                                || (currentNode != nil && arrivedFrom[currentNode!] == nextNode))
                         if !isReturn {
                             recordEdge(from: current, to: next, action: ExploreTransitionAction(
                                 kind: action.isScroll ? "scroll" : "tap",
                                 targetId: action.targetId,
-                                targetLabel: action.targetLabel
+                                targetLabel: action.targetLabel,
+                                tab: action.isTab ? true : nil
                             ))
-                            if let currentNode, let nextNode, currentNode != nextNode,
+                            // Not for a tab: «arrived from» is what tells a
+                            // retreat from a descent, and a teleport is neither.
+                            if !action.isTab, let currentNode, let nextNode, currentNode != nextNode,
                                arrivedFrom[nextNode] == nil {
                                 arrivedFrom[nextNode] = currentNode
                             }
+                            // The tab counts as opened now that it is known where
+                            // it opens. Marked on the attempt, a tap that never
+                            // left the machine — axe drops one now and then — spent
+                            // the tab for the pass and took its subtree off the
+                            // map while the run reported everything tried.
+                            if let tab = Self.tabIdentity(of: action) { tabsOpened.insert(tab) }
                         }
                         current = next
                         publish("Открыт экран: \(nodeTitle(nodes, screens, current)) (\(nodes.count) всего)")
@@ -2156,7 +2701,7 @@ public final class ExploreController: @unchecked Sendable {
                             // The same per-state cap as at catalog time, with
                             // headroom for what only scrolling could show.
                             let room = ExploreEngine.maxActionsPerState + 8 - state.actions.count
-                            let revealed = ExploreEngine.actions(from: after)
+                            let revealed = ExploreEngine.actions(from: screen)
                                 .filter { !known.contains($0.key) && !$0.isScroll }
                                 .prefix(max(0, room))
                             if !revealed.isEmpty {
@@ -2164,6 +2709,7 @@ public final class ExploreController: @unchecked Sendable {
                                 screens[current] = state
                                 if let index = nodeIndex[current] {
                                     catalogue(revealed.map(\.key), on: index)
+                                    catalogueTabs(Array(revealed), on: index)
                                 }
                             }
                         }
@@ -2241,7 +2787,17 @@ public final class ExploreController: @unchecked Sendable {
                 ExploreEngine.counted(drawn, "переход", "перехода", "переходов"),
                 ExploreEngine.counted(priorSteps + steps, "шаг", "шага", "шагов"),
             ].joined(separator: ", ")
-            finish(error: storeWriteError, note: "Готово: \(tally). \(reason)")
+            // What the crawl said no to on the app's behalf, when it did. A
+            // refused permission can gate the app itself — this run met an
+            // onboarding screen that goes nowhere without location — and then
+            // the small map has a cause that is neither the app nor the crawl,
+            // and a remedy the crawl must not reach for by itself.
+            let refusals = dialogsAnsweredInRun > 0
+                ? " Системных диалогов iOS закрыто: \(dialogsAnsweredInRun)"
+                    + " — разрешения при этом не выдавались, так что если приложение держит"
+                    + " флоу за разрешением, выдайте его заранее (xcrun simctl privacy grant …)."
+                : ""
+            finish(error: storeWriteError, note: "Готово: \(tally). \(reason)\(refusals)")
         } catch is CancellationError {
             publish(nil)
             finish(error: storeWriteError, note: "Остановлено пользователем.")
@@ -2336,6 +2892,23 @@ public final class ExploreController: @unchecked Sendable {
             lastFailure = output.stderrString.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         throw SimToolError("simctl launch \(app) failed: \(lastFailure)")
+    }
+
+    /// One read of the screen, settled or not.
+    ///
+    /// `settledSnapshot` answers nil for a screen whose structure it cannot
+    /// pin down — a webview, or anything carrying no identifiers at all — and
+    /// a system dialog is exactly that when it lands over a screen with none of
+    /// its own: iOS gives its own nodes no identifiers, so the fingerprint comes
+    /// back empty and the settling loop reports nothing. The crawl then
+    /// relaunched into a dialog it never looked at. This is what it looks at:
+    /// unsettled, used for one question only — is a dialog in the way — and
+    /// never recorded as a screen.
+    private func unsettledSnapshot() async -> [AccessibilityFlatNode]? {
+        guard let tree = try? await SimulatorAccessibilityClient.normalizedTree(
+            deviceUDID: configuration.device.udid
+        ) else { return nil }
+        return SimulatorAccessibilityClient.flatten(tree, labeledOnly: false).nodes
     }
 
     /// The snapshot once the screen stops changing AND its data has arrived.

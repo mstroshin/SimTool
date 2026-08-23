@@ -208,6 +208,11 @@ public struct AccessibilityNode: Codable, Equatable, Sendable, Identifiable {
     public var title: String?
     public var role: String?
     public var roleDescription: String?
+    /// The AX subrole — `AXTabButton` for a tab bar's items, and the only
+    /// non-localized way to tell one from any other selectable control. `role`
+    /// says `AXRadioButton` for a tab and for a form's radio group alike, and
+    /// `roleDescription` says "tab" in whatever language the device runs in.
+    public var subrole: String?
     public var type: String?
     public var enabled: Bool?
     public var pid: Int?
@@ -226,6 +231,7 @@ public struct AccessibilityNode: Codable, Equatable, Sendable, Identifiable {
         title: String? = nil,
         role: String? = nil,
         roleDescription: String? = nil,
+        subrole: String? = nil,
         type: String? = nil,
         enabled: Bool? = nil,
         pid: Int? = nil,
@@ -240,6 +246,7 @@ public struct AccessibilityNode: Codable, Equatable, Sendable, Identifiable {
         self.title = title
         self.role = role
         self.roleDescription = roleDescription
+        self.subrole = subrole
         self.type = type
         self.enabled = enabled
         self.pid = pid
@@ -268,6 +275,10 @@ public struct AccessibilityFlatNode: Codable, Equatable, Sendable {
     public var value: String?
     public var title: String?
     public var type: String?
+    /// The AX subrole, carried only when the element has one — `AXTabButton`
+    /// for a tab bar's items. `type` cannot stand in for it: a tab and a form's
+    /// radio button are both `RadioButton` there.
+    public var subrole: String?
     public var depth: Int
     /// [x, y, width, height] in points, rounded.
     public var frame: [Int]?
@@ -280,6 +291,7 @@ public struct AccessibilityFlatNode: Codable, Equatable, Sendable {
         value: String? = nil,
         title: String? = nil,
         type: String? = nil,
+        subrole: String? = nil,
         depth: Int,
         frame: [Int]? = nil,
         enabled: Bool? = nil
@@ -289,6 +301,7 @@ public struct AccessibilityFlatNode: Codable, Equatable, Sendable {
         self.value = value
         self.title = title
         self.type = type
+        self.subrole = subrole
         self.depth = depth
         self.frame = frame
         self.enabled = enabled

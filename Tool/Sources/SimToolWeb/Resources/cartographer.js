@@ -79,22 +79,42 @@ const ROW = 480;
 // a real app holds a dozen screens — one column of those is 6000px tall, and
 // fitView answers that by shrinking every card to a thumbnail.
 const MAX_ROWS = 4;
+// Gap between two distances, on top of the column a card occupies. Without it,
+// a level that spills into a second column looked exactly like the next level
+// along: an app with five tab roots drew four of them and put the fifth where
+// «one tap deeper» belongs. Columns of one level now stand together and the
+// next distance starts visibly further right, so a column still reads as a
+// distance even when a distance needs two of them.
+// Deliberately not a multiple of COLUMN: a gap of exactly one column reads as
+// an empty column of its own — and on a map twelve levels deep it doubles the
+// width, which is the very thing MAX_ROWS exists to prevent (fitView answers a
+// too-wide map by shrinking every card to a thumbnail). 176 is wide enough that
+// the seam between two levels cannot be mistaken for the 152px between two
+// columns of one level, and narrow enough to cost a deep map a third of a
+// column per level.
+//
+// One thing it cannot fix: a `layout.json` written before this gap existed keeps
+// its own coordinates, and cards added afterwards are placed by the formula
+// below — the two systems can overlap. That is true of any dragged card next to
+// an auto-placed one, and the way out is the same: drag it, or delete
+// `layout.json` and let the whole map be laid out again.
+const LEVEL_GAP = 176;
 
 // Screens grouped by distance, each group filling as many columns as it needs.
 // Deterministic — a poll never shuffles cards the user has not dragged: groups
 // go by ascending distance, cards within a group in map order.
 function gridPositions(byLevel) {
   const positions = new Map();
-  let column = 0;
+  let x = 0;
   for (const level of [...byLevel.keys()].sort((a, b) => a - b)) {
     const list = byLevel.get(level);
     list.forEach((node, index) => {
       positions.set(node.id, {
-        x: (column + Math.floor(index / MAX_ROWS)) * COLUMN,
+        x: x + Math.floor(index / MAX_ROWS) * COLUMN,
         y: (index % MAX_ROWS) * ROW,
       });
     });
-    column += Math.max(1, Math.ceil(list.length / MAX_ROWS));
+    x += Math.max(1, Math.ceil(list.length / MAX_ROWS)) * COLUMN + LEVEL_GAP;
   }
   return positions;
 }
@@ -158,6 +178,28 @@ function subtreeLayout(nodes, edges, entryIds) {
 // The node's structural hash is out for that reason and not as bookkeeping:
 // sixty-four hex characters contain every digit, so one character typed into
 // the box would ring every card. Its short id is in — see below.
+// A tab bar's items are in the catalog of every screen that shows the bar, so
+// «invest» rang 8 of 9 cards — the tab in the corner, not the feature. Those
+// keys leave the haystack, for the same reason the screenshot path and the visit
+// count are not in it: a term that matches everything is the same as no term.
+//
+// Which keys those are is a fact the crawl records per screen
+// (`tabActionKeys`), not something to infer from how many cards carry a key: a
+// tab bar sits on the app's roots and on nothing modal, so on a forty-screen map
+// it is on a fifth of them and any share-of-the-map threshold either misses it
+// or eats a widget three screens genuinely share.
+function chromeKeys(node) {
+  return new Set(node.tabActionKeys || []);
+}
+
+// A scroll probe is a gesture the crawl invented, not a control the app has —
+// and `scroll:1` puts a digit in the haystack, so one «1» typed into the box rang
+// every screen that overflows. The same rule as the screenshot path and the visit
+// count: what nobody is looking for does not belong in a search.
+function isGestureKey(key) {
+  return /^scroll:/.test(key);
+}
+
 const SEARCH_GROUPS = [
   { label: "название", pick: (node) => [node.title] },
   { label: "ключ экрана", pick: (node) => [node.key] },
@@ -168,9 +210,19 @@ const SEARCH_GROUPS = [
   // it could not find.
   { label: "идентификатор", pick: (node) => [node.id] },
   { label: "фичи", pick: (node) => node.groups || [] },
+  // The tab that opens this screen, by name. Its own group and not one of the
+  // action ones, so the furniture filter below never touches it: on every other
+  // screen this key is the bar in the corner, on this one it is the way in.
+  { label: "табы", pick: (node) => node.tabKeys || [] },
   { label: "диплинки", pick: (node) => node.deeplinks || [] },
   { label: "локализация", pick: (node) => node.localizationKeys || [] },
-  { label: "действия", pick: (node) => node.triedActionKeys || [] },
+  {
+    label: "действия",
+    pick: (node) => {
+      const chrome = chromeKeys(node);
+      return (node.triedActionKeys || []).filter((key) => !chrome.has(key) && !isGestureKey(key));
+    },
+  },
   // A button nobody has tapped yet is still a button on that screen, and it is
   // what «а куда ведёт эта кнопка» searches for — but it is not an action the
   // crawl took, so it must not be filed under one.
@@ -178,7 +230,8 @@ const SEARCH_GROUPS = [
     label: "кнопки без обхода",
     pick: (node) => {
       const tried = new Set(node.triedActionKeys || []);
-      return (node.actionKeys || []).filter((key) => !tried.has(key));
+      const chrome = chromeKeys(node);
+      return (node.actionKeys || []).filter((key) => !tried.has(key) && !chrome.has(key) && !isGestureKey(key));
     },
   },
 ];
