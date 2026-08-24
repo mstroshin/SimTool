@@ -37,6 +37,19 @@ header > :not(.msg) { white-space: nowrap; }
    of a broken-image icon that reads as a broken map. */
 .shot-missing { display: grid; place-items: center; aspect-ratio: 9 / 19.5; background: #05070d; color: rgba(244,247,251,0.35); font-size: 10px; }
 .details .shot-missing { aspect-ratio: 16 / 9; border-radius: 10px; border: 1px dashed rgba(255,255,255,0.12); font-size: 12px; }
+/* A card of a scrolling screen keeps the phone's shape and holds the rest of
+   the page inside itself, scrollable; expanded, it gives up the shape and shows
+   the page whole. */
+.screen-node .shot.long { aspect-ratio: 9 / 19.5; overflow: hidden; background: #05070d; }
+.screen-node .shot.long:hover { overflow-y: auto; }
+.screen-node .shot.long img { aspect-ratio: auto; }
+.screen-node .shot.long.expanded { aspect-ratio: auto; overflow: visible; }
+.screen-node .shot.long::-webkit-scrollbar { width: 4px; }
+.screen-node .shot.long::-webkit-scrollbar-thumb { background: rgba(125,211,252,0.5); border-radius: 2px; }
+.screen-node .expand { display: block; width: 100%; padding: 4px 0; border: 0; border-top: 1px solid rgba(255,255,255,0.10);
+  background: rgba(125,211,252,0.10); color: #7dd3fc; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; cursor: pointer; }
+.screen-node .expand:hover { background: rgba(125,211,252,0.2); }
+.long-tag { margin-left: 6px; padding: 1px 5px; border-radius: 999px; background: rgba(125,211,252,0.16); color: #7dd3fc; font-size: 9px; }
 .screen-title { padding: 6px 8px 2px; font-size: 11px; font-weight: 600; color: #e8eefb; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .screen-meta { padding: 0 8px 7px; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; color: rgba(244,247,251,0.5); }
 .react-flow__attribution { display: none; }
