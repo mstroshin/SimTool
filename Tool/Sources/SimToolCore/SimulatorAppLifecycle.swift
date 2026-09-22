@@ -892,7 +892,6 @@ public enum SimulatorAppLifecycleClient {
         arguments += [
             "-scheme", selection.identity.scheme,
             "-configuration", selection.identity.configuration,
-            "-sdk", selection.identity.sdk,
             "-destination", "generic/platform=iOS Simulator",
         ]
         if let derivedDataPath, !derivedDataPath.isEmpty {
@@ -920,7 +919,6 @@ public enum SimulatorAppLifecycleClient {
         arguments += [
             "-scheme", selection.identity.scheme,
             "-configuration", selection.identity.configuration,
-            "-sdk", selection.identity.sdk,
             "-destination", "platform=iOS Simulator,id=\(device.udid)",
         ]
         if let derivedDataPath, !derivedDataPath.isEmpty {
