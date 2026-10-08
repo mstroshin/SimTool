@@ -97,6 +97,8 @@ public final class StreamServer: @unchecked Sendable {
     private var screenWidth = 0
     private var screenHeight = 0
     private var started = false
+    private let liveTouchLock = NSLock()
+    private var liveTouches: [ObjectIdentifier: (channel: LiveTouchChannel, events: AsyncStream<LiveTouchEvent>.Continuation)] = [:]
 
     public init(config: StreamServerConfig) {
         self.config = config
@@ -126,6 +128,7 @@ public final class StreamServer: @unchecked Sendable {
     }
 
     public func stop() {
+        closeLiveTouches()
         shutdownTestSessions()
         stopLogCapture()
         frameCapture.stop()
@@ -175,6 +178,12 @@ public final class StreamServer: @unchecked Sendable {
         }
 
         server.POST["/api/v1/input"] = { request in self.handleInput(request) }
+        // The viewer's live finger: down/move/up frames, never answered.
+        server["/api/v1/input/stream"] = websocket(
+            text: { session, text in self.liveTouchChannel(for: session)?.receive(text) },
+            connected: { session in self.openLiveTouchChannel(for: session) },
+            disconnected: { session in self.closeLiveTouchChannel(for: session) }
+        )
         server.POST["/api/v1/input/paste-image"] = { request in self.handlePasteImage(request) }
         server.POST["/api/v1/photos"] = { request in self.handleAddToPhotos(request) }
 
@@ -521,6 +530,47 @@ public final class StreamServer: @unchecked Sendable {
         }
     }
 
+    private func openLiveTouchChannel(for session: WebSocketSession) {
+        let udid = config.device.udid
+        let directInput = directInput
+        let testSessions = testSessions
+        let (events, continuation) = AsyncStream<LiveTouchEvent>.makeStream()
+        // One consumer per viewer keeps its events in order; the helper starts
+        // now so the first touch does not wait for it.
+        Task {
+            try? await directInput.prepare(deviceUDID: udid)
+            for await event in events {
+                await directInput.stream(event, deviceUDID: udid)
+            }
+        }
+        let channel = LiveTouchChannel(
+            emit: { continuation.yield($0) },
+            onDown: { testSessions.noteInput(at: Date()) }
+        )
+        liveTouchLock.withLock { liveTouches[ObjectIdentifier(session)] = (channel, continuation) }
+    }
+
+    private func liveTouchChannel(for session: WebSocketSession) -> LiveTouchChannel? {
+        liveTouchLock.withLock { liveTouches[ObjectIdentifier(session)]?.channel }
+    }
+
+    private func closeLiveTouchChannel(for session: WebSocketSession) {
+        guard let entry = liveTouchLock.withLock({ liveTouches.removeValue(forKey: ObjectIdentifier(session)) }) else { return }
+        entry.channel.disconnect()
+        entry.events.finish()
+    }
+
+    private func closeLiveTouches() {
+        let entries = liveTouchLock.withLock {
+            defer { liveTouches.removeAll() }
+            return Array(liveTouches.values)
+        }
+        for entry in entries {
+            entry.channel.disconnect()
+            entry.events.finish()
+        }
+    }
+
     private func configPayload() -> ServerConfigPayload {
         ServerConfigPayload(
             device: config.device.name,
@@ -862,12 +912,12 @@ public final class StreamServer: @unchecked Sendable {
                       sourceHeight > 0 else {
                     throw SimToolError("Pixel swipe requires sourceWidth and sourceHeight")
                 }
-                try await directInput.swipe(
-                    startXRatio: ratio(startX, in: sourceWidth),
-                    startYRatio: ratio(startY, in: sourceHeight),
-                    endXRatio: ratio(endX, in: sourceWidth),
-                    endYRatio: ratio(endY, in: sourceHeight),
-                    duration: input.duration,
+                let screen = try await directInput.screenSize(deviceUDID: config.device.udid)
+                let from = TouchPoint(x: ratio(startX, in: sourceWidth) * screen.width, y: ratio(startY, in: sourceHeight) * screen.height)
+                let to = TouchPoint(x: ratio(endX, in: sourceWidth) * screen.width, y: ratio(endY, in: sourceHeight) * screen.height)
+                let seconds = max(0.05, input.duration ?? 0.2)
+                try await directInput.perform(
+                    TouchStroke(from: from, to: to, velocity: max(1, from.distance(to: to)) / seconds),
                     deviceUDID: config.device.udid
                 )
                 return ProcessOutput(status: 0)

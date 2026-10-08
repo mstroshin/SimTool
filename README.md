@@ -62,6 +62,15 @@ swift run simtool serve --device <udid-or-name> --port 3200
 Open `http://127.0.0.1:3200` after starting `serve` (the URL is printed on start),
 or pass `--web` to open the browser viewer automatically.
 
+On the viewer's screen the mouse is a finger: it goes down on press, follows the
+pointer and lifts on release, so holding is a long press, holding and moving
+drags (icons, list reordering), and the release decides between a scroll that
+stops where the finger did and a fling. A dot marks the finger at once, ahead of
+the video; a ring around it says it has been held long enough for a long press.
+The wheel or trackpad scrolls by dragging a finger too. Hold Option to add a
+second finger mirrored through the screen center — spreading or circling the
+pointer pinches or rotates — and Option-Shift to move both fingers together.
+
 `serve` runs fully headless: when `--device`, `--host`, or `--port` are omitted
 it falls back to `simulator:` and `server:` from `.simtool/config.yml` (when one
 is discovered, or passed via `--config`), and boots the target simulator via
@@ -640,6 +649,7 @@ GET /stream.avcc
 GET /stream.jpeg
 GET /stream.mjpeg
 POST /api/v1/input
+GET /api/v1/input/stream (WebSocket)
 POST /api/v1/input/paste-image
 POST /api/v1/photos
 GET /api/v1/ax/tree?raw=1&format=flat&labeled=1
@@ -674,5 +684,11 @@ stdout/`print`) into a bounded buffer that clients poll incrementally by cursor;
 `POST /api/v1/input/paste-image` pastes one into the focused field, and
 `POST /api/v1/photos` adds an image or a video to Photos. Both read the type from
 `Content-Type` and an optional percent-encoded `X-SimTool-Filename` header.
+
+`/api/v1/input/stream` is the viewer's live finger: a WebSocket taking one JSON
+frame per touch event, `{"t": "down"|"move"|"up", "x": 0.5, "y": 0.7}` with
+coordinates as fractions of the screen, plus `x2`/`y2` for a second finger.
+Frames are never answered; moves are coalesced, downs and ups never dropped, and
+a finger still down when the socket closes is lifted where it was.
 
 `SimToolClient` exposes these routes as typed async Swift calls.
