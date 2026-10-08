@@ -55,6 +55,12 @@ public struct SimToolClient: Sendable {
         try await input(SimulatorInputPayload(action: "type", text: text))
     }
 
+    /// Pastes through the simulator clipboard, so — unlike `typeText` — any
+    /// Unicode text arrives intact.
+    public func paste(_ text: String) async throws -> CommandResultPayload {
+        try await input(SimulatorInputPayload(action: "paste", text: text))
+    }
+
     public func swipe(startX: Double, startY: Double, endX: Double, endY: Double, duration: Double? = nil) async throws -> CommandResultPayload {
         try await input(SimulatorInputPayload(
             action: "swipe",

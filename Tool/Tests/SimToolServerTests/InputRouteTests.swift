@@ -23,6 +23,24 @@ final class InputRouteTests: XCTestCase {
         XCTAssertTrue(body.contains("Launch requires an app bundle id"), "unexpected error body: \(body)")
     }
 
+    func testPasteActionWithoutTextFailsBeforeTouchingTheSimulator() async throws {
+        let port = try availablePort()
+        let device = SimulatorDevice(udid: "TEST-UDID", name: "iPhone", runtime: "iOS", state: "Booted", isAvailable: true)
+        let server = StreamServer(config: StreamServerConfig(host: "127.0.0.1", port: port, device: device, captureEnabled: false))
+        try server.start()
+        defer { server.stop() }
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/api/v1/input")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = Data(#"{"action": "paste", "text": ""}"#.utf8)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 400)
+        let body = String(decoding: data, as: UTF8.self)
+        XCTAssertTrue(body.contains("Paste input requires text"), "unexpected error body: \(body)")
+    }
+
     private func availablePort() throws -> UInt16 {
         let descriptor = socket(AF_INET, SOCK_STREAM, 0)
         guard descriptor >= 0 else { throw POSIXError(.ENOTSOCK) }

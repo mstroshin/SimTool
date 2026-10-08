@@ -97,6 +97,25 @@ swift run simtool logs tail --app com.example.MyApp --stdout --seconds 4 --json
 swift run simtool network snapshot --seconds 2 --limit 50 --json
 ```
 
+`input type` reaches only characters on a US keyboard. For anything else —
+Cyrillic, accents, emoji, several lines — use `input paste`: it puts the text on
+the simulator clipboard and presses ⌘V in the focused field.
+
+```sh
+swift run simtool input paste "Привет, señor 🎉" --json
+printf 'line one\nline two' | swift run simtool input paste --stdin
+```
+
+Paste grants the foreground app "Paste from Other Apps" (`simctl privacy …
+grant pasteboard`), so iOS does not ask "Allow Paste?" each time; iOS still
+shows its "… pasted from …" banner. It fails when no text field changed and no
+keyboard is up — tap a text field first. In the browser viewer, ⌘V anywhere on
+the page outside its own fields pastes the Mac clipboard into the simulator, and
+so does the 📋 button (it asks the browser for clipboard access). From Xcode 27
+on, the simulator clipboard belongs to CoreDevice and `simctl pbcopy` is
+silently ignored; SimTool writes through `devicectl device pasteboard copy` and
+falls back to `simctl pbcopy` only on older Xcode.
+
 ### Tests and sessions
 
 Declarative YAML tests in `<project>/.simtool/tests/` drive the simulator
@@ -617,5 +636,9 @@ image pixels, and an 800px screenshot is still perfectly legible.
 The `logs/capture` routes drive a continuous capture (OSLog plus optional
 stdout/`print`) into a bounded buffer that clients poll incrementally by cursor;
 `GET /api/v1/logs` remains the one-shot bounded snapshot.
+
+`POST /api/v1/input` takes an `action` — `tap`, `longPress`, `type`, `paste`,
+`swipe`, `button`, `shake`, `terminate`, `launch` — plus that action's fields
+(`text` for `type` and `paste`).
 
 `SimToolClient` exposes these routes as typed async Swift calls.

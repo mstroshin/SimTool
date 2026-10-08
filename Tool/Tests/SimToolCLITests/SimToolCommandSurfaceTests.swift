@@ -40,6 +40,23 @@ final class SimToolCommandSurfaceTests: XCTestCase {
         XCTAssertTrue(json.contains("\"sequence\":1"))
     }
 
+    func testInputPasteTakesTextOrStdinButNotBoth() throws {
+        let names = Input.configuration.subcommands.map { commandName(for: $0) }
+        XCTAssertTrue(names.contains("paste"))
+
+        let inline = try Input.Paste.parse(["Привет, señor 🎉", "--device", "iPhone 16", "--json"])
+        XCTAssertEqual(inline.text, "Привет, señor 🎉")
+        XCTAssertFalse(inline.stdin)
+        XCTAssertTrue(inline.common.json)
+
+        let piped = try Input.Paste.parse(["--stdin"])
+        XCTAssertNil(piped.text)
+        XCTAssertTrue(piped.stdin)
+
+        XCTAssertThrowsError(try Input.Paste.parse([]))
+        XCTAssertThrowsError(try Input.Paste.parse(["text", "--stdin"]))
+    }
+
     func testTopLevelCommandIncludesAppNamespace() {
         let names = SimTool.configuration.subcommands.map { commandName(for: $0) }
         XCTAssertTrue(names.contains("app"))

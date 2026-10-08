@@ -196,6 +196,28 @@ final class SimToolWebTests: XCTestCase {
         XCTAssertFalse(between.contains("<button id="), "Relaunch must directly follow Terminate in the toolbar")
     }
 
+    func testViewerPastesTheMacClipboardIntoTheSimulator() {
+        let html = WebViewer.html()
+
+        // A Paste button follows Relaunch and reads the clipboard on click.
+        XCTAssertTrue(html.contains("id=\"paste\""), "missing Paste button")
+        XCTAssertTrue(html.contains(">📋<"), "Paste button must use the clipboard emoji")
+        guard let relaunchRange = html.range(of: "id=\"relaunch\""),
+              let pasteRange = html.range(of: "id=\"paste\"") else {
+            return XCTFail("toolbar buttons not found")
+        }
+        XCTAssertFalse(html[relaunchRange.upperBound..<pasteRange.lowerBound].contains("<button id="), "Paste must directly follow Relaunch")
+        XCTAssertTrue(html.contains("navigator.clipboard.readText()"), "the button must read the clipboard")
+        XCTAssertTrue(html.contains("clipboard access was denied"), "a refused clipboard read must say so")
+        // ⌘V on the page outside the viewer's own fields goes to the simulator.
+        XCTAssertTrue(html.contains("document.addEventListener(\"paste\""), "missing page-level paste handler")
+        XCTAssertTrue(html.contains("clipboardData.getData(\"text/plain\")"), "paste must take the plain-text flavor")
+        XCTAssertTrue(html.contains("if (isEditableTarget(event.target)) return;"), "the viewer's own fields must keep native paste")
+        XCTAssertTrue(html.contains("action: \"paste\""), "paste must post the paste input action")
+        // Failures carry the server's explanation (e.g. no focused text field), not a bare status line.
+        XCTAssertTrue(html.contains("(await response.json()).error"), "api() must surface the server's error message")
+    }
+
     func testStateHistoryFoldsEmbeddedModelsIntoParent() {
         let html = WebViewer.html()
 

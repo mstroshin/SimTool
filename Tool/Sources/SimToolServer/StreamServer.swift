@@ -798,6 +798,9 @@ public final class StreamServer: @unchecked Sendable {
         case "type", "typetext", "text":
             guard let text = input.text else { throw SimToolError("Type input requires text") }
             return try await SimulatorInputClient.typeText(text, deviceUDID: config.device.udid)
+        case "paste":
+            guard let text = input.text, !text.isEmpty else { throw SimToolError("Paste input requires text") }
+            return try await SimulatorInputClient.paste(text, deviceUDID: config.device.udid)
         case "swipe":
             guard let startX = input.startX,
                   let startY = input.startY,

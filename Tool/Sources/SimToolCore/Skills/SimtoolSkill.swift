@@ -253,7 +253,11 @@ extension AgentSkill {
 
         ### Input · accessibility · logs
         - `simtool input …` — taps and long-presses (by label / a11y-id / coordinates),
-          type, swipe, hardware buttons.
+          type, paste, swipe, hardware buttons. `type` reaches only US-keyboard
+          characters; `paste "<text>"` (or `--stdin`) puts any text — Cyrillic,
+          accents, emoji, several lines — on the simulator clipboard and presses ⌘V in
+          the focused field. It fails when no text field changed and no keyboard is up:
+          tap the field first.
         - `simtool ax …` — read the accessibility tree / find an element.
         - `simtool logs …` — OSLog stream; a `--stdout` mode **relaunches** the app to
           attach its console (useful when the app logs richly to stdout — networking,

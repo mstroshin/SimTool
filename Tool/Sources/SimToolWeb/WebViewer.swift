@@ -24,6 +24,7 @@ public enum WebViewer {
                   <button id="shake" class="icon-btn" type="button" title="Shake">📳</button>
                   <button id="terminate" class="icon-btn" type="button" title="Terminate app">⏹️</button>
                   <button id="relaunch" class="icon-btn" type="button" title="Relaunch app">▶️</button>
+                  <button id="paste" class="icon-btn" type="button" title="Paste the Mac clipboard into the focused field (⌘V)">📋</button>
                   <button id="inspectToggle" class="inspect-toggle" type="button" aria-pressed="false">
                     <span class="dot"></span><span>Inspect</span>
                   </button>
@@ -182,6 +183,7 @@ public enum WebViewer {
     .toolrow { display: flex; align-items: center; gap: 8px; padding: 4px 14px 10px; }
     .icon-btn { appearance: none; width: 30px; height: 30px; display: grid; place-items: center; border: 1px solid rgba(255,255,255,0.14); border-radius: 9px; background: rgba(255,255,255,0.06); color: #cdd6e6; font-size: 14px; cursor: pointer; }
     .icon-btn:hover { background: rgba(255,255,255,0.10); }
+    .icon-btn:disabled { opacity: 0.5; cursor: progress; }
     .inspect-toggle { margin-left: auto; display: flex; align-items: center; gap: 7px; appearance: none; border: 1px solid rgba(255,255,255,0.14); border-radius: 10px; background: rgba(255,255,255,0.06); color: rgba(244,247,251,0.72); padding: 6px 12px; font: 12px ui-sans-serif, system-ui, sans-serif; cursor: pointer; }
     .inspect-toggle:hover { background: rgba(255,255,255,0.10); }
     .inspect-toggle .dot { width: 8px; height: 8px; border-radius: 999px; background: #4b5366; }
@@ -464,6 +466,7 @@ public enum WebViewer {
     const shakeButton = $("shake");
     const terminateButton = $("terminate");
     const relaunchButton = $("relaunch");
+    const pasteButton = $("paste");
     const stage = $("stage");
 
     const inspectToggle = $("inspectToggle");
@@ -652,7 +655,12 @@ public enum WebViewer {
       const headers = new Headers(options.headers || {});
       if (options.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
       const response = await fetch(path, { ...options, headers });
-      if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+      if (!response.ok) {
+        // The server explains failures in {"error": …}; that beats a bare status line.
+        let detail = "";
+        try { detail = (await response.json()).error || ""; } catch (_) {}
+        throw new Error(detail || `${response.status} ${response.statusText}`);
+      }
       return response;
     }
 
@@ -734,6 +742,49 @@ public enum WebViewer {
       } catch (error) {
         setStatus(`relaunch failed: ${error.message}`, "err");
       }
+    }
+
+    // Mac clipboard → simulator: the server puts the text on the simulator's
+    // clipboard and presses ⌘V there, so any text arrives intact (typing
+    // through AXe reaches only US-keyboard characters).
+    let pasteInFlight = false;
+    async function pasteIntoSimulator(text) {
+      if (!text) { setStatus("paste: the clipboard holds no text", "err"); return; }
+      if (pasteInFlight) return;
+      pasteInFlight = true;
+      pasteButton.disabled = true;
+      setStatus("pasting…", "idle");
+      try {
+        const response = await api("/api/v1/input", { method: "POST", body: JSON.stringify({ action: "paste", text }) });
+        const result = await response.json();
+        setStatus(result.stdout || "pasted", "live");
+      } catch (error) {
+        setStatus(`paste failed: ${error.message}`, "err");
+      } finally {
+        pasteInFlight = false;
+        pasteButton.disabled = false;
+      }
+    }
+
+    async function pasteFromClipboard() {
+      if (!navigator.clipboard || !navigator.clipboard.readText) {
+        setStatus("paste: this page cannot read the clipboard — press ⌘V instead", "err");
+        return;
+      }
+      let text;
+      try {
+        text = await navigator.clipboard.readText();
+      } catch (_) {
+        setStatus("paste: clipboard access was denied — press ⌘V instead", "err");
+        return;
+      }
+      pasteIntoSimulator(text);
+    }
+
+    // The viewer's own fields (inspector filter and the like) keep their native paste.
+    function isEditableTarget(target) {
+      const element = target instanceof Element ? target : target && target.parentElement;
+      return !!(element && element.closest("input, textarea, select, [contenteditable]:not([contenteditable='false'])"));
     }
 
     async function downloadScreenshot() {
@@ -2983,6 +3034,14 @@ public enum WebViewer {
     shakeButton.addEventListener("click", pressShake);
     terminateButton.addEventListener("click", pressTerminate);
     relaunchButton.addEventListener("click", pressRelaunch);
+    pasteButton.addEventListener("click", pasteFromClipboard);
+    // ⌘V anywhere on the page outside an editable field pastes into the simulator;
+    // the paste event hands over the text without a clipboard permission prompt.
+    document.addEventListener("paste", (event) => {
+      if (isEditableTarget(event.target)) return;
+      event.preventDefault();
+      pasteIntoSimulator(event.clipboardData ? event.clipboardData.getData("text/plain") : "");
+    });
     axRefreshButton.addEventListener("click", loadAxTree);
     axCopyButton.addEventListener("click", copyAxSelected);
     axMenuCopy.addEventListener("click", () => { copyAxNode(axMenuNode); hideAxMenu(); });

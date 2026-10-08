@@ -57,6 +57,22 @@ final class SimToolClientTests: XCTestCase {
         XCTAssertTrue(result.ok)
     }
 
+    func testPastePostsThePasteActionWithItsText() async throws {
+        let session = makeSession()
+        MockURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/api/v1/input")
+            let body = try JSON.decoder.decode(SimulatorInputPayload.self, from: MockURLProtocol.body(of: request))
+            XCTAssertEqual(body.action, "paste")
+            XCTAssertEqual(body.text, "Привет\nseñor 🎉")
+            let payload = CommandResultPayload(ok: true, stdout: "Pasted 13 characters.", stderr: "")
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, try JSON.data(payload, pretty: false))
+        }
+
+        let client = SimToolClient(baseURL: URL(string: "http://simtool.test")!, session: session)
+        let result = try await client.paste("Привет\nseñor 🎉")
+        XCTAssertEqual(result.stdout, "Pasted 13 characters.")
+    }
+
     func testThrowsClientErrorForErrorPayload() async {
         let session = makeSession()
         MockURLProtocol.handler = { request in

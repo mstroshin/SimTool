@@ -210,7 +210,7 @@ struct ToolCheck: Codable {
 struct Input: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Send input to a simulator.",
-        subcommands: [Tap.self, LongPress.self, TypeText.self, Swipe.self, Button.self]
+        subcommands: [Tap.self, LongPress.self, TypeText.self, Paste.self, Swipe.self, Button.self]
     )
 }
 
@@ -261,7 +261,10 @@ extension Input {
     }
 
     struct TypeText: AsyncParsableCommand {
-        static let configuration = CommandConfiguration(commandName: "type", abstract: "Type text into the focused field.")
+        static let configuration = CommandConfiguration(
+            commandName: "type",
+            abstract: "Type text into the focused field (US-keyboard characters only; `paste` takes any text)."
+        )
 
         @Argument var text: String
         @Option var device: String?
@@ -270,6 +273,45 @@ extension Input {
         func run() async throws {
             let device = try await resolveConfiguredDevice(device)
             let output = try await SimulatorInputClient.typeText(text, deviceUDID: device.udid)
+            try emitCommandResult(output, json: common.json)
+        }
+    }
+
+    struct Paste: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "paste",
+            abstract: "Paste text into the focused field through the simulator clipboard.",
+            discussion: """
+            Unlike `type`, which only reaches US-keyboard characters, any text works: \
+            Cyrillic, accents, emoji, several lines. The text goes onto the simulator \
+            clipboard and ⌘V is pressed; the foreground app is granted "Paste from \
+            Other Apps" so iOS does not ask to allow it. Fails when no text field \
+            changed and no keyboard is up — tap a text field first.
+            """
+        )
+
+        @Argument(help: "Text to paste. Omit it and pass --stdin to read standard input instead.") var text: String?
+        @Flag(help: "Read the text from standard input, exactly as given (printf avoids a trailing newline).") var stdin = false
+        @Option var device: String?
+        @OptionGroup var common: CommonJSON
+
+        func validate() throws {
+            if stdin, text != nil { throw ValidationError("Pass the text as an argument or with --stdin, not both.") }
+            if !stdin, text == nil { throw ValidationError("Pass the text to paste, or --stdin to read it from standard input.") }
+        }
+
+        func run() async throws {
+            let device = try await resolveConfiguredDevice(device)
+            let value: String
+            if stdin {
+                guard let input = String(data: FileHandle.standardInput.readDataToEndOfFile(), encoding: .utf8) else {
+                    throw ValidationError("Standard input is not UTF-8 text.")
+                }
+                value = input
+            } else {
+                value = text ?? ""
+            }
+            let output = try await SimulatorInputClient.paste(value, deviceUDID: device.udid)
             try emitCommandResult(output, json: common.json)
         }
     }
