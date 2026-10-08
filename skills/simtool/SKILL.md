@@ -73,14 +73,22 @@ workspace.
   staging build against a real test backend (`com.example.myapp.beta`). Note
   which configurations compile the debug arguments in at all: they are usually
   gated out of Release, so a Release build silently ignores the whole catalog.
-- **Device**: every command resolves `--device` first, then `simulator:` from
-  `.simtool/config.yml`, then whatever is booted — and **refuses to guess when
-  several simulators are booted and neither was given**. That refusal is
-  deliberate: on a machine running parallel checkouts, guessing means driving
-  another one's simulator, where the taps land elsewhere and the accessibility
-  tree merely looks stale. `simtool app build/launch` boots nothing itself —
-  boot first (`xcrun simctl boot <udid>` / open Simulator.app). List devices:
+- **Device**: every command that drives a simulator resolves `--device` first,
+  then `simulator:` from `.simtool/config.yml`, then whatever is booted — and
+  **refuses to guess when several simulators are booted and neither was
+  given**. That refusal is deliberate: on a machine running parallel checkouts,
+  guessing means driving another one's simulator, where the taps land elsewhere
+  and the accessibility tree merely looks stale. `app build` takes `--device`
+  too, to build for that simulator only (faster); without it, it builds for any
+  simulator. `simtool app build/launch` boots nothing itself — boot first
+  (`xcrun simctl boot <udid>` / open Simulator.app). List devices:
   `simtool devices --json`.
+- **Build settings**: if the project only builds with extra xcodebuild
+  settings (e.g. `MACOSX_DEPLOYMENT_TARGET=15.0` for a macro whose generated
+  project misses it), put them under `build.settings` in `.simtool/config.yml`
+  — every `app build` / `app launch` / `app test` / `run` of that workspace
+  picks them up — or pass `--build-setting KEY=VALUE` per command. Don't run
+  `xcodebuild` by hand to get around a missing setting.
 - **Launch profiles**: name the argv recipes your tests and runs need in
   `profiles:` in `.simtool/config.yml`, and refer to them by name from a test's
   `launch.profile`. Values may interpolate `${VAR}` from the shell, so accounts

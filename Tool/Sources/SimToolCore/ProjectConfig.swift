@@ -11,19 +11,39 @@ public struct ProjectConfig: Codable, Equatable, Sendable {
         public var scheme: String
         public var configuration: String?
         public var derivedDataPath: String?
+        /// Extra xcodebuild build settings (`settings:` mapping) this project
+        /// cannot build without, e.g. a deployment target its generated
+        /// dependencies miss.
+        public var settings: [String: String]
 
         public init(
             workspace: String? = nil,
             project: String? = nil,
             scheme: String,
             configuration: String? = nil,
-            derivedDataPath: String? = nil
+            derivedDataPath: String? = nil,
+            settings: [String: String] = [:]
         ) {
             self.workspace = workspace
             self.project = project
             self.scheme = scheme
             self.configuration = configuration
             self.derivedDataPath = derivedDataPath
+            self.settings = settings
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case workspace, project, scheme, configuration, derivedDataPath, settings
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            workspace = try container.decodeIfPresent(String.self, forKey: .workspace)
+            project = try container.decodeIfPresent(String.self, forKey: .project)
+            scheme = try container.decode(String.self, forKey: .scheme)
+            configuration = try container.decodeIfPresent(String.self, forKey: .configuration)
+            derivedDataPath = try container.decodeIfPresent(String.self, forKey: .derivedDataPath)
+            settings = try container.decodeIfPresent([String: String].self, forKey: .settings) ?? [:]
         }
 
         /// Maps the config build block onto the shared build selection so build
@@ -35,8 +55,20 @@ public struct ProjectConfig: Codable, Equatable, Sendable {
                 projectPath: project,
                 scheme: scheme,
                 configuration: configuration,
-                derivedDataPath: derivedDataPath
+                derivedDataPath: derivedDataPath,
+                buildSettings: settings
             )
+        }
+
+        /// The configured settings when `selection` builds this block's
+        /// workspace or project, else none. Lets `simtool app build` of the
+        /// configured app pick them up without repeating them as flags, while
+        /// a build of some other project stays untouched.
+        public func settings(for selection: SimulatorAppBuildSelection) -> [String: String] {
+            guard !settings.isEmpty, let configured = try? self.selection() else { return [:] }
+            let sameSource = configured.identity.workspacePath == selection.identity.workspacePath
+                && configured.identity.projectPath == selection.identity.projectPath
+            return sameSource ? settings : [:]
         }
     }
 
@@ -255,6 +287,8 @@ public enum ProjectConfigTemplate {
           scheme: \(scheme)\(schemeComment)
           configuration: Debug            # Debug | Beta | Release
           # derivedDataPath: ./DerivedData  # optional; unset → SimTool-managed build cache
+          # settings:                     # optional; xcodebuild build settings the project
+          #   MACOSX_DEPLOYMENT_TARGET: "15.0"  # cannot build without, on every build of it
 
         # deeplinks:                      # optional; open by name with `simtool open <name>`
         #   - name: Home
@@ -370,7 +404,8 @@ public enum ProjectConfigLoader {
             project: resolvePath(rawBuild.project, relativeTo: projectRoot),
             scheme: scheme,
             configuration: rawBuild.configuration?.trimmed,
-            derivedDataPath: resolvePath(rawBuild.derivedDataPath, relativeTo: projectRoot)
+            derivedDataPath: resolvePath(rawBuild.derivedDataPath, relativeTo: projectRoot),
+            settings: (rawBuild.settings ?? [:]).mapValues(\.text)
         )
         // Reuse the shared build-selection validation (workspace XOR project).
         _ = try build.selection()
@@ -456,6 +491,9 @@ struct RawProjectConfig: Decodable {
         var scheme: String?
         var configuration: String?
         var derivedDataPath: String?
+        /// Build setting values are text: `15.0` must stay `15.0`, `YES` must
+        /// not become a Bool.
+        var settings: [String: YAMLScalarText]?
     }
 
     struct RawServer: Decodable {

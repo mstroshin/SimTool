@@ -45,6 +45,69 @@ final class SimulatorAppLifecycleTests: XCTestCase {
         ])
     }
 
+    func testBuildSettingsAndADeviceReachTheXcodebuildCommandLine() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let workspace = root.appendingPathComponent("Example.xcworkspace", isDirectory: true)
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+
+        var selection = try SimulatorAppBuildSelection.validated(
+            workspacePath: workspace.path,
+            projectPath: nil,
+            scheme: "Example",
+            buildSettings: ["SWIFT_ACTIVE_COMPILATION_CONDITIONS": "DEBUG FLAG", "MACOSX_DEPLOYMENT_TARGET": "15.0"]
+        )
+        selection.deviceUDID = "DEVICE"
+
+        // Settings follow the options, sorted by key; the device narrows the destination.
+        XCTAssertEqual(SimulatorAppLifecycleClient.xcodebuildArguments(selection: selection, derivedDataPath: nil), [
+            "xcodebuild",
+            "-workspace", workspace.path,
+            "-scheme", "Example",
+            "-configuration", "Debug",
+            "-destination", "platform=iOS Simulator,id=DEVICE",
+            "MACOSX_DEPLOYMENT_TARGET=15.0",
+            "SWIFT_ACTIVE_COMPILATION_CONDITIONS=DEBUG FLAG",
+            "build",
+        ])
+        let device = SimulatorDevice(udid: "DEVICE", name: "iPhone", runtime: "iOS", state: "Booted", isAvailable: true)
+        XCTAssertEqual(
+            SimulatorAppLifecycleClient.xcodebuildTestArguments(selection: selection, device: device, derivedDataPath: nil).suffix(3),
+            ["MACOSX_DEPLOYMENT_TARGET=15.0", "SWIFT_ACTIVE_COMPILATION_CONDITIONS=DEBUG FLAG", "test"]
+        )
+    }
+
+    func testBuildSettingsSplitTheCacheButLeaveSettinglessKeysAlone() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let workspace = root.appendingPathComponent("Example.xcworkspace", isDirectory: true)
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        let cache = SimulatorAppBuildCache(simtoolDirectory: root.appendingPathComponent(".simtool"))
+
+        let plain = try SimulatorAppBuildSelection.validated(workspacePath: workspace.path, projectPath: nil, scheme: "Example")
+        let withSetting = try SimulatorAppBuildSelection.validated(
+            workspacePath: workspace.path, projectPath: nil, scheme: "Example", buildSettings: ["MACOSX_DEPLOYMENT_TARGET": "15.0"]
+        )
+
+        // A build without settings encodes exactly as before, so existing caches stay valid…
+        XCTAssertFalse(try JSON.string(plain.identity).contains("buildSettings"))
+        // …while a build with settings never reuses one built without them.
+        XCTAssertNotEqual(try cache.identityKey(for: plain.identity), try cache.identityKey(for: withSetting.identity))
+        XCTAssertEqual(withSetting.identity.buildSettings, ["MACOSX_DEPLOYMENT_TARGET=15.0"])
+    }
+
+    func testBuildSettingEntriesAreKeyEqualsValue() throws {
+        XCTAssertEqual(
+            try SimulatorAppBuildSelection.parseBuildSettings(["A=1", "B=x=y", "C=", "A=2"]),
+            ["A": "2", "B": "x=y", "C": ""]
+        )
+        XCTAssertThrowsError(try SimulatorAppBuildSelection.parseBuildSettings(["MACOSX_DEPLOYMENT_TARGET 15.0"])) { error in
+            XCTAssertTrue("\(error)".contains("KEY=VALUE"))
+        }
+        XCTAssertThrowsError(try SimulatorAppBuildSelection.parseBuildSettings(["-sdk=iphoneos"]))
+        XCTAssertThrowsError(try SimulatorAppBuildSelection.parseBuildSettings(["=1"]))
+    }
+
     func testFingerprintIsDeterministicChangesWithInputsAndSeparatesSchemes() throws {
         let root = try makeTempDirectory()
         defer { try? FileManager.default.removeItem(at: root) }

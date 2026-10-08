@@ -211,6 +211,32 @@ final class SimToolCommandSurfaceTests: XCTestCase {
         XCTAssertTrue(command.common.json)
     }
 
+    // Agents carry one option set across build and launch; --device must not
+    // break the build, and both take the same --build-setting entries.
+    func testAppBuildAcceptsADeviceAndBuildSettings() throws {
+        let build = try AppCommand.Build.parse([
+            "--device", "iPhone 16",
+            "--workspace", "Example.xcworkspace",
+            "--scheme", "Example",
+            "--build-setting", "MACOSX_DEPLOYMENT_TARGET=15.0",
+            "--build-setting", "ENABLE_PREVIEWS=NO",
+        ])
+        XCTAssertEqual(build.device, "iPhone 16")
+        XCTAssertEqual(build.buildOptions.buildSettings, ["MACOSX_DEPLOYMENT_TARGET=15.0", "ENABLE_PREVIEWS=NO"])
+
+        let launch = try AppCommand.Launch.parse([
+            "--device", "iPhone 16", "--workspace", "Example.xcworkspace", "--scheme", "Example",
+            "--build-setting", "MACOSX_DEPLOYMENT_TARGET=15.0",
+        ])
+        XCTAssertEqual(launch.buildOptions.buildSettings, ["MACOSX_DEPLOYMENT_TARGET=15.0"])
+
+        let test = try AppCommand.Test.parse([
+            "--device", "iPhone 16", "--workspace", "Example.xcworkspace", "--scheme", "ExampleUITests",
+            "--build-setting", "MACOSX_DEPLOYMENT_TARGET=15.0",
+        ])
+        XCTAssertEqual(test.testOptions.buildSettings, ["MACOSX_DEPLOYMENT_TARGET=15.0"])
+    }
+
     func testAppLaunchParserAcceptsDeviceAndBuildOptions() throws {
         let command = try AppCommand.Launch.parse([
             "--device", "iPhone 16",

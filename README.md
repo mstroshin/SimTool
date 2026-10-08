@@ -272,7 +272,24 @@ Build an iOS simulator app from an Xcode workspace or project:
 ```sh
 swift run simtool app build --workspace MyApp.xcworkspace --scheme MyApp --json
 swift run simtool app build --project MyApp.xcodeproj --scheme MyApp --configuration Debug --json
+swift run simtool app build --device <udid-or-name> --workspace MyApp.xcworkspace --scheme MyApp
 ```
+
+Without `--device` the build targets any iOS simulator, so xcodebuild compiles
+every simulator architecture (arm64 and x86_64); with it, only that simulator's —
+noticeably faster. A project that only builds with extra xcodebuild settings —
+say a deployment target its generated dependencies miss — gets them from
+`build.settings` in `.simtool/config.yml` (below) on every build of that
+workspace or project, or per command with repeatable
+`--build-setting KEY=VALUE` on `app build`, `app launch` and `app test`:
+
+```sh
+swift run simtool app build --workspace MyApp.xcworkspace --scheme MyApp \
+  --build-setting MACOSX_DEPLOYMENT_TARGET=15.0
+```
+
+A flag wins over the config for the same key. Settings are part of the build
+cache key, so a build with other settings never reuses a cached one.
 
 Launch builds only when the build-input checksum changes. If the checksum matches
 the last successful build, SimTool reuses the cached `.app`; if the selected
@@ -493,6 +510,8 @@ build:
   scheme: MyApp
   configuration: Debug              # optional, defaults to Debug
   # derivedDataPath: ./DerivedData  # optional
+  # settings:                       # optional xcodebuild build settings for every build
+  #   MACOSX_DEPLOYMENT_TARGET: "15.0"
 server:                             # optional viewer settings
   host: 127.0.0.1
   port: 3200
