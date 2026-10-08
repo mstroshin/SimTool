@@ -61,6 +61,17 @@ public struct SimToolClient: Sendable {
         try await input(SimulatorInputPayload(action: "paste", text: text))
     }
 
+    /// Pastes an image (PNG, JPEG, HEIC, …) into the focused field the same way.
+    public func pasteImage(_ data: Data, contentType: String) async throws -> CommandResultPayload {
+        try await sendFile(path: "input/paste-image", data: data, contentType: contentType, filename: nil)
+    }
+
+    /// Adds an image or a video to the simulator's Photos library, where a
+    /// photo picker offers it.
+    public func addToPhotos(_ data: Data, contentType: String, filename: String? = nil) async throws -> CommandResultPayload {
+        try await sendFile(path: "photos", data: data, contentType: contentType, filename: filename)
+    }
+
     public func swipe(startX: Double, startY: Double, endX: Double, endY: Double, duration: Double? = nil) async throws -> CommandResultPayload {
         try await input(SimulatorInputPayload(
             action: "swipe",
@@ -270,6 +281,20 @@ public struct SimToolClient: Sendable {
         let (data, response) = try await session.data(for: request)
         try validate(response: response, data: data)
         return try JSON.decoder.decode(T.self, from: data)
+    }
+
+    /// Posts a file as the raw body; headers carry its type and name.
+    private func sendFile(path: String, data: Data, contentType: String, filename: String?) async throws -> CommandResultPayload {
+        var request = makeRequest(url: apiURL.appendingPathComponent(path), method: "POST")
+        request.setValue(contentType, forHTTPHeaderField: "Content-Type")
+        if let filename {
+            let encoded = filename.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? filename
+            request.setValue(encoded, forHTTPHeaderField: "X-SimTool-Filename")
+        }
+        request.httpBody = data
+        let (body, response) = try await session.data(for: request)
+        try validate(response: response, data: body)
+        return try JSON.decoder.decode(CommandResultPayload.self, from: body)
     }
 
     private func makeRequest(url: URL, method: String) -> URLRequest {

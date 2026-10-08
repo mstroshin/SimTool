@@ -53,8 +53,14 @@ final class SimToolCommandSurfaceTests: XCTestCase {
         XCTAssertNil(piped.text)
         XCTAssertTrue(piped.stdin)
 
+        let image = try Input.Paste.parse(["--image", "shot.png"])
+        XCTAssertEqual(image.image, "shot.png")
+        XCTAssertNil(image.text)
+
         XCTAssertThrowsError(try Input.Paste.parse([]))
         XCTAssertThrowsError(try Input.Paste.parse(["text", "--stdin"]))
+        XCTAssertThrowsError(try Input.Paste.parse(["text", "--image", "shot.png"]))
+        XCTAssertThrowsError(try Input.Paste.parse(["--stdin", "--image", "shot.png"]))
     }
 
     func testTopLevelCommandIncludesAppNamespace() {

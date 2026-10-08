@@ -1,6 +1,7 @@
 import Foundation
+import UniformTypeIdentifiers
 
-/// Writes text onto a simulator's general pasteboard.
+/// Writes text or an image onto a simulator's general pasteboard.
 public enum SimulatorPasteboardClient {
     public static func copy(_ text: String, deviceUDID: String) async throws {
         // Through a file rather than stdin: ProcessRunner fills the stdin pipe
@@ -10,19 +11,9 @@ public enum SimulatorPasteboardClient {
         try Data(text.utf8).write(to: file)
         defer { try? FileManager.default.removeItem(at: file) }
 
-        // Since Xcode 27 the simulator pasteboard belongs to CoreDevice. `simctl
-        // pbcopy` still exits 0 there, but CoreSimulatorBridge drops the write
-        // ("the CoreDevice pasteboard stack is in use"), so devicectl goes first.
-        let devicectl = try await ProcessRunner.run(
-            executable: URL(fileURLWithPath: "/usr/bin/xcrun"),
-            arguments: ["devicectl", "device", "pasteboard", "copy", "--device", deviceUDID, "--file", file.path, "--quiet"],
-            timeoutSeconds: 30
-        )
+        let devicectl = try await devicectlCopy(file, type: nil, deviceUDID: deviceUDID)
         if devicectl.status == 0 { return }
-        // 64: this devicectl has no `pasteboard` subcommand; 72: xcrun finds no
-        // devicectl at all. Either way the Xcode predates the CoreDevice
-        // pasteboard, and simctl is the one that works.
-        guard devicectl.status == 64 || devicectl.status == 72 else {
+        guard predatesCoreDevicePasteboard(devicectl) else {
             throw SimToolError("Cannot write the simulator pasteboard: \(failureDetail(devicectl, fallback: "devicectl pasteboard copy failed"))")
         }
         let simctl = try await ProcessRunner.run(
@@ -33,6 +24,36 @@ public enum SimulatorPasteboardClient {
         guard simctl.status == 0 else {
             throw SimToolError("Cannot write the simulator pasteboard: \(failureDetail(simctl, fallback: "simctl pbcopy failed"))")
         }
+    }
+
+    /// Puts an image file on the pasteboard as the given UTI (`public.png`, …).
+    public static func copyImage(at file: URL, type: String, deviceUDID: String) async throws {
+        let devicectl = try await devicectlCopy(file, type: type, deviceUDID: deviceUDID)
+        if devicectl.status == 0 { return }
+        if predatesCoreDevicePasteboard(devicectl) {
+            throw SimToolError("Pasting images needs Xcode 27 or newer: older Xcode's `simctl pbcopy` carries only text.")
+        }
+        throw SimToolError("Cannot write the simulator pasteboard: \(failureDetail(devicectl, fallback: "devicectl pasteboard copy failed"))")
+    }
+
+    // Since Xcode 27 the simulator pasteboard belongs to CoreDevice. `simctl
+    // pbcopy` still exits 0 there, but CoreSimulatorBridge drops the write
+    // ("the CoreDevice pasteboard stack is in use"), so devicectl goes first.
+    private static func devicectlCopy(_ file: URL, type: String?, deviceUDID: String) async throws -> ProcessOutput {
+        var arguments = ["devicectl", "device", "pasteboard", "copy", "--device", deviceUDID, "--file", file.path, "--quiet"]
+        if let type { arguments += ["--type", type] }
+        return try await ProcessRunner.run(
+            executable: URL(fileURLWithPath: "/usr/bin/xcrun"),
+            arguments: arguments,
+            timeoutSeconds: 30
+        )
+    }
+
+    /// 64: this devicectl has no `pasteboard` subcommand; 72: xcrun finds no
+    /// devicectl at all. Either way the Xcode predates the CoreDevice
+    /// pasteboard, and `simctl pbcopy` is the one that works.
+    private static func predatesCoreDevicePasteboard(_ output: ProcessOutput) -> Bool {
+        output.status == 64 || output.status == 72
     }
 
     private static func failureDetail(_ output: ProcessOutput, fallback: String) -> String {
@@ -49,13 +70,68 @@ extension SimulatorInputClient {
     /// up, because ⌘V without a focused field does nothing and says nothing.
     public static func paste(_ text: String, deviceUDID: String) async throws -> ProcessOutput {
         guard !text.isEmpty else { throw SimToolError("Paste requires non-empty text") }
+        let outcome = try await pressPaste(deviceUDID: deviceUDID) {
+            try await SimulatorPasteboardClient.copy(text, deviceUDID: deviceUDID)
+        }
+        switch outcome {
+        case .changed:
+            return message("Pasted \(text.count) characters.")
+        case .unverifiable:
+            return message("Sent ⌘V; the accessibility tree was unavailable to confirm the paste.")
+        case let .unchanged(keyboardVisible: true, allowed):
+            // A focused field whose text accessibility does not expose (web
+            // content, custom text views): the paste most likely landed.
+            return message("Sent ⌘V to the focused field; its text is not visible to accessibility, so the paste is unconfirmed.\(allowHint(allowed))")
+        case let .unchanged(keyboardVisible: false, allowed):
+            throw SimToolError("Nothing was pasted: no text field changed after ⌘V and no keyboard is up. Tap a text field in the simulator, then paste again.\(allowHint(allowed))")
+        }
+    }
 
-        async let copied: Void = SimulatorPasteboardClient.copy(text, deviceUDID: deviceUDID)
+    /// Pastes an image file the same way. Only fields that take images react —
+    /// a text view with attributed editing, notes or chat composers; a plain
+    /// text field ignores it. To offer the image in a photo picker instead,
+    /// add it with `SimulatorPhotosClient`.
+    public static func pasteImage(at file: URL, deviceUDID: String) async throws -> ProcessOutput {
+        guard let type = UTType(filenameExtension: file.pathExtension), type.conforms(to: .image) else {
+            throw SimToolError("\(file.lastPathComponent) is not an image file (PNG, JPEG, HEIC, GIF, …)")
+        }
+        guard FileManager.default.isReadableFile(atPath: file.path) else {
+            throw SimToolError("Cannot read \(file.path)")
+        }
+        let outcome = try await pressPaste(deviceUDID: deviceUDID) {
+            try await SimulatorPasteboardClient.copyImage(at: file, type: type.identifier, deviceUDID: deviceUDID)
+        }
+        switch outcome {
+        case .changed:
+            return message("Pasted the image.")
+        case .unverifiable:
+            return message("Sent ⌘V with the image; the accessibility tree was unavailable to confirm the paste.")
+        case let .unchanged(keyboardVisible: true, allowed):
+            return message("Sent ⌘V with the image, but the focused field did not change: plain text fields ignore images.\(allowHint(allowed))")
+        case let .unchanged(keyboardVisible: false, allowed):
+            throw SimToolError("Nothing was pasted: no text field changed after ⌘V and no keyboard is up. Tap a field that takes images, then paste again.\(allowHint(allowed))")
+        }
+    }
+
+    enum PasteOutcome: Equatable {
+        /// A text input's value changed — an image lands in a text view as U+FFFC.
+        case changed
+        case unchanged(keyboardVisible: Bool, allowed: Bool)
+        /// No accessibility tree before ⌘V to compare against.
+        case unverifiable
+    }
+
+    /// Writes the pasteboard, presses ⌘V and watches the text inputs for the effect.
+    private static func pressPaste(
+        deviceUDID: String,
+        write: @Sendable () async throws -> Void
+    ) async throws -> PasteOutcome {
+        async let written: Void = write()
         async let processes = launchctlList(deviceUDID: deviceUDID)
         let before = await accessibilityTree(deviceUDID: deviceUDID)
-        try await copied
+        try await written
 
-        // iOS asks "Allow Paste?" when an app reads text another process put on
+        // iOS asks "Allow Paste?" when an app reads what another process put on
         // the pasteboard, ⌘V from the simulator keyboard included. Granting the
         // foreground app "Paste from Other Apps" (Settings › Apps) skips that.
         var allowed = false
@@ -68,27 +144,24 @@ extension SimulatorInputClient {
 
         _ = try await AxeClient.run(["key-combo", "--modifiers", "227", "--key", "25", "--udid", deviceUDID])
 
-        guard let before else {
-            return ProcessOutput(status: 0, stdout: Data("Sent ⌘V; the accessibility tree was unavailable to confirm the paste.".utf8))
-        }
+        guard let before else { return .unverifiable }
         let baseline = PasteVerification.textInputs(in: before)
         var after: AccessibilityTreePayload?
         let deadline = Date().addingTimeInterval(1.5)
         repeat {
             try? await Task.sleep(for: .milliseconds(250))
             after = await accessibilityTree(deviceUDID: deviceUDID)
-            if let after, PasteVerification.textInputs(in: after) != baseline {
-                return ProcessOutput(status: 0, stdout: Data("Pasted \(text.count) characters.".utf8))
-            }
+            if let after, PasteVerification.textInputs(in: after) != baseline { return .changed }
         } while Date() < deadline
+        return .unchanged(keyboardVisible: after.map { PasteVerification.isKeyboardVisible(in: $0) } ?? false, allowed: allowed)
+    }
 
-        let allowHint = allowed ? "" : " If iOS asks to allow pasting, choose Allow Paste."
-        if let after, PasteVerification.isKeyboardVisible(in: after) {
-            // A focused field whose text accessibility does not expose (web
-            // content, custom text views): the paste most likely landed.
-            return ProcessOutput(status: 0, stdout: Data("Sent ⌘V to the focused field; its text is not visible to accessibility, so the paste is unconfirmed.\(allowHint)".utf8))
-        }
-        throw SimToolError("Nothing was pasted: no text field changed after ⌘V and no keyboard is up. Tap a text field in the simulator, then paste again.\(allowHint)")
+    private static func message(_ text: String) -> ProcessOutput {
+        ProcessOutput(status: 0, stdout: Data(text.utf8))
+    }
+
+    private static func allowHint(_ allowed: Bool) -> String {
+        allowed ? "" : " If iOS asks to allow pasting, choose Allow Paste."
     }
 
     private static func accessibilityTree(deviceUDID: String) async -> AccessibilityTreePayload? {

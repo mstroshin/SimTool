@@ -73,6 +73,32 @@ final class SimToolClientTests: XCTestCase {
         XCTAssertEqual(result.stdout, "Pasted 13 characters.")
     }
 
+    func testMediaUploadsSendRawBytesWithTheirTypeAndName() async throws {
+        let session = makeSession()
+        let png = Data([0x89, 0x50, 0x4E, 0x47])
+        var seen: [(path: String, type: String?, name: String?, body: Data)] = []
+        MockURLProtocol.handler = { request in
+            seen.append((
+                request.url?.path ?? "",
+                request.value(forHTTPHeaderField: "Content-Type"),
+                request.value(forHTTPHeaderField: "X-SimTool-Filename"),
+                MockURLProtocol.body(of: request)
+            ))
+            let payload = CommandResultPayload(ok: true, stdout: "done", stderr: "")
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, try JSON.data(payload, pretty: false))
+        }
+
+        let client = SimToolClient(baseURL: URL(string: "http://simtool.test")!, session: session)
+        _ = try await client.pasteImage(png, contentType: "image/png")
+        _ = try await client.addToPhotos(png, contentType: "image/png", filename: "фото 1.png")
+
+        XCTAssertEqual(seen.map(\.path), ["/api/v1/input/paste-image", "/api/v1/photos"])
+        XCTAssertEqual(seen.map(\.type), ["image/png", "image/png"])
+        XCTAssertEqual(seen.map(\.body), [png, png])
+        XCTAssertNil(seen[0].name)
+        XCTAssertEqual(seen[1].name?.removingPercentEncoding, "фото 1.png")
+    }
+
     func testThrowsClientErrorForErrorPayload() async {
         let session = makeSession()
         MockURLProtocol.handler = { request in

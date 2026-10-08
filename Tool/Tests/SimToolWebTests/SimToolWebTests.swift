@@ -199,23 +199,41 @@ final class SimToolWebTests: XCTestCase {
     func testViewerPastesTheMacClipboardIntoTheSimulator() {
         let html = WebViewer.html()
 
-        // A Paste button follows Relaunch and reads the clipboard on click.
+        // Add to Photos follows Relaunch, Paste follows Add to Photos; Paste reads the clipboard on click.
         XCTAssertTrue(html.contains("id=\"paste\""), "missing Paste button")
         XCTAssertTrue(html.contains(">📋<"), "Paste button must use the clipboard emoji")
         guard let relaunchRange = html.range(of: "id=\"relaunch\""),
+              let photosRange = html.range(of: "id=\"addPhotos\""),
               let pasteRange = html.range(of: "id=\"paste\"") else {
             return XCTFail("toolbar buttons not found")
         }
-        XCTAssertFalse(html[relaunchRange.upperBound..<pasteRange.lowerBound].contains("<button id="), "Paste must directly follow Relaunch")
-        XCTAssertTrue(html.contains("navigator.clipboard.readText()"), "the button must read the clipboard")
+        XCTAssertFalse(html[relaunchRange.upperBound..<photosRange.lowerBound].contains("<button id="), "Add to Photos must directly follow Relaunch")
+        XCTAssertFalse(html[photosRange.upperBound..<pasteRange.lowerBound].contains("<button id="), "Paste must directly follow Add to Photos")
+        XCTAssertTrue(html.contains("navigator.clipboard.read()"), "the button must read text or an image from the clipboard")
+        XCTAssertTrue(html.contains("navigator.clipboard.readText()"), "browsers without clipboard.read() still paste text")
         XCTAssertTrue(html.contains("clipboard access was denied"), "a refused clipboard read must say so")
         // ⌘V on the page outside the viewer's own fields goes to the simulator.
         XCTAssertTrue(html.contains("document.addEventListener(\"paste\""), "missing page-level paste handler")
-        XCTAssertTrue(html.contains("clipboardData.getData(\"text/plain\")"), "paste must take the plain-text flavor")
+        XCTAssertTrue(html.contains("getData(\"text/plain\")"), "paste must take the plain-text flavor")
+        XCTAssertTrue(html.contains("file.type.startsWith(\"image/\")"), "⌘V must pick up a clipboard image")
+        XCTAssertTrue(html.contains("/api/v1/input/paste-image"), "images must post to the paste-image route")
+        XCTAssertTrue(html.contains("X-SimTool-Filename"), "uploads must name the file in a header")
         XCTAssertTrue(html.contains("if (isEditableTarget(event.target)) return;"), "the viewer's own fields must keep native paste")
         XCTAssertTrue(html.contains("action: \"paste\""), "paste must post the paste input action")
         // Failures carry the server's explanation (e.g. no focused text field), not a bare status line.
         XCTAssertTrue(html.contains("(await response.json()).error"), "api() must surface the server's error message")
+    }
+
+    func testViewerAddsTheClipboardImageOrChosenFilesToPhotos() {
+        let html = WebViewer.html()
+
+        XCTAssertTrue(html.contains("id=\"addPhotos\""), "missing Add to Photos button")
+        XCTAssertTrue(html.contains(">🖼️<"), "Add to Photos must use the framed-picture emoji")
+        XCTAssertTrue(html.contains("function addClipboardImageToPhotos"), "missing Add to Photos click handler")
+        // Without a clipboard image the button falls back to choosing files.
+        XCTAssertTrue(html.contains("<input id=\"photosFile\" type=\"file\" accept=\"image/*,video/*\" multiple hidden>"), "missing hidden file chooser")
+        XCTAssertTrue(html.contains("photosFileInput.click()"), "no clipboard image must open the file chooser")
+        XCTAssertTrue(html.contains("postFile(\"/api/v1/photos\""), "files must post to the photos route")
     }
 
     func testStateHistoryFoldsEmbeddedModelsIntoParent() {

@@ -24,7 +24,9 @@ public enum WebViewer {
                   <button id="shake" class="icon-btn" type="button" title="Shake">📳</button>
                   <button id="terminate" class="icon-btn" type="button" title="Terminate app">⏹️</button>
                   <button id="relaunch" class="icon-btn" type="button" title="Relaunch app">▶️</button>
-                  <button id="paste" class="icon-btn" type="button" title="Paste the Mac clipboard into the focused field (⌘V)">📋</button>
+                  <button id="addPhotos" class="icon-btn" type="button" title="Add to Photos: the clipboard image, or choose files">🖼️</button>
+                  <input id="photosFile" type="file" accept="image/*,video/*" multiple hidden>
+                  <button id="paste" class="icon-btn" type="button" title="Paste the Mac clipboard — text or an image — into the focused field (⌘V)">📋</button>
                   <button id="inspectToggle" class="inspect-toggle" type="button" aria-pressed="false">
                     <span class="dot"></span><span>Inspect</span>
                   </button>
@@ -467,6 +469,8 @@ public enum WebViewer {
     const terminateButton = $("terminate");
     const relaunchButton = $("relaunch");
     const pasteButton = $("paste");
+    const addPhotosButton = $("addPhotos");
+    const photosFileInput = $("photosFile");
     const stage = $("stage");
 
     const inspectToggle = $("inspectToggle");
@@ -744,41 +748,117 @@ public enum WebViewer {
       }
     }
 
-    // Mac clipboard → simulator: the server puts the text on the simulator's
-    // clipboard and presses ⌘V there, so any text arrives intact (typing
-    // through AXe reaches only US-keyboard characters).
+    // Mac clipboard → simulator: the server puts the text or image on the
+    // simulator's clipboard and presses ⌘V there, so any text arrives intact
+    // (typing through AXe reaches only US-keyboard characters).
     let pasteInFlight = false;
-    async function pasteIntoSimulator(text) {
-      if (!text) { setStatus("paste: the clipboard holds no text", "err"); return; }
+    async function runPaste(label, send, failureHint = "") {
       if (pasteInFlight) return;
       pasteInFlight = true;
       pasteButton.disabled = true;
-      setStatus("pasting…", "idle");
+      setStatus(label, "idle");
       try {
-        const response = await api("/api/v1/input", { method: "POST", body: JSON.stringify({ action: "paste", text }) });
-        const result = await response.json();
+        const result = await send();
         setStatus(result.stdout || "pasted", "live");
       } catch (error) {
-        setStatus(`paste failed: ${error.message}`, "err");
+        setStatus(`paste failed: ${error.message}${failureHint}`, "err");
       } finally {
         pasteInFlight = false;
         pasteButton.disabled = false;
       }
     }
 
+    function pasteIntoSimulator(text) {
+      if (!text) { setStatus("paste: the clipboard holds no text or image", "err"); return; }
+      runPaste("pasting…", async () => {
+        const response = await api("/api/v1/input", { method: "POST", body: JSON.stringify({ action: "paste", text }) });
+        return response.json();
+      });
+    }
+
+    function pasteImageIntoSimulator(image) {
+      runPaste("pasting image…", () => postFile("/api/v1/input/paste-image", image), " — or 🖼️ adds it to Photos");
+    }
+
+    // Files and clipboard images go as the raw body; the name rides in a header.
+    async function postFile(path, blob) {
+      const headers = { "Content-Type": blob.type || "application/octet-stream" };
+      if (blob.name) headers["X-SimTool-Filename"] = encodeURIComponent(blob.name);
+      const response = await api(path, { method: "POST", headers, body: blob });
+      return response.json();
+    }
+
+    // Text when the clipboard has some, else its image; null when it holds neither.
+    async function readClipboard() {
+      if (!navigator.clipboard.read) {
+        const text = await navigator.clipboard.readText();
+        return text ? { text } : null;
+      }
+      let image = null;
+      for (const item of await navigator.clipboard.read()) {
+        if (item.types.includes("text/plain")) {
+          const text = await (await item.getType("text/plain")).text();
+          if (text) return { text };
+        }
+        const imageType = item.types.find((type) => type.startsWith("image/"));
+        if (imageType && !image) image = await item.getType(imageType);
+      }
+      return image ? { image } : null;
+    }
+
     async function pasteFromClipboard() {
-      if (!navigator.clipboard || !navigator.clipboard.readText) {
+      if (!navigator.clipboard || !(navigator.clipboard.read || navigator.clipboard.readText)) {
         setStatus("paste: this page cannot read the clipboard — press ⌘V instead", "err");
         return;
       }
-      let text;
+      let content;
       try {
-        text = await navigator.clipboard.readText();
+        content = await readClipboard();
       } catch (_) {
         setStatus("paste: clipboard access was denied — press ⌘V instead", "err");
         return;
       }
-      pasteIntoSimulator(text);
+      if (content && content.image) pasteImageIntoSimulator(content.image);
+      else pasteIntoSimulator(content ? content.text : "");
+    }
+
+    // Add to Photos: the clipboard image, or files chosen on the Mac when the
+    // clipboard holds none. Either way they land where a photo picker offers them.
+    let photosInFlight = false;
+    async function addToPhotos(files) {
+      if (photosInFlight || !files.length) return;
+      photosInFlight = true;
+      addPhotosButton.disabled = true;
+      try {
+        let result = null;
+        for (const [index, file] of files.entries()) {
+          setStatus(files.length > 1 ? `adding to Photos… ${index + 1}/${files.length}` : "adding to Photos…", "idle");
+          result = await postFile("/api/v1/photos", file);
+        }
+        setStatus(files.length > 1 ? `Added ${files.length} files to Photos.` : result.stdout, "live");
+      } catch (error) {
+        setStatus(`add to Photos failed: ${error.message}`, "err");
+      } finally {
+        photosInFlight = false;
+        addPhotosButton.disabled = false;
+      }
+    }
+
+    async function addClipboardImageToPhotos() {
+      let image = null;
+      try {
+        if (navigator.clipboard && navigator.clipboard.read) {
+          for (const item of await navigator.clipboard.read()) {
+            const imageType = item.types.find((type) => type.startsWith("image/"));
+            if (imageType) { image = await item.getType(imageType); break; }
+          }
+        }
+      } catch (_) {
+        // No clipboard access: the file chooser below is the other way in.
+      }
+      if (image) { addToPhotos([image]); return; }
+      setStatus("no image on the clipboard — choose files to add to Photos", "idle");
+      photosFileInput.click();
     }
 
     // The viewer's own fields (inspector filter and the like) keep their native paste.
@@ -3035,12 +3115,23 @@ public enum WebViewer {
     terminateButton.addEventListener("click", pressTerminate);
     relaunchButton.addEventListener("click", pressRelaunch);
     pasteButton.addEventListener("click", pasteFromClipboard);
+    addPhotosButton.addEventListener("click", addClipboardImageToPhotos);
+    photosFileInput.addEventListener("change", () => {
+      const files = Array.from(photosFileInput.files || []);
+      photosFileInput.value = "";
+      addToPhotos(files);
+    });
     // ⌘V anywhere on the page outside an editable field pastes into the simulator;
-    // the paste event hands over the text without a clipboard permission prompt.
+    // the paste event hands over the clipboard without a permission prompt.
     document.addEventListener("paste", (event) => {
       if (isEditableTarget(event.target)) return;
       event.preventDefault();
-      pasteIntoSimulator(event.clipboardData ? event.clipboardData.getData("text/plain") : "");
+      const data = event.clipboardData;
+      const text = data ? data.getData("text/plain") : "";
+      const image = data ? Array.from(data.files || []).find((file) => file.type.startsWith("image/")) : null;
+      // A Finder copy of an image file brings the file name as its text; the file is what was meant.
+      if (image && (!text || text === image.name)) pasteImageIntoSimulator(image);
+      else pasteIntoSimulator(text);
     });
     axRefreshButton.addEventListener("click", loadAxTree);
     axCopyButton.addEventListener("click", copyAxSelected);

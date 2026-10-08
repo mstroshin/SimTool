@@ -175,6 +175,8 @@ public final class StreamServer: @unchecked Sendable {
         }
 
         server.POST["/api/v1/input"] = { request in self.handleInput(request) }
+        server.POST["/api/v1/input/paste-image"] = { request in self.handlePasteImage(request) }
+        server.POST["/api/v1/photos"] = { request in self.handleAddToPhotos(request) }
 
         server.GET["/api/v1/ax/tree"] = { request in
             let includeRaw = request.queryFlag("raw")
@@ -564,6 +566,51 @@ public final class StreamServer: @unchecked Sendable {
         } catch {
             return errorResponse(error, statusCode: 400, reason: "Bad Request")
         }
+    }
+
+    /// The image arrives as the raw body; Content-Type and the percent-encoded
+    /// X-SimTool-Filename header say what it is.
+    private func handlePasteImage(_ request: HttpRequest) -> HttpResponse {
+        do {
+            let file = try receiveMedia(request, accepting: [.image])
+            defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+            let startedAt = Date()
+            let output = try waitForAsync { try await SimulatorInputClient.pasteImage(at: file, deviceUDID: self.config.device.udid) }
+            testSessions.noteInput(at: startedAt)
+            return try jsonEncodedResponse(CommandResultPayload(ok: true, stdout: output.stdoutString, stderr: output.stderrString))
+        } catch {
+            return errorResponse(error, statusCode: 400, reason: "Bad Request")
+        }
+    }
+
+    private func handleAddToPhotos(_ request: HttpRequest) -> HttpResponse {
+        do {
+            let file = try receiveMedia(request, accepting: [.image, .video])
+            defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+            let output = try waitForAsync { try await SimulatorPhotosClient.add([file], deviceUDID: self.config.device.udid) }
+            return try jsonEncodedResponse(CommandResultPayload(ok: true, stdout: output.stdoutString, stderr: output.stderrString))
+        } catch {
+            return errorResponse(error, statusCode: 400, reason: "Bad Request")
+        }
+    }
+
+    /// Saves an uploaded body under a name whose extension tells simctl and
+    /// devicectl its type, alone in a fresh temporary directory the caller removes.
+    private func receiveMedia(_ request: HttpRequest, accepting kinds: Set<MediaUpload.Kind>) throws -> URL {
+        guard !request.body.isEmpty else { throw SimToolError("The request body must be the file's bytes") }
+        let suggested = request.headers["x-simtool-filename"].flatMap { $0.removingPercentEncoding }
+        guard let name = MediaUpload.fileName(suggested: suggested, contentType: request.headers["content-type"]),
+              let kind = MediaUpload.kind(ofExtension: (name as NSString).pathExtension),
+              kinds.contains(kind) else {
+            let expected = kinds.contains(.video) ? "an image or a video" : "an image"
+            throw SimToolError("The upload is not \(expected): send its Content-Type (image/png, …) or an X-SimTool-Filename with its extension")
+        }
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("simtool-upload-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let file = directory.appendingPathComponent(name)
+        try Data(request.body).write(to: file)
+        return file
     }
 
     private func handleNetworkLoggerIngestion(_ request: HttpRequest) -> HttpResponse {

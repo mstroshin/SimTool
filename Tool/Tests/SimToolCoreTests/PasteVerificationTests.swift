@@ -68,6 +68,26 @@ final class PasteVerificationTests: XCTestCase {
         XCTAssertFalse(PasteVerification.isKeyboardVisible(in: appButtons))
     }
 
+    func testUploadKeepsAMediaFileNameAndDropsItsDirectories() {
+        XCTAssertEqual(MediaUpload.fileName(suggested: "фото тест.jpg", contentType: "image/jpeg"), "фото тест.jpg")
+        XCTAssertEqual(MediaUpload.fileName(suggested: "../../etc/clip.mov", contentType: nil), "clip.mov")
+    }
+
+    func testUploadNamesItsFileFromTheContentTypeWhenTheNameDoesNotTell() {
+        // Clipboard images reach the server unnamed.
+        XCTAssertEqual(MediaUpload.fileName(suggested: nil, contentType: "image/png"), "clipboard.png")
+        XCTAssertEqual(MediaUpload.fileName(suggested: "IMG_1", contentType: "image/heic"), "IMG_1.heic")
+        XCTAssertEqual(MediaUpload.fileName(suggested: "", contentType: "video/quicktime; codecs=avc1"), "clipboard.mov")
+    }
+
+    func testUploadRejectsWhatIsNeitherAnImageNorAVideo() {
+        XCTAssertNil(MediaUpload.fileName(suggested: "notes.txt", contentType: "text/plain"))
+        XCTAssertNil(MediaUpload.fileName(suggested: nil, contentType: nil))
+        XCTAssertEqual(MediaUpload.kind(ofExtension: "png"), .image)
+        XCTAssertEqual(MediaUpload.kind(ofExtension: "mp4"), .video)
+        XCTAssertNil(MediaUpload.kind(ofExtension: "pdf"))
+    }
+
     private func tree(field: String, textView: String, battery: String = "Charging") throws -> AccessibilityTreePayload {
         let object: [String: Any] = [
             "type": "Application",

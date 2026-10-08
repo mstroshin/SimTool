@@ -280,28 +280,38 @@ extension Input {
     struct Paste: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
             commandName: "paste",
-            abstract: "Paste text into the focused field through the simulator clipboard.",
+            abstract: "Paste text, or an image, into the focused field through the simulator clipboard.",
             discussion: """
             Unlike `type`, which only reaches US-keyboard characters, any text works: \
             Cyrillic, accents, emoji, several lines. The text goes onto the simulator \
             clipboard and ⌘V is pressed; the foreground app is granted "Paste from \
             Other Apps" so iOS does not ask to allow it. Fails when no text field \
-            changed and no keyboard is up — tap a text field first.
+            changed and no keyboard is up — tap a text field first. With --image the \
+            clipboard holds that image instead (Xcode 27 or newer); only fields that \
+            take images react — a plain text field ignores it.
             """
         )
 
-        @Argument(help: "Text to paste. Omit it and pass --stdin to read standard input instead.") var text: String?
+        @Argument(help: "Text to paste. Omit it and pass --stdin or --image instead.") var text: String?
         @Flag(help: "Read the text from standard input, exactly as given (printf avoids a trailing newline).") var stdin = false
+        @Option(help: "Image file to paste instead of text (PNG, JPEG, HEIC, GIF, …).") var image: String?
         @Option var device: String?
         @OptionGroup var common: CommonJSON
 
         func validate() throws {
-            if stdin, text != nil { throw ValidationError("Pass the text as an argument or with --stdin, not both.") }
-            if !stdin, text == nil { throw ValidationError("Pass the text to paste, or --stdin to read it from standard input.") }
+            let sources = [text != nil, stdin, image != nil].filter { $0 }.count
+            if sources > 1 { throw ValidationError("Pass one of: the text, --stdin, or --image.") }
+            if sources == 0 { throw ValidationError("Pass the text to paste, --stdin to read it from standard input, or --image <file>.") }
         }
 
         func run() async throws {
             let device = try await resolveConfiguredDevice(device)
+            if let image {
+                let file = URL(fileURLWithPath: (image as NSString).expandingTildeInPath)
+                let output = try await SimulatorInputClient.pasteImage(at: file, deviceUDID: device.udid)
+                try emitCommandResult(output, json: common.json)
+                return
+            }
             let value: String
             if stdin {
                 guard let input = String(data: FileHandle.standardInput.readDataToEndOfFile(), encoding: .utf8) else {
