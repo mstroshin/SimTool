@@ -210,7 +210,7 @@ struct ToolCheck: Codable {
 struct Input: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Send input to a simulator.",
-        subcommands: [Tap.self, LongPress.self, TypeText.self, Swipe.self, Button.self]
+        subcommands: [Tap.self, LongPress.self, TypeText.self, Paste.self, Swipe.self, Button.self]
     )
 }
 
@@ -261,7 +261,10 @@ extension Input {
     }
 
     struct TypeText: AsyncParsableCommand {
-        static let configuration = CommandConfiguration(commandName: "type", abstract: "Type text into the focused field.")
+        static let configuration = CommandConfiguration(
+            commandName: "type",
+            abstract: "Type text into the focused field (US-keyboard characters only; `paste` takes any text)."
+        )
 
         @Argument var text: String
         @Option var device: String?
@@ -270,6 +273,55 @@ extension Input {
         func run() async throws {
             let device = try await resolveConfiguredDevice(device)
             let output = try await SimulatorInputClient.typeText(text, deviceUDID: device.udid)
+            try emitCommandResult(output, json: common.json)
+        }
+    }
+
+    struct Paste: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "paste",
+            abstract: "Paste text, or an image, into the focused field through the simulator clipboard.",
+            discussion: """
+            Unlike `type`, which only reaches US-keyboard characters, any text works: \
+            Cyrillic, accents, emoji, several lines. The text goes onto the simulator \
+            clipboard and ⌘V is pressed; the foreground app is granted "Paste from \
+            Other Apps" so iOS does not ask to allow it. Fails when no text field \
+            changed and no keyboard is up — tap a text field first. With --image the \
+            clipboard holds that image instead (Xcode 27 or newer); only fields that \
+            take images react — a plain text field ignores it.
+            """
+        )
+
+        @Argument(help: "Text to paste. Omit it and pass --stdin or --image instead.") var text: String?
+        @Flag(help: "Read the text from standard input, exactly as given (printf avoids a trailing newline).") var stdin = false
+        @Option(help: "Image file to paste instead of text (PNG, JPEG, HEIC, GIF, …).") var image: String?
+        @Option var device: String?
+        @OptionGroup var common: CommonJSON
+
+        func validate() throws {
+            let sources = [text != nil, stdin, image != nil].filter { $0 }.count
+            if sources > 1 { throw ValidationError("Pass one of: the text, --stdin, or --image.") }
+            if sources == 0 { throw ValidationError("Pass the text to paste, --stdin to read it from standard input, or --image <file>.") }
+        }
+
+        func run() async throws {
+            let device = try await resolveConfiguredDevice(device)
+            if let image {
+                let file = URL(fileURLWithPath: (image as NSString).expandingTildeInPath)
+                let output = try await SimulatorInputClient.pasteImage(at: file, deviceUDID: device.udid)
+                try emitCommandResult(output, json: common.json)
+                return
+            }
+            let value: String
+            if stdin {
+                guard let input = String(data: FileHandle.standardInput.readDataToEndOfFile(), encoding: .utf8) else {
+                    throw ValidationError("Standard input is not UTF-8 text.")
+                }
+                value = input
+            } else {
+                value = text ?? ""
+            }
+            let output = try await SimulatorInputClient.paste(value, deviceUDID: device.udid)
             try emitCommandResult(output, json: common.json)
         }
     }
@@ -725,16 +777,20 @@ struct AppBuildOptions: ParsableArguments {
     @Option(name: .customLong("derived-data-path"), help: "DerivedData path for xcodebuild products.")
     var derivedDataPath: String?
 
+    @Option(name: .customLong("build-setting"), help: buildSettingHelp)
+    var buildSettings: [String] = []
+
     @Flag(help: "Force a new xcodebuild run even when the checksum cache is valid.")
     var force = false
 
     func selection() throws -> SimulatorAppBuildSelection {
-        try SimulatorAppBuildSelection.validated(
-            workspacePath: workspace,
-            projectPath: project,
+        try appBuildSelection(
+            workspace: workspace,
+            project: project,
             scheme: scheme,
             configuration: configuration,
-            derivedDataPath: derivedDataPath
+            derivedDataPath: derivedDataPath,
+            buildSettings: buildSettings
         )
     }
 }
@@ -755,15 +811,56 @@ struct AppTestOptions: ParsableArguments {
     @Option(name: .customLong("derived-data-path"), help: "DerivedData path for xcodebuild products.")
     var derivedDataPath: String?
 
+    @Option(name: .customLong("build-setting"), help: buildSettingHelp)
+    var buildSettings: [String] = []
+
     func selection() throws -> SimulatorAppBuildSelection {
-        try SimulatorAppBuildSelection.validated(
-            workspacePath: workspace,
-            projectPath: project,
+        try appBuildSelection(
+            workspace: workspace,
+            project: project,
             scheme: scheme,
             configuration: configuration,
-            derivedDataPath: derivedDataPath
+            derivedDataPath: derivedDataPath,
+            buildSettings: buildSettings
         )
     }
+}
+
+private let buildSettingHelp = ArgumentHelp(
+    "xcodebuild build setting, KEY=VALUE (e.g. MACOSX_DEPLOYMENT_TARGET=15.0). Repeatable.",
+    discussion: "Adds to `build.settings` from .simtool/config.yml, which applies on its own whenever this builds the configured workspace or project; a flag wins over the config for the same key."
+)
+
+/// The build selection a command line asks for, with the project config's
+/// `build.settings` when it describes the same workspace or project and the
+/// `--build-setting` flags on top.
+private func appBuildSelection(
+    workspace: String?,
+    project: String?,
+    scheme: String?,
+    configuration: String?,
+    derivedDataPath: String?,
+    buildSettings: [String]
+) throws -> SimulatorAppBuildSelection {
+    let explicit = try SimulatorAppBuildSelection.parseBuildSettings(buildSettings)
+    let base = try SimulatorAppBuildSelection.validated(
+        workspacePath: workspace,
+        projectPath: project,
+        scheme: scheme,
+        configuration: configuration,
+        derivedDataPath: derivedDataPath
+    )
+    let configured = try ProjectConfigLoader.loadIfPresent()?.build.settings(for: base) ?? [:]
+    let settings = configured.merging(explicit) { _, flag in flag }
+    guard !settings.isEmpty else { return base }
+    return try SimulatorAppBuildSelection.validated(
+        workspacePath: workspace,
+        projectPath: project,
+        scheme: scheme,
+        configuration: configuration,
+        derivedDataPath: derivedDataPath,
+        buildSettings: settings
+    )
 }
 
 /// Noora keys interactive rendering off stdin (and NO_TTY), but the animated
@@ -890,11 +987,17 @@ extension AppCommand {
     struct Build: AsyncParsableCommand {
         static let configuration = CommandConfiguration(commandName: "build", abstract: "Build an iOS simulator app with checksum caching.")
 
+        @Option(name: .shortAndLong, help: "Simulator UDID or name to build for — its architecture only, which is faster. Defaults to any iOS simulator.")
+        var device: String?
+
         @OptionGroup var buildOptions: AppBuildOptions
         @OptionGroup var common: CommonJSON
 
         func run() async throws {
-            let selection = try buildOptions.selection()
+            var selection = try buildOptions.selection()
+            if let device {
+                selection.deviceUDID = try await resolveConfiguredDevice(device).udid
+            }
             let buildCache = SimulatorAppBuildCache(simtoolDirectory: SimToolDirectory.resolve())
             if common.json {
                 let payload = try await SimulatorAppLifecycleClient.build(
@@ -907,20 +1010,23 @@ extension AppCommand {
             }
             let payload = try await buildAppWithProgress(selection: selection, force: buildOptions.force, cache: buildCache)
             if payload.cacheHit {
-                makeNoora().success(.alert("Reused cached build", takeaways: [
-                    "Scheme: \(payload.identity.scheme)",
-                    "Bundle: \(payload.bundleIdentifier)",
-                    "App: \(payload.appBundlePath)",
-                    "Checksum: \(payload.checksum)",
-                ]))
+                makeNoora().success(.alert("Reused cached build", takeaways: buildTakeaways(payload)))
             } else {
-                makeNoora().success(.alert("Built app", takeaways: [
-                    "Scheme: \(payload.identity.scheme)",
-                    "Bundle: \(payload.bundleIdentifier)",
-                    "App: \(payload.appBundlePath)",
-                    "Checksum: \(payload.checksum)",
-                ]))
+                makeNoora().success(.alert("Built app", takeaways: buildTakeaways(payload)))
             }
+        }
+
+        private func buildTakeaways(_ payload: SimulatorAppBuildPayload) -> [TerminalText] {
+            var takeaways: [TerminalText] = [
+                "Scheme: \(payload.identity.scheme)",
+                "Bundle: \(payload.bundleIdentifier)",
+                "App: \(payload.appBundlePath)",
+                "Checksum: \(payload.checksum)",
+            ]
+            if let settings = payload.identity.buildSettings, !settings.isEmpty {
+                takeaways.append("Build settings: \(settings.joined(separator: " "))")
+            }
+            return takeaways
         }
     }
 
@@ -1430,14 +1536,7 @@ struct TestCommand: AsyncParsableCommand {
             // by the loader. A config that names no scheme or no project is one
             // that cannot build, which is not an error: the device's build is
             // then taken as given, exactly as before.
-            let selection = try? SimulatorAppBuildSelection.validated(
-                workspacePath: build.workspace,
-                projectPath: build.project,
-                scheme: build.scheme,
-                configuration: build.configuration,
-                derivedDataPath: build.derivedDataPath
-            )
-            guard let selection else { return nil }
+            guard let selection = try? build.selection() else { return nil }
             return {
                 let device = try await SimulatorDeviceClient.resolve((try? await client.config())?.udid)
                 let cache = SimulatorAppBuildCache(simtoolDirectory: SimToolDirectory.resolve())

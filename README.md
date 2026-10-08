@@ -97,6 +97,35 @@ swift run simtool logs tail --app com.example.MyApp --stdout --seconds 4 --json
 swift run simtool network snapshot --seconds 2 --limit 50 --json
 ```
 
+`input type` reaches only characters on a US keyboard. For anything else —
+Cyrillic, accents, emoji, several lines — use `input paste`: it puts the text on
+the simulator clipboard and presses ⌘V in the focused field.
+
+```sh
+swift run simtool input paste "Привет, señor 🎉" --json
+printf 'line one\nline two' | swift run simtool input paste --stdin
+swift run simtool input paste --image screenshot.png
+```
+
+Paste grants the foreground app "Paste from Other Apps" (`simctl privacy …
+grant pasteboard`), so iOS does not ask "Allow Paste?" each time; iOS still
+shows its "… pasted from …" banner for a few seconds, over the top of the
+screen. It fails when no text field changed and no keyboard is up — tap a text
+field first. `--image` pastes an image the same way (Xcode 27 or newer); only
+fields that take images react — a text view with attributed editing, notes or
+chat composers — while a plain text field ignores it. From Xcode 27 on, the
+simulator clipboard belongs to CoreDevice and `simctl pbcopy` is silently
+ignored; SimTool writes through `devicectl device pasteboard copy` and falls
+back to `simctl pbcopy` (text only) on older Xcode.
+
+In the browser viewer, ⌘V anywhere on the page outside its own fields pastes
+the Mac clipboard — text, or an image when it holds no text — into the
+simulator. Right-clicking the device screen opens a menu with the same
+**Paste** (it asks the browser for clipboard access), **Add Clipboard Image to
+Photos** and **Add Files to Photos…** (images and videos): both put the media
+in the simulator's Photos library (`simctl addmedia`), where a photo picker
+offers it. In the AX inspector the right-click keeps its element Copy menu.
+
 ### Tests and sessions
 
 Declarative YAML tests in `<project>/.simtool/tests/` drive the simulator
@@ -243,7 +272,24 @@ Build an iOS simulator app from an Xcode workspace or project:
 ```sh
 swift run simtool app build --workspace MyApp.xcworkspace --scheme MyApp --json
 swift run simtool app build --project MyApp.xcodeproj --scheme MyApp --configuration Debug --json
+swift run simtool app build --device <udid-or-name> --workspace MyApp.xcworkspace --scheme MyApp
 ```
+
+Without `--device` the build targets any iOS simulator, so xcodebuild compiles
+every simulator architecture (arm64 and x86_64); with it, only that simulator's —
+noticeably faster. A project that only builds with extra xcodebuild settings —
+say a deployment target its generated dependencies miss — gets them from
+`build.settings` in `.simtool/config.yml` (below) on every build of that
+workspace or project, or per command with repeatable
+`--build-setting KEY=VALUE` on `app build`, `app launch` and `app test`:
+
+```sh
+swift run simtool app build --workspace MyApp.xcworkspace --scheme MyApp \
+  --build-setting MACOSX_DEPLOYMENT_TARGET=15.0
+```
+
+A flag wins over the config for the same key. Settings are part of the build
+cache key, so a build with other settings never reuses a cached one.
 
 Launch builds only when the build-input checksum changes. If the checksum matches
 the last successful build, SimTool reuses the cached `.app`; if the selected
@@ -464,6 +510,8 @@ build:
   scheme: MyApp
   configuration: Debug              # optional, defaults to Debug
   # derivedDataPath: ./DerivedData  # optional
+  # settings:                       # optional xcodebuild build settings for every build
+  #   MACOSX_DEPLOYMENT_TARGET: "15.0"
 server:                             # optional viewer settings
   host: 127.0.0.1
   port: 3200
@@ -592,6 +640,8 @@ GET /stream.avcc
 GET /stream.jpeg
 GET /stream.mjpeg
 POST /api/v1/input
+POST /api/v1/input/paste-image
+POST /api/v1/photos
 GET /api/v1/ax/tree?raw=1&format=flat&labeled=1
 GET /api/v1/ax/raw
 GET /api/v1/ax/find?q=<text>&raw=1
@@ -617,5 +667,12 @@ image pixels, and an 800px screenshot is still perfectly legible.
 The `logs/capture` routes drive a continuous capture (OSLog plus optional
 stdout/`print`) into a bounded buffer that clients poll incrementally by cursor;
 `GET /api/v1/logs` remains the one-shot bounded snapshot.
+
+`POST /api/v1/input` takes an `action` — `tap`, `longPress`, `type`, `paste`,
+`swipe`, `button`, `shake`, `terminate`, `launch` — plus that action's fields
+(`text` for `type` and `paste`). Images go as the raw request body instead:
+`POST /api/v1/input/paste-image` pastes one into the focused field, and
+`POST /api/v1/photos` adds an image or a video to Photos. Both read the type from
+`Content-Type` and an optional percent-encoded `X-SimTool-Filename` header.
 
 `SimToolClient` exposes these routes as typed async Swift calls.

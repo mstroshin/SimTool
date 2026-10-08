@@ -140,6 +140,12 @@ public enum WebViewer {
             <div id="testsMenu" class="ax-menu" hidden>
               <button id="testsMenuDelete" class="ax-menu-item tests-menu-delete" type="button">Delete</button>
             </div>
+            <div id="deviceMenu" class="ax-menu" hidden>
+              <button id="deviceMenuPaste" class="ax-menu-item" type="button">Paste<span class="ax-menu-key">⌘V</span></button>
+              <button id="deviceMenuPhotos" class="ax-menu-item" type="button">Add Clipboard Image to Photos</button>
+              <button id="deviceMenuPhotoFiles" class="ax-menu-item" type="button">Add Files to Photos…</button>
+            </div>
+            <input id="photosFile" type="file" accept="image/*,video/*" multiple hidden>
             <div id="filterHelpPop" class="filter-help-pop" hidden>
               <p><b>type text</b> — live substring filter over the current tab's fields</p>
               <p><b>Enter</b> — turn the text into an include chip (show only matches)</p>
@@ -432,6 +438,7 @@ public enum WebViewer {
     .ax-menu[hidden] { display: none; }
     .ax-menu-item { appearance: none; display: block; width: 100%; text-align: left; background: none; border: 0; border-radius: 6px; color: #f4f7fb; padding: 7px 10px; font: 12px ui-sans-serif, system-ui, sans-serif; cursor: pointer; white-space: nowrap; }
     .ax-menu-item:hover { background: rgba(125,211,252,0.18); color: #bae6fd; }
+    .ax-menu-key { float: right; padding-left: 24px; color: rgba(244,247,251,0.45); }
     .tests-menu-delete { color: #f87171; }
     .tests-menu-delete:hover { background: rgba(248,113,113,0.16); color: #fca5a5; }
 
@@ -464,6 +471,11 @@ public enum WebViewer {
     const shakeButton = $("shake");
     const terminateButton = $("terminate");
     const relaunchButton = $("relaunch");
+    const deviceMenu = $("deviceMenu");
+    const deviceMenuPaste = $("deviceMenuPaste");
+    const deviceMenuPhotos = $("deviceMenuPhotos");
+    const deviceMenuPhotoFiles = $("deviceMenuPhotoFiles");
+    const photosFileInput = $("photosFile");
     const stage = $("stage");
 
     const inspectToggle = $("inspectToggle");
@@ -652,7 +664,12 @@ public enum WebViewer {
       const headers = new Headers(options.headers || {});
       if (options.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
       const response = await fetch(path, { ...options, headers });
-      if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+      if (!response.ok) {
+        // The server explains failures in {"error": …}; that beats a bare status line.
+        let detail = "";
+        try { detail = (await response.json()).error || ""; } catch (_) {}
+        throw new Error(detail || `${response.status} ${response.statusText}`);
+      }
       return response;
     }
 
@@ -734,6 +751,132 @@ public enum WebViewer {
       } catch (error) {
         setStatus(`relaunch failed: ${error.message}`, "err");
       }
+    }
+
+    // Mac clipboard → simulator: the server puts the text or image on the
+    // simulator's clipboard and presses ⌘V there, so any text arrives intact
+    // (typing through AXe reaches only US-keyboard characters).
+    let pasteInFlight = false;
+    async function runPaste(label, send, failureHint = "") {
+      if (pasteInFlight) return;
+      pasteInFlight = true;
+      setStatus(label, "idle");
+      try {
+        const result = await send();
+        setStatus(result.stdout || "pasted", "live");
+      } catch (error) {
+        setStatus(`paste failed: ${error.message}${failureHint}`, "err");
+      } finally {
+        pasteInFlight = false;
+      }
+    }
+
+    function pasteIntoSimulator(text) {
+      if (!text) { setStatus("paste: the clipboard holds no text or image", "err"); return; }
+      runPaste("pasting…", async () => {
+        const response = await api("/api/v1/input", { method: "POST", body: JSON.stringify({ action: "paste", text }) });
+        return response.json();
+      });
+    }
+
+    function pasteImageIntoSimulator(image) {
+      runPaste("pasting image…", () => postFile("/api/v1/input/paste-image", image), " — or right-click the screen to add it to Photos");
+    }
+
+    // Files and clipboard images go as the raw body; the name rides in a header.
+    async function postFile(path, blob) {
+      const headers = { "Content-Type": blob.type || "application/octet-stream" };
+      if (blob.name) headers["X-SimTool-Filename"] = encodeURIComponent(blob.name);
+      const response = await api(path, { method: "POST", headers, body: blob });
+      return response.json();
+    }
+
+    // Text when the clipboard has some, else its image; null when it holds neither.
+    async function readClipboard() {
+      if (!navigator.clipboard.read) {
+        const text = await navigator.clipboard.readText();
+        return text ? { text } : null;
+      }
+      let image = null;
+      for (const item of await navigator.clipboard.read()) {
+        if (item.types.includes("text/plain")) {
+          const text = await (await item.getType("text/plain")).text();
+          if (text) return { text };
+        }
+        const imageType = item.types.find((type) => type.startsWith("image/"));
+        if (imageType && !image) image = await item.getType(imageType);
+      }
+      return image ? { image } : null;
+    }
+
+    async function pasteFromClipboard() {
+      if (!navigator.clipboard || !(navigator.clipboard.read || navigator.clipboard.readText)) {
+        setStatus("paste: this page cannot read the clipboard — press ⌘V instead", "err");
+        return;
+      }
+      let content;
+      try {
+        content = await readClipboard();
+      } catch (_) {
+        setStatus("paste: clipboard access was denied — press ⌘V instead", "err");
+        return;
+      }
+      if (content && content.image) pasteImageIntoSimulator(content.image);
+      else pasteIntoSimulator(content ? content.text : "");
+    }
+
+    // Add to Photos: the clipboard image or files chosen on the Mac land where
+    // a photo picker offers them.
+    let photosInFlight = false;
+    async function addToPhotos(files) {
+      if (photosInFlight || !files.length) return;
+      photosInFlight = true;
+      try {
+        let result = null;
+        for (const [index, file] of files.entries()) {
+          setStatus(files.length > 1 ? `adding to Photos… ${index + 1}/${files.length}` : "adding to Photos…", "idle");
+          result = await postFile("/api/v1/photos", file);
+        }
+        setStatus(files.length > 1 ? `Added ${files.length} files to Photos.` : result.stdout, "live");
+      } catch (error) {
+        setStatus(`add to Photos failed: ${error.message}`, "err");
+      } finally {
+        photosInFlight = false;
+      }
+    }
+
+    async function addClipboardImageToPhotos() {
+      let image = null;
+      try {
+        if (navigator.clipboard && navigator.clipboard.read) {
+          for (const item of await navigator.clipboard.read()) {
+            const imageType = item.types.find((type) => type.startsWith("image/"));
+            if (imageType) { image = await item.getType(imageType); break; }
+          }
+        }
+      } catch (_) {
+        setStatus("Add to Photos: clipboard access was denied — use Add Files to Photos…", "err");
+        return;
+      }
+      if (image) addToPhotos([image]);
+      else setStatus("Add to Photos: the clipboard holds no image — use Add Files to Photos…", "err");
+    }
+
+    // Right-click on the device screen (outside AX mode): the clipboard actions.
+    function showDeviceMenu(x, y) {
+      deviceMenu.hidden = false;
+      const rect = deviceMenu.getBoundingClientRect();
+      deviceMenu.style.left = Math.max(6, Math.min(x, window.innerWidth - rect.width - 6)) + "px";
+      deviceMenu.style.top = Math.max(6, Math.min(y, window.innerHeight - rect.height - 6)) + "px";
+    }
+    function hideDeviceMenu() {
+      deviceMenu.hidden = true;
+    }
+
+    // The viewer's own fields (inspector filter and the like) keep their native paste.
+    function isEditableTarget(target) {
+      const element = target instanceof Element ? target : target && target.parentElement;
+      return !!(element && element.closest("input, textarea, select, [contenteditable]:not([contenteditable='false'])"));
     }
 
     async function downloadScreenshot() {
@@ -2983,6 +3126,26 @@ public enum WebViewer {
     shakeButton.addEventListener("click", pressShake);
     terminateButton.addEventListener("click", pressTerminate);
     relaunchButton.addEventListener("click", pressRelaunch);
+    deviceMenuPaste.addEventListener("click", () => { hideDeviceMenu(); pasteFromClipboard(); });
+    deviceMenuPhotos.addEventListener("click", () => { hideDeviceMenu(); addClipboardImageToPhotos(); });
+    deviceMenuPhotoFiles.addEventListener("click", () => { hideDeviceMenu(); photosFileInput.click(); });
+    photosFileInput.addEventListener("change", () => {
+      const files = Array.from(photosFileInput.files || []);
+      photosFileInput.value = "";
+      addToPhotos(files);
+    });
+    // ⌘V anywhere on the page outside an editable field pastes into the simulator;
+    // the paste event hands over the clipboard without a permission prompt.
+    document.addEventListener("paste", (event) => {
+      if (isEditableTarget(event.target)) return;
+      event.preventDefault();
+      const data = event.clipboardData;
+      const text = data ? data.getData("text/plain") : "";
+      const image = data ? Array.from(data.files || []).find((file) => file.type.startsWith("image/")) : null;
+      // A Finder copy of an image file brings the file name as its text; the file is what was meant.
+      if (image && (!text || text === image.name)) pasteImageIntoSimulator(image);
+      else pasteIntoSimulator(text);
+    });
     axRefreshButton.addEventListener("click", loadAxTree);
     axCopyButton.addEventListener("click", copyAxSelected);
     axMenuCopy.addEventListener("click", () => { copyAxNode(axMenuNode); hideAxMenu(); });
@@ -3057,9 +3220,10 @@ public enum WebViewer {
       event.stopPropagation();
       if (filterHelpPop.hidden) showFilterHelp(); else hideFilterHelp();
     });
-    function hidePopups() { hideAxMenu(); hideNetworkMenu(); hideNetworkLaunchMenu(); hideLogsMenu(); hideLogsLaunchMenu(); hideTestsMenu(); hideFilterHelp(); }
+    function hidePopups() { hideAxMenu(); hideDeviceMenu(); hideNetworkMenu(); hideNetworkLaunchMenu(); hideLogsMenu(); hideLogsLaunchMenu(); hideTestsMenu(); hideFilterHelp(); }
     document.addEventListener("click", (event) => {
       if (!axMenu.hidden && !axMenu.contains(event.target)) hideAxMenu();
+      if (!deviceMenu.hidden && !deviceMenu.contains(event.target)) hideDeviceMenu();
       if (!networkMenu.hidden && !networkMenu.contains(event.target)) hideNetworkMenu();
       if (!networkLaunchMenu.hidden && !networkLaunchMenu.contains(event.target)) hideNetworkLaunchMenu();
       if (!logsMenu.hidden && !logsMenu.contains(event.target)) hideLogsMenu();
@@ -3079,6 +3243,8 @@ public enum WebViewer {
     canvas.addEventListener("pointerdown", (event) => {
       if (!streamWidth || !streamHeight) return;
       if (event.button !== 0) return; // primary button / touch only
+      // A click that dismisses the clipboard menu must not also tap the device.
+      if (!deviceMenu.hidden) { hideDeviceMenu(); event.preventDefault(); return; }
       gesture = {
         pointerId: event.pointerId,
         startClientX: event.clientX,
@@ -3117,11 +3283,15 @@ public enum WebViewer {
       gesture = null;
     });
 
-    // Right-click on the device screen (AX mode only): select the element under the
-    // cursor and open the Copy menu for it.
+    // Right-click on the device screen: in AX mode, select the element under the
+    // cursor and open the Copy menu for it; otherwise open the clipboard menu.
     canvas.addEventListener("contextmenu", (event) => {
-      if (!axSelectMode()) return;
       event.preventDefault();
+      if (!axSelectMode()) {
+        hidePopups();
+        showDeviceMenu(event.clientX, event.clientY);
+        return;
+      }
       const node = axHitTest(event.clientX, event.clientY);
       if (!node) return;
       selectAxNode(node._key, true);

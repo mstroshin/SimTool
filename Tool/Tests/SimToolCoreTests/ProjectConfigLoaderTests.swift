@@ -157,6 +157,51 @@ final class ProjectConfigLoaderTests: XCTestCase {
         XCTAssertEqual(config.appFacingServerURL, "http://127.0.0.1:4500")
     }
 
+    func testBuildSettingsStayTextAndApplyOnlyToTheConfiguredSource() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let yaml = """
+        simulator: iPhone 16 Pro
+        bundleId: com.example.MyApp
+        build:
+          workspace: App.xcworkspace
+          scheme: App
+          settings:
+            MACOSX_DEPLOYMENT_TARGET: 15.0
+            ENABLE_PREVIEWS: NO
+        """
+        try writeConfig(yaml, in: root)
+
+        let config = try ProjectConfigLoader.load(startDirectory: root)
+        // YAML would read 15.0 as a number and NO as a Bool; xcodebuild needs the text.
+        XCTAssertEqual(config.build.settings, ["MACOSX_DEPLOYMENT_TARGET": "15.0", "ENABLE_PREVIEWS": "NO"])
+        XCTAssertEqual(
+            try config.buildSelection().identity.buildSettings,
+            ["ENABLE_PREVIEWS=NO", "MACOSX_DEPLOYMENT_TARGET=15.0"]
+        )
+
+        let sameWorkspace = try SimulatorAppBuildSelection.validated(
+            workspacePath: root.appendingPathComponent("App.xcworkspace").path, projectPath: nil, scheme: "OtherScheme"
+        )
+        let otherProject = try SimulatorAppBuildSelection.validated(
+            workspacePath: nil, projectPath: root.appendingPathComponent("App.xcodeproj").path, scheme: "App"
+        )
+        XCTAssertEqual(config.build.settings(for: sameWorkspace), config.build.settings)
+        XCTAssertEqual(config.build.settings(for: otherProject), [:])
+    }
+
+    func testInvalidBuildSettingNameThrows() throws {
+        try assertLoadThrows("""
+        simulator: iPhone 16 Pro
+        bundleId: com.example.MyApp
+        build:
+          workspace: App.xcworkspace
+          scheme: App
+          settings:
+            "MACOSX DEPLOYMENT": 15.0
+        """, contains: "Invalid build setting name")
+    }
+
     func testLaunchProfilesParse() throws {
         let root = try makeTempDirectory()
         defer { try? FileManager.default.removeItem(at: root) }

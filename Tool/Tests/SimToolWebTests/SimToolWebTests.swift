@@ -196,6 +196,57 @@ final class SimToolWebTests: XCTestCase {
         XCTAssertFalse(between.contains("<button id="), "Relaunch must directly follow Terminate in the toolbar")
     }
 
+    func testViewerPastesTheMacClipboardIntoTheSimulator() {
+        let html = WebViewer.html()
+
+        // Right-click on the device screen opens the clipboard menu; its Paste reads the clipboard.
+        XCTAssertTrue(html.contains("id=\"deviceMenuPaste\""), "missing Paste menu item")
+        XCTAssertTrue(html.contains("deviceMenuPaste.addEventListener(\"click\", () => { hideDeviceMenu(); pasteFromClipboard(); })"), "Paste item must paste the clipboard")
+        XCTAssertTrue(html.contains("navigator.clipboard.read()"), "Paste must read text or an image from the clipboard")
+        XCTAssertTrue(html.contains("navigator.clipboard.readText()"), "browsers without clipboard.read() still paste text")
+        XCTAssertTrue(html.contains("clipboard access was denied"), "a refused clipboard read must say so")
+        // ⌘V on the page outside the viewer's own fields goes to the simulator.
+        XCTAssertTrue(html.contains("document.addEventListener(\"paste\""), "missing page-level paste handler")
+        XCTAssertTrue(html.contains("getData(\"text/plain\")"), "paste must take the plain-text flavor")
+        XCTAssertTrue(html.contains("file.type.startsWith(\"image/\")"), "⌘V must pick up a clipboard image")
+        XCTAssertTrue(html.contains("/api/v1/input/paste-image"), "images must post to the paste-image route")
+        XCTAssertTrue(html.contains("X-SimTool-Filename"), "uploads must name the file in a header")
+        XCTAssertTrue(html.contains("if (isEditableTarget(event.target)) return;"), "the viewer's own fields must keep native paste")
+        XCTAssertTrue(html.contains("action: \"paste\""), "paste must post the paste input action")
+        // Failures carry the server's explanation (e.g. no focused text field), not a bare status line.
+        XCTAssertTrue(html.contains("(await response.json()).error"), "api() must surface the server's error message")
+    }
+
+    func testViewerAddsTheClipboardImageOrChosenFilesToPhotos() {
+        let html = WebViewer.html()
+
+        XCTAssertTrue(html.contains("id=\"deviceMenuPhotos\""), "missing Add Clipboard Image to Photos item")
+        XCTAssertTrue(html.contains("function addClipboardImageToPhotos"), "missing Add to Photos handler")
+        XCTAssertTrue(html.contains("id=\"deviceMenuPhotoFiles\""), "missing Add Files to Photos item")
+        XCTAssertTrue(html.contains("<input id=\"photosFile\" type=\"file\" accept=\"image/*,video/*\" multiple hidden>"), "missing hidden file chooser")
+        XCTAssertTrue(html.contains("photosFileInput.click()"), "Add Files must open the file chooser")
+        XCTAssertTrue(html.contains("postFile(\"/api/v1/photos\""), "files must post to the photos route")
+    }
+
+    func testDeviceScreenRightClickOpensTheClipboardMenuInsteadOfToolbarButtons() {
+        let html = WebViewer.html()
+
+        // The clipboard actions live in the screen's context menu, not on the toolbar.
+        XCTAssertTrue(html.contains("<div id=\"deviceMenu\" class=\"ax-menu\" hidden>"), "missing device context menu")
+        XCTAssertFalse(html.contains("id=\"paste\""), "the Paste toolbar button must be gone")
+        XCTAssertFalse(html.contains("id=\"addPhotos\""), "the Add to Photos toolbar button must be gone")
+        // Outside AX mode a right-click opens it; in AX mode the element Copy menu keeps the right-click.
+        guard let handler = html.range(of: "canvas.addEventListener(\"contextmenu\"") else {
+            return XCTFail("missing screen contextmenu handler")
+        }
+        let body = html[handler.upperBound...].prefix(600)
+        XCTAssertTrue(body.contains("if (!axSelectMode())"), "the device menu is for outside AX mode")
+        XCTAssertTrue(body.contains("showDeviceMenu(event.clientX, event.clientY)"), "right-click must open the device menu")
+        XCTAssertTrue(body.contains("showAxMenu(event.clientX, event.clientY, node)"), "AX mode keeps its Copy menu")
+        // Dismissing the menu with a click on the screen must not tap the device.
+        XCTAssertTrue(html.contains("if (!deviceMenu.hidden) { hideDeviceMenu(); event.preventDefault(); return; }"), "a dismissing click must not tap")
+    }
+
     func testStateHistoryFoldsEmbeddedModelsIntoParent() {
         let html = WebViewer.html()
 

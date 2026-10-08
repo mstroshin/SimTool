@@ -40,6 +40,29 @@ final class SimToolCommandSurfaceTests: XCTestCase {
         XCTAssertTrue(json.contains("\"sequence\":1"))
     }
 
+    func testInputPasteTakesTextOrStdinButNotBoth() throws {
+        let names = Input.configuration.subcommands.map { commandName(for: $0) }
+        XCTAssertTrue(names.contains("paste"))
+
+        let inline = try Input.Paste.parse(["Привет, señor 🎉", "--device", "iPhone 16", "--json"])
+        XCTAssertEqual(inline.text, "Привет, señor 🎉")
+        XCTAssertFalse(inline.stdin)
+        XCTAssertTrue(inline.common.json)
+
+        let piped = try Input.Paste.parse(["--stdin"])
+        XCTAssertNil(piped.text)
+        XCTAssertTrue(piped.stdin)
+
+        let image = try Input.Paste.parse(["--image", "shot.png"])
+        XCTAssertEqual(image.image, "shot.png")
+        XCTAssertNil(image.text)
+
+        XCTAssertThrowsError(try Input.Paste.parse([]))
+        XCTAssertThrowsError(try Input.Paste.parse(["text", "--stdin"]))
+        XCTAssertThrowsError(try Input.Paste.parse(["text", "--image", "shot.png"]))
+        XCTAssertThrowsError(try Input.Paste.parse(["--stdin", "--image", "shot.png"]))
+    }
+
     func testTopLevelCommandIncludesAppNamespace() {
         let names = SimTool.configuration.subcommands.map { commandName(for: $0) }
         XCTAssertTrue(names.contains("app"))
@@ -186,6 +209,32 @@ final class SimToolCommandSurfaceTests: XCTestCase {
         XCTAssertEqual(command.buildOptions.derivedDataPath, "/tmp/DerivedData")
         XCTAssertTrue(command.buildOptions.force)
         XCTAssertTrue(command.common.json)
+    }
+
+    // Agents carry one option set across build and launch; --device must not
+    // break the build, and both take the same --build-setting entries.
+    func testAppBuildAcceptsADeviceAndBuildSettings() throws {
+        let build = try AppCommand.Build.parse([
+            "--device", "iPhone 16",
+            "--workspace", "Example.xcworkspace",
+            "--scheme", "Example",
+            "--build-setting", "MACOSX_DEPLOYMENT_TARGET=15.0",
+            "--build-setting", "ENABLE_PREVIEWS=NO",
+        ])
+        XCTAssertEqual(build.device, "iPhone 16")
+        XCTAssertEqual(build.buildOptions.buildSettings, ["MACOSX_DEPLOYMENT_TARGET=15.0", "ENABLE_PREVIEWS=NO"])
+
+        let launch = try AppCommand.Launch.parse([
+            "--device", "iPhone 16", "--workspace", "Example.xcworkspace", "--scheme", "Example",
+            "--build-setting", "MACOSX_DEPLOYMENT_TARGET=15.0",
+        ])
+        XCTAssertEqual(launch.buildOptions.buildSettings, ["MACOSX_DEPLOYMENT_TARGET=15.0"])
+
+        let test = try AppCommand.Test.parse([
+            "--device", "iPhone 16", "--workspace", "Example.xcworkspace", "--scheme", "ExampleUITests",
+            "--build-setting", "MACOSX_DEPLOYMENT_TARGET=15.0",
+        ])
+        XCTAssertEqual(test.testOptions.buildSettings, ["MACOSX_DEPLOYMENT_TARGET=15.0"])
     }
 
     func testAppLaunchParserAcceptsDeviceAndBuildOptions() throws {

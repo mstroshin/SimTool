@@ -73,14 +73,22 @@ workspace.
   staging build against a real test backend (`com.example.myapp.beta`). Note
   which configurations compile the debug arguments in at all: they are usually
   gated out of Release, so a Release build silently ignores the whole catalog.
-- **Device**: every command resolves `--device` first, then `simulator:` from
-  `.simtool/config.yml`, then whatever is booted — and **refuses to guess when
-  several simulators are booted and neither was given**. That refusal is
-  deliberate: on a machine running parallel checkouts, guessing means driving
-  another one's simulator, where the taps land elsewhere and the accessibility
-  tree merely looks stale. `simtool app build/launch` boots nothing itself —
-  boot first (`xcrun simctl boot <udid>` / open Simulator.app). List devices:
+- **Device**: every command that drives a simulator resolves `--device` first,
+  then `simulator:` from `.simtool/config.yml`, then whatever is booted — and
+  **refuses to guess when several simulators are booted and neither was
+  given**. That refusal is deliberate: on a machine running parallel checkouts,
+  guessing means driving another one's simulator, where the taps land elsewhere
+  and the accessibility tree merely looks stale. `app build` takes `--device`
+  too, to build for that simulator only (faster); without it, it builds for any
+  simulator. `simtool app build/launch` boots nothing itself — boot first
+  (`xcrun simctl boot <udid>` / open Simulator.app). List devices:
   `simtool devices --json`.
+- **Build settings**: if the project only builds with extra xcodebuild
+  settings (e.g. `MACOSX_DEPLOYMENT_TARGET=15.0` for a macro whose generated
+  project misses it), put them under `build.settings` in `.simtool/config.yml`
+  — every `app build` / `app launch` / `app test` / `run` of that workspace
+  picks them up — or pass `--build-setting KEY=VALUE` per command. Don't run
+  `xcodebuild` by hand to get around a missing setting.
 - **Launch profiles**: name the argv recipes your tests and runs need in
   `profiles:` in `.simtool/config.yml`, and refer to them by name from a test's
   `launch.profile`. Values may interpolate `${VAR}` from the shell, so accounts
@@ -247,7 +255,14 @@ frame is usually the splash — capture again to see the settled screen.
 
 ### Input · accessibility · logs
 - `simtool input …` — taps and long-presses (by label / a11y-id / coordinates),
-  type, swipe, hardware buttons.
+  type, paste, swipe, hardware buttons. `type` reaches only US-keyboard
+  characters; `paste "<text>"` (or `--stdin`) puts any text — Cyrillic,
+  accents, emoji, several lines — on the simulator clipboard and presses ⌘V in
+  the focused field. It fails when no text field changed and no keyboard is up:
+  tap the field first. `paste --image <file>` pastes an image the same way; only
+  fields that take images react. For a photo picker, put the image in the
+  library instead: `xcrun simctl addmedia <udid> <file>…` (or right-click the
+  viewer's screen › Add to Photos).
 - `simtool ax …` — read the accessibility tree / find an element.
 - `simtool logs …` — OSLog stream; a `--stdout` mode **relaunches** the app to
   attach its console (useful when the app logs richly to stdout — networking,

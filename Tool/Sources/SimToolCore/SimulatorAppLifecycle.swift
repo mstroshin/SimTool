@@ -8,6 +8,11 @@ public struct SimulatorAppBuildIdentity: Codable, Equatable, Sendable {
     public var configuration: String
     public var sdk: String
     public var derivedDataPath: String?
+    /// xcodebuild build settings passed on its command line, as `KEY=VALUE`
+    /// sorted by key. Part of the identity, so a build with other settings
+    /// never reuses this one's cache; nil (not empty) when there are none, so
+    /// identities without settings keep the cache keys they always had.
+    public var buildSettings: [String]?
 
     public init(
         workspacePath: String? = nil,
@@ -15,7 +20,8 @@ public struct SimulatorAppBuildIdentity: Codable, Equatable, Sendable {
         scheme: String,
         configuration: String = "Debug",
         sdk: String = "iphonesimulator",
-        derivedDataPath: String? = nil
+        derivedDataPath: String? = nil,
+        buildSettings: [String]? = nil
     ) {
         self.workspacePath = workspacePath
         self.projectPath = projectPath
@@ -23,11 +29,15 @@ public struct SimulatorAppBuildIdentity: Codable, Equatable, Sendable {
         self.configuration = configuration
         self.sdk = sdk
         self.derivedDataPath = derivedDataPath
+        self.buildSettings = buildSettings
     }
 }
 
 public struct SimulatorAppBuildSelection: Codable, Equatable, Sendable {
     public var identity: SimulatorAppBuildIdentity
+    /// Builds for this simulator only — its architecture — instead of any iOS
+    /// simulator. Not part of the identity: the product is the same `.app`.
+    public var deviceUDID: String?
 
     public init(identity: SimulatorAppBuildIdentity) throws {
         try Self.validate(identity)
@@ -39,18 +49,45 @@ public struct SimulatorAppBuildSelection: Codable, Equatable, Sendable {
         projectPath: String?,
         scheme: String?,
         configuration: String? = nil,
-        derivedDataPath: String? = nil
+        derivedDataPath: String? = nil,
+        buildSettings: [String: String] = [:]
     ) throws -> SimulatorAppBuildSelection {
         let trimmedScheme = scheme?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let trimmedConfiguration = configuration?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        for key in buildSettings.keys where !isBuildSettingName(key) {
+            throw SimToolError("Invalid build setting name '\(key)': use letters, digits and underscores, as in MACOSX_DEPLOYMENT_TARGET.")
+        }
         let identity = SimulatorAppBuildIdentity(
             workspacePath: canonicalPath(workspacePath),
             projectPath: canonicalPath(projectPath),
             scheme: trimmedScheme,
             configuration: trimmedConfiguration.isEmpty ? "Debug" : trimmedConfiguration,
-            derivedDataPath: canonicalPath(derivedDataPath)
+            derivedDataPath: canonicalPath(derivedDataPath),
+            buildSettings: buildSettings.isEmpty ? nil : buildSettings.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }
         )
         return try SimulatorAppBuildSelection(identity: identity)
+    }
+
+    /// Parses repeated `--build-setting KEY=VALUE` entries; a later entry for
+    /// the same key wins.
+    public static func parseBuildSettings(_ entries: [String]) throws -> [String: String] {
+        var settings: [String: String] = [:]
+        for entry in entries {
+            guard let separator = entry.firstIndex(of: "=") else {
+                throw SimToolError("Build settings use KEY=VALUE format: \(entry)")
+            }
+            let key = String(entry[..<separator]).trimmingCharacters(in: .whitespaces)
+            guard isBuildSettingName(key) else {
+                throw SimToolError("Invalid build setting name '\(key)': use letters, digits and underscores, as in MACOSX_DEPLOYMENT_TARGET.")
+            }
+            settings[key] = String(entry[entry.index(after: separator)...])
+        }
+        return settings
+    }
+
+    static func isBuildSettingName(_ name: String) -> Bool {
+        guard let first = name.unicodeScalars.first, first == "_" || CharacterSet.letters.contains(first) else { return false }
+        return name.unicodeScalars.allSatisfy { $0 == "_" || ($0.isASCII && CharacterSet.alphanumerics.contains($0)) }
     }
 
     public var projectRoot: URL {
@@ -889,14 +926,16 @@ public enum SimulatorAppLifecycleClient {
         } else if let projectPath = selection.identity.projectPath {
             arguments += ["-project", projectPath]
         }
+        let destination = selection.deviceUDID.map { "platform=iOS Simulator,id=\($0)" } ?? "generic/platform=iOS Simulator"
         arguments += [
             "-scheme", selection.identity.scheme,
             "-configuration", selection.identity.configuration,
-            "-destination", "generic/platform=iOS Simulator",
+            "-destination", destination,
         ]
         if let derivedDataPath, !derivedDataPath.isEmpty {
             arguments += ["-derivedDataPath", derivedDataPath]
         }
+        arguments += selection.identity.buildSettings ?? []
         if showBuildSettings {
             arguments += ["-showBuildSettings", "-json"]
         } else {
@@ -924,6 +963,7 @@ public enum SimulatorAppLifecycleClient {
         if let derivedDataPath, !derivedDataPath.isEmpty {
             arguments += ["-derivedDataPath", derivedDataPath]
         }
+        arguments += selection.identity.buildSettings ?? []
         arguments.append("test")
         return arguments
     }
