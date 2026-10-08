@@ -184,13 +184,17 @@ public actor SimulatorDirectInputClient {
         return outputURL
     }
 
+    /// Several simtool processes (a server per simulator, a CLI command) can
+    /// compile the same helper at once, so each works on its own files and the
+    /// result is renamed into place, which replaces atomically.
     private func compileHelper(to outputURL: URL) async throws {
+        let unique = UUID().uuidString
         let sourceURL = outputURL
             .deletingLastPathComponent()
-            .appendingPathComponent("\(outputURL.lastPathComponent).m")
+            .appendingPathComponent("\(outputURL.lastPathComponent).\(unique).m")
         let tempURL = outputURL
             .deletingLastPathComponent()
-            .appendingPathComponent("\(outputURL.lastPathComponent).tmp.\(UUID().uuidString)")
+            .appendingPathComponent("\(outputURL.lastPathComponent).tmp.\(unique)")
 
         try SimulatorDirectInputHelperSource.source.write(to: sourceURL, atomically: true, encoding: .utf8)
         defer {
@@ -215,9 +219,10 @@ public actor SimulatorDirectInputClient {
             throw SimToolError(output.stderrString.isEmpty ? "Failed to compile direct input helper" : output.stderrString)
         }
 
-        try? FileManager.default.removeItem(at: outputURL)
-        try FileManager.default.moveItem(at: tempURL, to: outputURL)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: outputURL.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempURL.path)
+        guard rename(tempURL.path, outputURL.path) == 0 else {
+            throw SimToolError("Failed to install the direct input helper: \(String(cString: strerror(errno)))")
+        }
     }
 
     private func helperDirectoryURL() throws -> URL {
