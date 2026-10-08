@@ -203,7 +203,10 @@ extension AgentSkill {
           - tap: { id: settingsButton }
           - longPress: { id: optionToggle, duration: 1.5 }
           - type: "hello"              # into the focused field
-          - swipe: up
+          - swipe: up                  # = scroll: up — the finger moves up, half a screen
+          - scroll: { direction: up, distance: 300, id: feed }   # starting on an element
+          - fling: { direction: up, speed: fast }                 # slow | normal | fast | pt/s
+          - drag: { from: { label: "Milk" }, to: { label: "Eggs" } }   # or by: { x: 0, y: 120 }
           - assertVisible: { text: "Welcome", criterion: AC-1 }   # alias of waitFor
           - assertHidden: { label: "Loading" }
           - wait: 2                    # escape hatch; prefer waitFor / assertHidden
@@ -216,9 +219,20 @@ extension AgentSkill {
 
         **Every step that has a target polls** the accessibility tree until the target
         appears — or disappears, for `assertHidden` — up to its own `timeout:`, else the
-        file's. `tap` and `longPress` wait for their target before touching it. So tests
-        need no sleeps, and a `wait:` in a file is almost always a `waitFor:` someone did
-        not write.
+        file's. `tap`, `longPress`, `drag` and a `scroll`/`fling` that names an element
+        wait for their target before touching it. So tests need no sleeps, and a `wait:`
+        in a file is almost always a `waitFor:` someone did not write.
+
+        **Gestures.** Directions are **the way the finger moves**: `scroll: up` drags the
+        content up and reveals what is below. `scroll` (and its alias `swipe`) slows down
+        and rests before lifting, so the content stays exactly where the finger left it —
+        half a screen by default, or `distance:` points, starting 25% inside the screen or
+        on the named element. `fling` lifts in motion, so the content keeps going: use it
+        to reach the far end of a long list, never to land on a position. `drag` presses
+        0.8 s until the item lifts, carries it at 300 pt/s and rests 0.5 s before
+        dropping — list reordering, moving items, sliders (`press:`, `speed:`, `hold:`
+        tune it). Dropping a list row onto the middle of another row can mean "nest it"
+        in apps that support that; aim for the row's edge to reorder.
 
         **Only assertions may carry `criterion:`** (`assertVisible`, `waitFor`,
         `assertHidden`). On a `tap:` it is a parse error. Two more the parser refuses,

@@ -62,6 +62,15 @@ swift run simtool serve --device <udid-or-name> --port 3200
 Open `http://127.0.0.1:3200` after starting `serve` (the URL is printed on start),
 or pass `--web` to open the browser viewer automatically.
 
+On the viewer's screen the mouse is a finger: it goes down on press, follows the
+pointer and lifts on release, so holding is a long press, holding and moving
+drags (icons, list reordering), and the release decides between a scroll that
+stops where the finger did and a fling. A dot marks the finger at once, ahead of
+the video; a ring around it says it has been held long enough for a long press.
+The wheel or trackpad scrolls by dragging a finger too. Hold Option to add a
+second finger mirrored through the screen center — spreading or circling the
+pointer pinches or rotates — and Option-Shift to move both fingers together.
+
 `serve` runs fully headless: when `--device`, `--host`, or `--port` are omitted
 it falls back to `simulator:` and `server:` from `.simtool/config.yml` (when one
 is discovered, or passed via `--config`), and boots the target simulator via
@@ -96,6 +105,29 @@ swift run simtool logs tail --app com.example.MyApp --lines 20 --seconds 2 --jso
 swift run simtool logs tail --app com.example.MyApp --stdout --seconds 4 --json
 swift run simtool network snapshot --seconds 2 --limit 50 --json
 ```
+
+Touches are played by SimTool's own HID helper as timed paths, in screen points
+(the space `ax tree` reports frames in) — the same helper the viewer's live
+finger uses:
+
+```sh
+swift run simtool input tap --label Continue
+swift run simtool input long-press --id photo --duration 1.2
+swift run simtool input scroll up --distance 300     # content moves 300 pt and stays
+swift run simtool input fling up --speed fast        # lifted in motion, keeps going
+swift run simtool input swipe --start-x 200 --start-y 700 --end-x 200 --end-y 300 --hold 0
+swift run simtool input drag --start-x 200 --start-y 140 --end-x 200 --end-y 290
+```
+
+Directions are the way the finger moves: `scroll up` drags the content up,
+revealing what is below. A `scroll` (and a `swipe`, unless `--hold 0`) slows
+down and rests a quarter second before lifting, which leaves the content where
+the finger stopped; a `fling` lifts in motion. A `drag` presses 0.8 s until the
+item lifts, carries it at 300 pt/s and rests 0.5 s before dropping it — list
+reordering and moving items. A `long-press` shorter than ~0.6 s warns that it may
+land as a tap. `POST /api/v1/input` takes the same gestures (`scroll`, `fling`,
+`drag`, and `swipe` with `velocity`/`hold`), and YAML tests have `scroll:`,
+`fling:` and `drag:` steps.
 
 `input type` reaches only characters on a US keyboard. For anything else —
 Cyrillic, accents, emoji, several lines — use `input paste`: it puts the text on
@@ -640,6 +672,7 @@ GET /stream.avcc
 GET /stream.jpeg
 GET /stream.mjpeg
 POST /api/v1/input
+GET /api/v1/input/stream (WebSocket)
 POST /api/v1/input/paste-image
 POST /api/v1/photos
 GET /api/v1/ax/tree?raw=1&format=flat&labeled=1
@@ -669,10 +702,20 @@ stdout/`print`) into a bounded buffer that clients poll incrementally by cursor;
 `GET /api/v1/logs` remains the one-shot bounded snapshot.
 
 `POST /api/v1/input` takes an `action` — `tap`, `longPress`, `type`, `paste`,
-`swipe`, `button`, `shake`, `terminate`, `launch` — plus that action's fields
-(`text` for `type` and `paste`). Images go as the raw request body instead:
+`swipe`, `scroll`, `fling`, `drag`, `button`, `shake`, `terminate`, `launch` —
+plus that action's fields: `x`/`y` or `id`/`label` for `tap` and `longPress`
+(`duration` for the press), `startX`/`startY`/`endX`/`endY` with `velocity`,
+`duration`, `hold` (and `press` for `drag`), `direction` with `distance` or
+`velocity` and an optional start `x`/`y` for `scroll` and `fling`, `text` for
+`type` and `paste`. Coordinates are screen points. Images go as the raw request body instead:
 `POST /api/v1/input/paste-image` pastes one into the focused field, and
 `POST /api/v1/photos` adds an image or a video to Photos. Both read the type from
 `Content-Type` and an optional percent-encoded `X-SimTool-Filename` header.
+
+`/api/v1/input/stream` is the viewer's live finger: a WebSocket taking one JSON
+frame per touch event, `{"t": "down"|"move"|"up", "x": 0.5, "y": 0.7}` with
+coordinates as fractions of the screen, plus `x2`/`y2` for a second finger.
+Frames are never answered; moves are coalesced, downs and ups never dropped, and
+a finger still down when the socket closes is lifted where it was.
 
 `SimToolClient` exposes these routes as typed async Swift calls.

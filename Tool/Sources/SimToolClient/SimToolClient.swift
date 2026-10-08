@@ -72,15 +72,59 @@ public struct SimToolClient: Sendable {
         try await sendFile(path: "photos", data: data, contentType: contentType, filename: filename)
     }
 
-    public func swipe(startX: Double, startY: Double, endX: Double, endY: Double, duration: Double? = nil) async throws -> CommandResultPayload {
+    /// A finger from start to end in screen points; see `SimulatorInputClient.swipe`.
+    public func swipe(
+        startX: Double,
+        startY: Double,
+        endX: Double,
+        endY: Double,
+        duration: Double? = nil,
+        velocity: Double? = nil,
+        hold: Double? = nil
+    ) async throws -> CommandResultPayload {
         try await input(SimulatorInputPayload(
             action: "swipe",
             startX: startX,
             startY: startY,
             endX: endX,
             endY: endY,
-            duration: duration
+            duration: duration,
+            velocity: velocity,
+            hold: hold
         ))
+    }
+
+    /// Press until the item lifts, carry it, drop it.
+    public func drag(
+        startX: Double,
+        startY: Double,
+        endX: Double,
+        endY: Double,
+        press: Double? = nil,
+        velocity: Double? = nil,
+        hold: Double? = nil
+    ) async throws -> CommandResultPayload {
+        try await input(SimulatorInputPayload(
+            action: "drag",
+            startX: startX,
+            startY: startY,
+            endX: endX,
+            endY: endY,
+            velocity: velocity,
+            hold: hold,
+            press: press
+        ))
+    }
+
+    /// Moves the content `distance` points (half the screen by default) and
+    /// leaves it there; `direction` is the way the finger moves.
+    public func scroll(direction: TouchDirection, distance: Double? = nil, x: Double? = nil, y: Double? = nil) async throws -> CommandResultPayload {
+        try await input(SimulatorInputPayload(action: "scroll", x: x, y: y, direction: direction.rawValue, distance: distance))
+    }
+
+    /// ~200 points lifted in motion at `velocity` points per second.
+    public func fling(direction: TouchDirection, velocity: Double? = nil, x: Double? = nil, y: Double? = nil) async throws -> CommandResultPayload {
+        try await input(SimulatorInputPayload(action: "fling", x: x, y: y, velocity: velocity, direction: direction.rawValue))
     }
 
     public func button(_ name: String) async throws -> CommandResultPayload {

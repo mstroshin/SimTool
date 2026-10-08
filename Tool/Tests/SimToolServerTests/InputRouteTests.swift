@@ -70,6 +70,37 @@ final class InputRouteTests: XCTestCase {
         XCTAssertTrue(text.1.contains("not an image or a video"), "unexpected error body: \(text.1)")
     }
 
+    func testGestureActionsExplainWhatTheyMissBeforeTouchingTheSimulator() async throws {
+        let port = try availablePort()
+        let device = SimulatorDevice(udid: "TEST-UDID", name: "iPhone", runtime: "iOS", state: "Booted", isAvailable: true)
+        let server = StreamServer(config: StreamServerConfig(host: "127.0.0.1", port: port, device: device, captureEnabled: false))
+        try server.start()
+        defer { server.stop() }
+
+        func post(_ body: String) async throws -> (Int?, String) {
+            var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/api/v1/input")!)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = Data(body.utf8)
+            let (data, response) = try await URLSession.shared.data(for: request)
+            return ((response as? HTTPURLResponse)?.statusCode, String(decoding: data, as: UTF8.self))
+        }
+
+        let cases: [(String, String)] = [
+            (#"{"action": "scroll"}"#, "Scroll requires direction"),
+            (#"{"action": "fling", "direction": "sideways"}"#, "Fling requires direction"),
+            (#"{"action": "scroll", "direction": "up", "x": 10}"#, "needs both x and y"),
+            (#"{"action": "drag", "startX": 1, "startY": 2}"#, "Drag requires startX, startY, endX, and endY"),
+            (#"{"action": "swipe", "startX": 1}"#, "Swipe requires startX, startY, endX, and endY"),
+            (#"{"action": "longPress", "x": 10}"#, "requires both x and y"),
+        ]
+        for (body, expected) in cases {
+            let (status, text) = try await post(body)
+            XCTAssertEqual(status, 400, body)
+            XCTAssertTrue(text.contains(expected), "\(body) → \(text)")
+        }
+    }
+
     private func availablePort() throws -> UInt16 {
         let descriptor = socket(AF_INET, SOCK_STREAM, 0)
         guard descriptor >= 0 else { throw POSIXError(.ENOTSOCK) }

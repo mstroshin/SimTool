@@ -341,6 +341,16 @@ public struct SimulatorInputPayload: Codable, Equatable, Sendable {
     public var endX: Double?
     public var endY: Double?
     public var duration: Double?
+    /// Finger speed in points per second (swipe, drag, fling).
+    public var velocity: Double?
+    /// Seconds the finger rests at the end before lifting (swipe, drag).
+    public var hold: Double?
+    /// Seconds the finger rests at the start before moving (drag).
+    public var press: Double?
+    /// The way the finger moves (scroll, fling): up, down, left or right.
+    public var direction: String?
+    /// How far a scroll moves the content, in points.
+    public var distance: Double?
     public var name: String?
     public var coordinateSpace: String?
     public var sourceWidth: Double?
@@ -359,6 +369,11 @@ public struct SimulatorInputPayload: Codable, Equatable, Sendable {
         endX: Double? = nil,
         endY: Double? = nil,
         duration: Double? = nil,
+        velocity: Double? = nil,
+        hold: Double? = nil,
+        press: Double? = nil,
+        direction: String? = nil,
+        distance: Double? = nil,
         name: String? = nil,
         coordinateSpace: String? = nil,
         sourceWidth: Double? = nil,
@@ -376,6 +391,11 @@ public struct SimulatorInputPayload: Codable, Equatable, Sendable {
         self.endX = endX
         self.endY = endY
         self.duration = duration
+        self.velocity = velocity
+        self.hold = hold
+        self.press = press
+        self.direction = direction
+        self.distance = distance
         self.name = name
         self.coordinateSpace = coordinateSpace
         self.sourceWidth = sourceWidth

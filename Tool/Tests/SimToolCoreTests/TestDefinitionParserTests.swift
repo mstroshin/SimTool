@@ -37,6 +37,60 @@ final class TestDefinitionParserTests: XCTestCase {
         XCTAssertNil(test.kind)
     }
 
+    func testParsesScrollFlingAndDragSteps() throws {
+        let test = try TestDefinitionParser.parse("""
+        steps:
+          - scroll: down
+          - scroll: { direction: up, distance: 300, id: feed, timeout: 5 }
+          - fling: left
+          - fling: { direction: up, speed: fast, label: "Inbox" }
+          - fling: { direction: up, speed: 900 }
+          - drag: { from: { label: "Milk" }, to: { label: "Eggs" } }
+          - drag: { from: slider, by: { x: 120 }, press: 0.3, speed: 200, hold: 0.2 }
+        """)
+        XCTAssertEqual(test.steps.map(\.action), [
+            .scroll(.down, distance: nil, from: nil, timeout: nil),
+            .scroll(.up, distance: 300, from: TestTarget(kind: .id, query: "feed"), timeout: 5),
+            .fling(.left, speed: nil, from: nil, timeout: nil),
+            .fling(.up, speed: 1250, from: TestTarget(kind: .label, query: "Inbox"), timeout: nil),
+            .fling(.up, speed: 900, from: nil, timeout: nil),
+            .drag(from: TestTarget(kind: .label, query: "Milk"), to: .target(TestTarget(kind: .label, query: "Eggs")),
+                  press: nil, speed: nil, hold: nil, timeout: nil),
+            .drag(from: TestTarget(kind: .text, query: "slider"), to: .offset(x: 120, y: 0),
+                  press: 0.3, speed: 200, hold: 0.2, timeout: nil),
+        ])
+        XCTAssertEqual(test.steps.map(\.description), [
+            "Scroll down",
+            "Scroll up 300 pt from id \"feed\"",
+            "Fling left",
+            "Fling up at 1250 pt/s from label \"Inbox\"",
+            "Fling up at 900 pt/s",
+            "Drag label \"Milk\" to label \"Eggs\"",
+            "Drag \"slider\" by 120, 0 pt",
+        ])
+    }
+
+    func testRejectsMalformedGestureSteps() {
+        let cases: [(String, String)] = [
+            ("- scroll: sideways", "unknown direction `sideways`"),
+            ("- scroll: { distance: 100 }", "`direction:` is required"),
+            ("- scroll: { direction: up, id: a, label: b }", "at most one of"),
+            ("- scroll: { direction: up, speed: fast }", "unknown key `speed`"),
+            ("- fling: { direction: up, speed: warp }", "slow, normal, fast"),
+            ("- drag: { from: { id: a } }", "exactly one of `to:`"),
+            ("- drag: { from: { id: a }, to: { id: b }, by: { y: 10 } }", "exactly one of `to:`"),
+            ("- drag: { to: { id: b } }", "`from:` names the element"),
+            ("- drag: { from: { id: a }, by: 10 }", "an offset in points"),
+            ("- drag: up", "a drag is a mapping"),
+            ("- drag: { from: { id: a }, to: { id: b }, criterion: AC-1 }", "belongs on assertVisible"),
+        ]
+        for (step, expected) in cases {
+            XCTAssertThrowsError(try TestDefinitionParser.parse("steps:\n  \(step)\n"), step) { error in
+                XCTAssertTrue("\(error)".contains(expected), "\(step) → \(error)")
+            }
+        }
+    }
+
     func testLongPressDurationIsOptional() throws {
         let test = try TestDefinitionParser.parse("""
         steps:

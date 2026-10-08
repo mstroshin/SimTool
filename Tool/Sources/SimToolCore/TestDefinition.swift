@@ -40,7 +40,10 @@ import Yams
 ///   - tap: { id: settingsButton }
 ///   - longPress: { id: optionToggle, duration: 1.5 }
 ///   - type: "hello"
-///   - swipe: up
+///   - swipe: up                   # = scroll: up — the finger moves up
+///   - scroll: { direction: up, distance: 300, id: feed }
+///   - fling: { direction: up, speed: fast }
+///   - drag: { from: { label: "Milk" }, to: { label: "Eggs" } }
 ///   - assertVisible: { text: "Welcome", criterion: AC-1 }
 ///   - assertHidden: { label: "Loading" }
 ///   - wait: 2
@@ -316,8 +319,22 @@ public struct TestTarget: Equatable, Sendable, CustomStringConvertible {
     }
 }
 
-public enum TestSwipeDirection: String, Equatable, Sendable {
-    case up, down, left, right
+/// The way the finger moves in a `swipe`, `scroll` or `fling` step: `up`
+/// drags the content up, revealing what is below.
+public typealias TestSwipeDirection = TouchDirection
+
+/// Where a `drag` step drops: on another element, or an offset in points from
+/// where it picked up.
+public enum TestDragDestination: Equatable, Sendable, CustomStringConvertible {
+    case target(TestTarget)
+    case offset(x: Double, y: Double)
+
+    public var description: String {
+        switch self {
+        case .target(let target): "to \(target)"
+        case .offset(let x, let y): "by \(String(format: "%g", x)), \(String(format: "%g", y)) pt"
+        }
+    }
 }
 
 /// One step: an action, plus the criterion it checks when the step is part of
@@ -345,7 +362,11 @@ public enum TestStepAction: Equatable, Sendable, CustomStringConvertible {
     case tap(TestTarget, timeout: Double?)
     case longPress(TestTarget, duration: Double?, timeout: Double?)
     case type(String)
+    /// Kept as written for reports; runs as `scroll` with its defaults.
     case swipe(TestSwipeDirection)
+    case scroll(TestSwipeDirection, distance: Double?, from: TestTarget?, timeout: Double?)
+    case fling(TestSwipeDirection, speed: Double?, from: TestTarget?, timeout: Double?)
+    case drag(from: TestTarget, to: TestDragDestination, press: Double?, speed: Double?, hold: Double?, timeout: Double?)
     case waitFor(TestTarget, timeout: Double?)
     case assertHidden(TestTarget, timeout: Double?)
     case pause(Double)
@@ -354,7 +375,7 @@ public enum TestStepAction: Equatable, Sendable, CustomStringConvertible {
     public var isAssertion: Bool {
         switch self {
         case .waitFor, .assertHidden: true
-        case .tap, .longPress, .type, .swipe, .pause: false
+        case .tap, .longPress, .type, .swipe, .scroll, .fling, .drag, .pause: false
         }
     }
 
@@ -365,6 +386,11 @@ public enum TestStepAction: Equatable, Sendable, CustomStringConvertible {
             "Long press \(target)" + (duration.map { " · \($0.formatted())s" } ?? "")
         case .type(let text): "Type \"\(text)\""
         case .swipe(let direction): "Swipe \(direction.rawValue)"
+        case .scroll(let direction, let distance, let from, _):
+            "Scroll \(direction.rawValue)" + (distance.map { " \(String(format: "%g", $0)) pt" } ?? "") + (from.map { " from \($0)" } ?? "")
+        case .fling(let direction, let speed, let from, _):
+            "Fling \(direction.rawValue)" + (speed.map { " at \(String(format: "%g", $0)) pt/s" } ?? "") + (from.map { " from \($0)" } ?? "")
+        case .drag(let from, let to, _, _, _, _): "Drag \(from) \(to)"
         case .waitFor(let target, _): "Wait for \(target)"
         case .assertHidden(let target, _): "Assert hidden \(target)"
         case .pause(let seconds): "Pause \(seconds.formatted())s"
@@ -832,11 +858,25 @@ public enum TestDefinitionParser {
         case "type":
             action = .type(scalarString(value))
         case "swipe":
-            let raw = scalarString(value)
-            guard let direction = TestSwipeDirection(rawValue: raw) else {
-                throw SimToolError("\(context): unknown direction `\(raw)`. Use up, down, left or right.")
-            }
-            action = .swipe(direction)
+            action = .swipe(try direction(value, context: context))
+        case "scroll":
+            let options = try gestureOptions(value, context: context, allowed: ["distance"])
+            action = .scroll(
+                options.direction,
+                distance: try options.mapping["distance"].map { try points($0, key: "distance", context: context) },
+                from: options.target,
+                timeout: options.timeout
+            )
+        case "fling":
+            let options = try gestureOptions(value, context: context, allowed: ["speed"])
+            action = .fling(
+                options.direction,
+                speed: try options.mapping["speed"].map { try flingSpeed($0, context: context) },
+                from: options.target,
+                timeout: options.timeout
+            )
+        case "drag":
+            action = try drag(value, context: context)
         case "waitFor", "assertVisible":
             let (target, timeout) = try targetAndTimeout(value, context: context)
             action = .waitFor(target, timeout: timeout)
@@ -846,12 +886,110 @@ public enum TestDefinitionParser {
         case "wait":
             action = .pause(try seconds(value, context: context))
         default:
-            throw SimToolError("Step \(index + 1): unknown step `\(keyword)`. Known steps: tap, longPress, type, swipe, waitFor, assertVisible, assertHidden, wait.")
+            throw SimToolError("Step \(index + 1): unknown step `\(keyword)`. Known steps: tap, longPress, type, swipe, scroll, fling, drag, waitFor, assertVisible, assertHidden, wait.")
         }
         if criterion != nil, !action.isAssertion {
             throw SimToolError("\(context): `criterion:` marks the assertion that checks the claim, so it belongs on assertVisible, assertHidden or waitFor — not on `\(keyword)`.")
         }
         return TestStep(action: action, criterion: criterion)
+    }
+
+    // MARK: - gestures
+
+    private static func direction(_ value: Any, context: String) throws -> TestSwipeDirection {
+        let raw = scalarString(value)
+        guard let direction = TestSwipeDirection(rawValue: raw) else {
+            throw SimToolError("\(context): unknown direction `\(raw)`. Use up, down, left or right — the way the finger moves.")
+        }
+        return direction
+    }
+
+    /// `scroll`/`fling` take a bare direction, or a mapping with `direction`,
+    /// an optional element to start on (`id`/`label`/`text`), `timeout` and
+    /// the step's own `allowed` keys.
+    private static func gestureOptions(
+        _ value: Any,
+        context: String,
+        allowed: [String]
+    ) throws -> (direction: TestSwipeDirection, target: TestTarget?, timeout: Double?, mapping: [String: Any]) {
+        guard let mapping = value as? [String: Any] else {
+            return (try direction(value, context: context), nil, nil, [:])
+        }
+        guard let raw = mapping["direction"] else {
+            throw SimToolError("\(context): `direction:` is required — up, down, left or right.")
+        }
+        let kinds: [TestTarget.Kind] = [.id, .label, .text]
+        let present = kinds.filter { mapping[$0.rawValue] != nil }
+        guard present.count <= 1 else {
+            throw SimToolError("\(context): start on at most one of `id`, `label` or `text`.")
+        }
+        let known = Set(["direction", "timeout", "criterion"] + allowed + kinds.map(\.rawValue))
+        if let unknown = mapping.keys.sorted().first(where: { !known.contains($0) }) {
+            throw SimToolError("\(context): unknown key `\(unknown)`.")
+        }
+        return (
+            try direction(raw, context: context),
+            present.first.map { TestTarget(kind: $0, query: scalarString(mapping[$0.rawValue]!)) },
+            try mapping["timeout"].map { try seconds($0, context: context) },
+            mapping
+        )
+    }
+
+    private static func drag(_ value: Any, context: String) throws -> TestStepAction {
+        guard let mapping = value as? [String: Any] else {
+            throw SimToolError("\(context): a drag is a mapping like `{ from: { label: \"Milk\" }, to: { label: \"Eggs\" } }`.")
+        }
+        let known: Set<String> = ["from", "to", "by", "press", "speed", "hold", "timeout", "criterion"]
+        if let unknown = mapping.keys.sorted().first(where: { !known.contains($0) }) {
+            throw SimToolError("\(context): unknown key `\(unknown)`.")
+        }
+        guard let rawFrom = mapping["from"] else {
+            throw SimToolError("\(context): `from:` names the element to pick up.")
+        }
+        let from = try parseTarget(rawFrom, context: "\(context) from", allowDuration: false).0
+        let destination: TestDragDestination
+        switch (mapping["to"], mapping["by"]) {
+        case (let to?, nil):
+            destination = .target(try parseTarget(to, context: "\(context) to", allowDuration: false).0)
+        case (nil, let by?):
+            guard let offset = by as? [String: Any], Set(offset.keys).isSubset(of: ["x", "y"]), !offset.isEmpty else {
+                throw SimToolError("\(context): `by:` is an offset in points, like `{ x: 0, y: 120 }`.")
+            }
+            destination = .offset(
+                x: try offset["x"].map { try number($0, key: "by.x", context: context) } ?? 0,
+                y: try offset["y"].map { try number($0, key: "by.y", context: context) } ?? 0
+            )
+        default:
+            throw SimToolError("\(context): give exactly one of `to:` (an element) or `by:` (an offset in points).")
+        }
+        return .drag(
+            from: from,
+            to: destination,
+            press: try mapping["press"].map { try seconds($0, context: context) },
+            speed: try mapping["speed"].map { try points($0, key: "speed", context: context) },
+            hold: try mapping["hold"].map { try seconds($0, context: context) },
+            timeout: try mapping["timeout"].map { try seconds($0, context: context) }
+        )
+    }
+
+    private static func flingSpeed(_ value: Any, context: String) throws -> Double {
+        guard let speed = FlingSpeed.parse(scalarString(value)) else {
+            throw SimToolError("\(context): `speed:` is slow, normal, fast or points per second, got `\(scalarString(value))`.")
+        }
+        return speed
+    }
+
+    private static func points(_ value: Any, key: String, context: String) throws -> Double {
+        let number = try number(value, key: key, context: context)
+        guard number > 0 else { throw SimToolError("\(context): `\(key):` must be positive, got `\(scalarString(value))`.") }
+        return number
+    }
+
+    private static func number(_ value: Any, key: String, context: String) throws -> Double {
+        if let number = value as? Double { return number }
+        if let number = value as? Int { return Double(number) }
+        if let string = value as? String, let number = Double(string) { return number }
+        throw SimToolError("\(context): `\(key):` expected a number, got `\(scalarString(value))`.")
     }
 
     private static func criterionLabel(in value: Any, context: String) throws -> String? {

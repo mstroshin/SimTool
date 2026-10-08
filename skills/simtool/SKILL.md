@@ -254,15 +254,30 @@ server (`GET /api/v1/screenshot`, see the viewer below) or use
 frame is usually the splash — capture again to see the settled screen.
 
 ### Input · accessibility · logs
-- `simtool input …` — taps and long-presses (by label / a11y-id / coordinates),
-  type, paste, swipe, hardware buttons. `type` reaches only US-keyboard
-  characters; `paste "<text>"` (or `--stdin`) puts any text — Cyrillic,
-  accents, emoji, several lines — on the simulator clipboard and presses ⌘V in
-  the focused field. It fails when no text field changed and no keyboard is up:
-  tap the field first. `paste --image <file>` pastes an image the same way; only
-  fields that take images react. For a photo picker, put the image in the
-  library instead: `xcrun simctl addmedia <udid> <file>…` (or right-click the
-  viewer's screen › Add to Photos).
+- `simtool input …` — touches, typing, hardware buttons. Coordinates are
+  screen **points** (the frames `simtool ax` reports), and every touch is played
+  by SimTool's own HID helper as a timed path:
+  - `tap` / `long-press` — by label, a11y-id or coordinates. A long press under
+    ~0.6 s may land as a tap (warns); the default 1 s is safe.
+  - `scroll up|down|left|right [--distance <pt>]` — the direction is **the way
+    the finger moves** (`up` reveals what is below). Moves the content by that
+    distance (half a screen by default) and leaves it there, no inertia.
+  - `fling <direction> [--speed slow|normal|fast]` — lifts in motion, the
+    content keeps going.
+  - `swipe --start-x … --end-y …` — an explicit path; rests 0.25 s before
+    lifting so a list stops with the finger, `--hold 0` flings; `--velocity` or
+    `--duration` sets the speed.
+  - `drag --start-x … --end-y …` — presses 0.8 s until the item lifts, carries
+    it, rests, drops: list reordering, moving items, handles. Apps with a
+    context menu sometimes show the menu instead; retry, or `--press 0.6`.
+  - `type` reaches only US-keyboard characters; `paste "<text>"` (or
+    `--stdin`) puts any text — Cyrillic, accents, emoji, several lines — on the
+    simulator clipboard and presses ⌘V in the focused field. It fails when no
+    text field changed and no keyboard is up: tap the field first. `paste
+    --image <file>` pastes an image the same way; only fields that take images
+    react. For a photo picker, put the image in the library instead: `xcrun
+    simctl addmedia <udid> <file>…` (or right-click the viewer's screen › Add to
+    Photos).
 - `simtool ax …` — read the accessibility tree / find an element.
 - `simtool logs …` — OSLog stream; a `--stdout` mode **relaunches** the app to
   attach its console (useful when the app logs richly to stdout — networking,
@@ -373,7 +388,8 @@ changes produce no event. Likewise, state that never lands in a tracked property
 invisible here — grab it from OSLog.
 
 ### Live browser viewer
-`simtool serve` opens a viewer (stream + Logs + Network panels); scoping
+`simtool serve` opens a viewer (stream + Logs + Network panels; the mouse on
+the screen is a live finger — hold, drag, wheel-scroll, Option for pinch); scoping
 `--app <bundle>` captures that app's OSLog **and** stdout and auto-opens the Logs
 panel. `simtool run` reads `.simtool/config.yml` and does build → launch → viewer
 in one step. Flags: `simtool serve --help` / `simtool run --help`.

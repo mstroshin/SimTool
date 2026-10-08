@@ -12,8 +12,6 @@ import SimToolCore
 public struct TestRunner {
     public let client: SimToolClient
     public let udid: String
-    public let screenWidth: Double
-    public let screenHeight: Double
     public let defaultTimeout: Double
 
     private static let pollInterval: Duration = .milliseconds(500)
@@ -21,14 +19,10 @@ public struct TestRunner {
     public init(
         client: SimToolClient,
         udid: String,
-        screenWidth: Double,
-        screenHeight: Double,
         defaultTimeout: Double
     ) {
         self.client = client
         self.udid = udid
-        self.screenWidth = screenWidth
-        self.screenHeight = screenHeight
         self.defaultTimeout = defaultTimeout
     }
 
@@ -99,7 +93,23 @@ public struct TestRunner {
         case .type(let text):
             try check(await client.typeText(text), action: "type")
         case .swipe(let direction):
-            try await swipe(direction)
+            try check(await client.scroll(direction: direction), action: "swipe")
+        case .scroll(let direction, let distance, let from, let timeout):
+            let start = try await startPoint(on: from, timeout: timeout)
+            try check(await client.scroll(direction: direction, distance: distance, x: start?.x, y: start?.y), action: "scroll")
+        case .fling(let direction, let speed, let from, let timeout):
+            let start = try await startPoint(on: from, timeout: timeout)
+            try check(await client.fling(direction: direction, velocity: speed, x: start?.x, y: start?.y), action: "fling")
+        case .drag(let from, let to, let press, let speed, let hold, let timeout):
+            let start = try center(of: try await waitForMatch(from, timeout: timeout), target: from)
+            let end: TouchPoint = switch to {
+            case .target(let target): try center(of: try await waitForMatch(target, timeout: timeout), target: target)
+            case .offset(let x, let y): TouchPoint(x: start.x + x, y: start.y + y)
+            }
+            try check(
+                await client.drag(startX: start.x, startY: start.y, endX: end.x, endY: end.y, press: press, velocity: speed, hold: hold),
+                action: "drag"
+            )
         case .waitFor(let target, let timeout):
             _ = try await waitForMatch(target, timeout: timeout)
         case .assertHidden(let target, let timeout):
@@ -171,22 +181,20 @@ public struct TestRunner {
         }
     }
 
-    private func swipe(_ direction: TestSwipeDirection) async throws {
-        let (start, end): ((Double, Double), (Double, Double)) = switch direction {
-        case .up: ((0.5, 0.7), (0.5, 0.3))
-        case .down: ((0.5, 0.3), (0.5, 0.7))
-        case .left: ((0.7, 0.5), (0.3, 0.5))
-        case .right: ((0.3, 0.5), (0.7, 0.5))
+    /// The center of the element a gesture starts on, once it is on screen;
+    /// nil lets the server pick its default start.
+    private func startPoint(on target: TestTarget?, timeout: Double?) async throws -> TouchPoint? {
+        guard let target else { return nil }
+        return try center(of: try await waitForMatch(target, timeout: timeout), target: target)
+    }
+
+    /// Where a gesture on this node lands: its frame center, like a tap.
+    private func center(of node: AccessibilityNode, target: TestTarget) throws -> TouchPoint {
+        guard let frame = node.frame,
+              let x = frame.x, let y = frame.y, let width = frame.width, let height = frame.height else {
+            throw SimToolError("matched \(target) but the node has no frame to touch")
         }
-        try check(
-            await client.swipe(
-                startX: start.0 * screenWidth,
-                startY: start.1 * screenHeight,
-                endX: end.0 * screenWidth,
-                endY: end.1 * screenHeight
-            ),
-            action: "swipe"
-        )
+        return TouchPoint(x: x + width / 2, y: y + height / 2)
     }
 
     private func check(_ result: CommandResultPayload, action: String) throws {

@@ -397,8 +397,6 @@ public final class TestRunExecutor: @unchecked Sendable {
         let runner = TestRunner(
             client: client,
             udid: config.udid,
-            screenWidth: Double(config.width),
-            screenHeight: Double(config.height),
             defaultTimeout: test.stepTimeout
         )
         var completedSteps = 0

@@ -34,6 +34,7 @@ public enum WebViewer {
                   <div id="surface" class="surface">
                     <canvas id="screen" aria-label="Simulator stream"></canvas>
                     <div id="axOverlay" class="ax-overlay" hidden></div>
+                    <div id="touchOverlay" class="touch-overlay"></div>
                     <div id="testPlayback" class="test-playback" hidden>
                       <button id="testBackLive" class="test-back-live" type="button">← Live</button>
                       <!-- Custom controls: Orca's embedded browser drops clicks on the
@@ -155,7 +156,8 @@ public enum WebViewer {
               <p data-tab="logs"><b>right-click selected text</b> — copy / include / exclude it</p>
             </div>
           </main>
-          <script>\(javascript)</script>
+          <script>\(touchScript)
+        \(javascript)</script>
         </body>
         </html>
         """
@@ -428,6 +430,14 @@ public enum WebViewer {
     /* AX overlays drawn over the device image (never into the video canvas). */
     .ax-overlay { position: absolute; inset: 0; pointer-events: none; z-index: 2; }
     .ax-overlay[hidden] { display: none; }
+    /* Where the finger is on the device, drawn at once, ahead of the video. */
+    .touch-overlay { position: absolute; inset: 0; pointer-events: none; z-index: 2; overflow: hidden; }
+    .touch-dot { position: absolute; width: 30px; height: 30px; margin: -15px 0 0 -15px; border-radius: 999px; background: rgba(255,255,255,0.30); border: 2px solid rgba(255,255,255,0.78); box-shadow: 0 0 10px rgba(0,0,0,0.35); }
+    .touch-dot[hidden] { display: none; }
+    .touch-dot.preview { background: rgba(255,255,255,0.10); border-color: rgba(255,255,255,0.45); box-shadow: none; }
+    .touch-dot.wheel { width: 18px; height: 18px; margin: -9px 0 0 -9px; background: rgba(125,211,252,0.28); border-color: rgba(125,211,252,0.75); }
+    .touch-dot.held::after { content: ""; position: absolute; inset: -9px; border-radius: 999px; border: 2px solid rgba(125,211,252,0.9); animation: touch-held 0.18s ease-out; }
+    @keyframes touch-held { from { transform: scale(0.6); opacity: 0; } to { transform: scale(1); opacity: 1; } }
     .ax-box { position: absolute; border: 1px solid rgba(125,211,252,0.32); box-sizing: border-box; }
     .ax-box.hover { border-color: rgba(125,211,252,0.85); background: rgba(125,211,252,0.12); }
     .ax-box.selected { border: 2px solid #7dd3fc; background: rgba(125,211,252,0.20); box-shadow: 0 0 0 1px rgba(7,10,18,0.6); }
@@ -455,6 +465,90 @@ public enum WebViewer {
       .card-resize-handle { display: none; }
     }
     """
+
+    /// The live-touch channel, kept apart from the page script so it can be
+    /// exercised on its own.
+    static let touchScript = #"""
+    // Live touch: one WebSocket carries the viewer's finger to the device.
+    // Moves coalesce to one per animation frame; downs and ups are never
+    // dropped, and a move still waiting goes out before the up that ends it.
+    // While the socket reconnects, the newest 32 messages of the last 1.5 s
+    // wait for it — older ones would replay a gesture the user has finished.
+    function createTouchStream(options) {
+      const makeSocket = options.makeSocket || ((url) => new WebSocket(url));
+      const now = options.now || (() => performance.now());
+      const nextFrame = options.nextFrame || ((fn) => requestAnimationFrame(fn));
+      const later = options.later || ((fn, ms) => setTimeout(fn, ms));
+      const maxQueued = 32;
+      const maxAgeMs = 1500;
+      let socket = null;
+      let open = false;
+      let queue = [];
+      let pendingMove = null;
+      let frameScheduled = false;
+      let retryMs = 250;
+      let closed = false;
+
+      function connect() {
+        if (closed) return;
+        const next = makeSocket(options.url);
+        socket = next;
+        next.onopen = () => {
+          if (socket !== next) return;
+          open = true;
+          retryMs = 250;
+          const at = now();
+          for (const item of queue) if (at - item.at <= maxAgeMs) next.send(item.text);
+          queue = [];
+        };
+        next.onclose = () => {
+          if (socket !== next) return;
+          open = false;
+          socket = null;
+          if (closed) return;
+          later(connect, retryMs);
+          retryMs = Math.min(2000, retryMs * 2);
+        };
+        next.onerror = () => {}; // onclose follows and reconnects
+      }
+
+      function send(message) {
+        const text = JSON.stringify(message);
+        if (open && socket) { socket.send(text); return; }
+        const at = now();
+        queue.push({ text, at });
+        queue = queue.filter((item) => at - item.at <= maxAgeMs).slice(-maxQueued);
+      }
+
+      const round = (v) => Math.round(Math.min(1, Math.max(0, v)) * 100000) / 100000;
+      function message(t, first, second) {
+        const m = { t, x: round(first.x), y: round(first.y) };
+        if (second) { m.x2 = round(second.x); m.y2 = round(second.y); }
+        return m;
+      }
+
+      function flushMove() {
+        if (!pendingMove) return;
+        const m = pendingMove;
+        pendingMove = null;
+        send(m);
+      }
+
+      connect();
+      return {
+        down(first, second) { flushMove(); send(message("down", first, second)); },
+        move(first, second) {
+          pendingMove = message("move", first, second);
+          if (frameScheduled) return;
+          frameScheduled = true;
+          nextFrame(() => { frameScheduled = false; flushMove(); });
+        },
+        up(first, second) { flushMove(); send(message("up", first, second)); },
+        get connected() { return open; },
+        close() { closed = true; if (socket) socket.close(); }
+      };
+    }
+    """#
 
     private static let javascript = #"""
     const $ = (id) => document.getElementById(id);
@@ -678,47 +772,6 @@ public enum WebViewer {
       const x = (event.clientX - rect.left) * (streamWidth / rect.width);
       const y = (event.clientY - rect.top) * (streamHeight / rect.height);
       return { x, y };
-    }
-
-    async function sendTap(point) {
-      if (!streamWidth || !streamHeight) return;
-      try {
-        await api("/api/v1/input", {
-          method: "POST",
-          body: JSON.stringify({
-            action: "tap",
-            x: point.x,
-            y: point.y,
-            coordinateSpace: "pixels",
-            sourceWidth: streamWidth,
-            sourceHeight: streamHeight
-          })
-        });
-      } catch (error) {
-        setStatus(`tap failed: ${error.message}`, "err");
-      }
-    }
-
-    async function sendSwipe(start, end, durationSeconds) {
-      if (!streamWidth || !streamHeight) return;
-      try {
-        await api("/api/v1/input", {
-          method: "POST",
-          body: JSON.stringify({
-            action: "swipe",
-            startX: start.x,
-            startY: start.y,
-            endX: end.x,
-            endY: end.y,
-            duration: durationSeconds,
-            coordinateSpace: "pixels",
-            sourceWidth: streamWidth,
-            sourceHeight: streamHeight
-          })
-        });
-      } catch (error) {
-        setStatus(`swipe failed: ${error.message}`, "err");
-      }
     }
 
     async function pressHome() {
@@ -3234,54 +3287,192 @@ public enum WebViewer {
     document.addEventListener("keydown", (event) => { if (event.key === "Escape") hidePopups(); });
     window.addEventListener("scroll", () => hidePopups(), true);
 
-    // Canvas pointer gestures: a near-stationary press is a tap, a drag is a swipe.
-    const TAP_MOVE_THRESHOLD = 8;     // CSS px of movement below which a gesture is a tap
-    const SWIPE_MIN_DURATION = 0.05;  // seconds — keeps a fast flick usable
-    const SWIPE_MAX_DURATION = 2.0;   // seconds — caps an absurdly slow drag
-    let gesture = null;
+    // Canvas gestures: the finger follows the pointer. Down, every move and up
+    // stream to the device as they happen; nothing waits for a reply.
+    const touchStream = createTouchStream({
+      url: (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/api/v1/input/stream"
+    });
+    const touchOverlay = $("touchOverlay");
+    const LONG_PRESS_MS = 500;   // UIKit's long-press delay: the ring says it has passed
+    const HOLD_SLOP_PX = 8;      // CSS px of movement that rules a long press out
+    const WHEEL_IDLE_MS = 100;   // a wheel scroll lifts its finger after this much silence
+    const WHEEL_INSET = 0.08;    // wheel fingers stay this far inside, clear of the edge gestures
+    let touch = null;            // the live finger(s) under the pointer
+    let axPickPointer = null;    // a press in AX pick mode, which never touches the device
+    let wheel = null;            // the finger a wheel or trackpad scroll is dragging
+
+    const clamp01 = (v) => Math.min(1, Math.max(0, v));
+
+    function canvasRatio(event) {
+      const rect = canvas.getBoundingClientRect();
+      return { x: clamp01((event.clientX - rect.left) / rect.width), y: clamp01((event.clientY - rect.top) / rect.height) };
+    }
+
+    // Alt adds a second finger mirrored through the screen center, so spreading
+    // or circling the pointer pinches or rotates. Alt+Shift keeps the pair's
+    // offset instead: a two-finger pan.
+    function secondFinger(mode, point, offset) {
+      if (mode === "pinch") return { x: clamp01(1 - point.x), y: clamp01(1 - point.y) };
+      if (mode === "pan2") return { x: clamp01(point.x + offset.x), y: clamp01(point.y + offset.y) };
+      return null;
+    }
+
+    const touchDots = [0, 1].map(() => {
+      const dot = document.createElement("div");
+      dot.className = "touch-dot";
+      dot.hidden = true;
+      touchOverlay.appendChild(dot);
+      return dot;
+    });
+
+    function showDots(first, second, state) {
+      [first, second].forEach((point, index) => {
+        const dot = touchDots[index];
+        if (!point) { dot.hidden = true; return; }
+        dot.hidden = false;
+        dot.className = "touch-dot" + (state ? " " + state : "");
+        dot.style.left = (point.x * 100) + "%";
+        dot.style.top = (point.y * 100) + "%";
+      });
+    }
+
+    function hideDots() { for (const dot of touchDots) dot.hidden = true; }
+
+    function touchState() { return touch && touch.held ? "held" : ""; }
+
+    function endTouch() {
+      if (!touch) return;
+      const ending = touch;
+      touch = null;
+      clearTimeout(ending.holdTimer);
+      touchStream.up(ending.point, ending.second);
+      hideDots();
+    }
 
     canvas.addEventListener("pointerdown", (event) => {
       if (!streamWidth || !streamHeight) return;
       if (event.button !== 0) return; // primary button / touch only
       // A click that dismisses the clipboard menu must not also tap the device.
       if (!deviceMenu.hidden) { hideDeviceMenu(); event.preventDefault(); return; }
-      gesture = {
-        pointerId: event.pointerId,
-        startClientX: event.clientX,
-        startClientY: event.clientY,
-        startPoint: eventToSimulatorPoint(event, canvas),
-        startTime: performance.now()
-      };
       try { canvas.setPointerCapture(event.pointerId); } catch (_) {}
       event.preventDefault();
+      if (axSelectMode()) { axPickPointer = event.pointerId; return; }
+      endWheelDrag();
+      endTouch();
+      const point = canvasRatio(event);
+      const mode = event.altKey ? (event.shiftKey ? "pan2" : "pinch") : "one";
+      const second = mode === "one" ? null : { x: clamp01(1 - point.x), y: clamp01(1 - point.y) };
+      touch = {
+        pointerId: event.pointerId,
+        mode,
+        offset: second ? { x: second.x - point.x, y: second.y - point.y } : null,
+        point,
+        second,
+        startX: event.clientX,
+        startY: event.clientY,
+        held: false,
+        holdTimer: null
+      };
+      touchStream.down(point, second);
+      showDots(point, second, "");
+      touch.holdTimer = setTimeout(() => {
+        if (!touch) return;
+        touch.held = true;
+        showDots(touch.point, touch.second, "held");
+      }, LONG_PRESS_MS);
+    });
+
+    canvas.addEventListener("pointermove", (event) => {
+      if (!touch) {
+        // With Alt held, show where the two fingers would land.
+        if (event.altKey && !wheel && !axSelectMode() && streamWidth) {
+          const point = canvasRatio(event);
+          showDots(point, event.shiftKey ? null : secondFinger("pinch", point), "preview");
+        } else if (!wheel) {
+          hideDots();
+        }
+        return;
+      }
+      if (event.pointerId !== touch.pointerId) return;
+      touch.point = canvasRatio(event);
+      touch.second = secondFinger(touch.mode, touch.point, touch.offset);
+      if (touch.holdTimer && Math.hypot(event.clientX - touch.startX, event.clientY - touch.startY) > HOLD_SLOP_PX) {
+        clearTimeout(touch.holdTimer);
+        touch.holdTimer = null;
+      }
+      touchStream.move(touch.point, touch.second);
+      showDots(touch.point, touch.second, touchState());
     });
 
     canvas.addEventListener("pointerup", (event) => {
-      if (!gesture || event.pointerId !== gesture.pointerId) return;
-      const start = gesture;
-      gesture = null;
       try { canvas.releasePointerCapture(event.pointerId); } catch (_) {}
-      if (axSelectMode()) {
+      if (axPickPointer === event.pointerId) {
+        axPickPointer = null;
         const node = axHitTest(event.clientX, event.clientY);
         if (node) selectAxNode(node._key, true);
         return;
       }
-      const moved = Math.hypot(event.clientX - start.startClientX, event.clientY - start.startClientY);
-      if (moved < TAP_MOVE_THRESHOLD) {
-        sendTap(start.startPoint);
-        return;
-      }
-      const endPoint = eventToSimulatorPoint(event, canvas);
-      const elapsedSeconds = (performance.now() - start.startTime) / 1000;
-      const duration = Math.min(SWIPE_MAX_DURATION, Math.max(SWIPE_MIN_DURATION, elapsedSeconds));
-      sendSwipe(start.startPoint, endPoint, duration);
+      if (!touch || event.pointerId !== touch.pointerId) return;
+      // The finger lifts where the pointer is now.
+      touch.point = canvasRatio(event);
+      touch.second = secondFinger(touch.mode, touch.point, touch.offset);
+      endTouch();
     });
 
-    canvas.addEventListener("pointercancel", (event) => {
-      if (!gesture || event.pointerId !== gesture.pointerId) return;
-      try { canvas.releasePointerCapture(gesture.pointerId); } catch (_) {}
-      gesture = null;
-    });
+    for (const type of ["pointercancel", "lostpointercapture"]) {
+      canvas.addEventListener(type, (event) => {
+        if (axPickPointer === event.pointerId) axPickPointer = null;
+        if (touch && event.pointerId === touch.pointerId) endTouch();
+      });
+    }
+    canvas.addEventListener("pointerleave", () => { if (!touch && !wheel) hideDots(); });
+    // A finger never outlives the page's attention.
+    window.addEventListener("blur", () => { endTouch(); endWheelDrag(); });
+    document.addEventListener("visibilitychange", () => { if (document.hidden) { endTouch(); endWheelDrag(); } });
+
+    // iOS drops synthetic scroll events, so a wheel or trackpad scroll drags a
+    // finger instead: down under the cursor, moved by each (inverted) delta,
+    // put back down near the cursor when it runs into an edge, lifted after
+    // 100 ms of quiet. The trackpad's own momentum carries the content.
+    canvas.addEventListener("wheel", (event) => {
+      if (!streamWidth || !streamHeight) return;
+      event.preventDefault();
+      if (event.ctrlKey || touch || axSelectMode()) return; // pinch-to-zoom the page: not here
+      const rect = canvas.getBoundingClientRect();
+      const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? rect.height : 1;
+      const dx = -event.deltaX * unit / rect.width;
+      const dy = -event.deltaY * unit / rect.height;
+      const anchor = () => {
+        const point = canvasRatio(event);
+        return { x: Math.min(1 - WHEEL_INSET, Math.max(WHEEL_INSET, point.x)), y: Math.min(1 - WHEEL_INSET, Math.max(WHEEL_INSET, point.y)) };
+      };
+      if (!wheel) {
+        wheel = { point: anchor(), timer: null };
+        touchStream.down(wheel.point);
+      }
+      let next = { x: wheel.point.x + dx, y: wheel.point.y + dy };
+      const inside = (v) => v >= WHEEL_INSET / 2 && v <= 1 - WHEEL_INSET / 2;
+      if (!inside(next.x) || !inside(next.y)) {
+        touchStream.up(wheel.point);
+        const start = anchor();
+        touchStream.down(start);
+        next = { x: clamp01(start.x + dx), y: clamp01(start.y + dy) };
+      }
+      wheel.point = next;
+      touchStream.move(next);
+      showDots(next, null, "wheel");
+      clearTimeout(wheel.timer);
+      wheel.timer = setTimeout(endWheelDrag, WHEEL_IDLE_MS);
+    }, { passive: false });
+
+    function endWheelDrag() {
+      if (!wheel) return;
+      const ending = wheel;
+      wheel = null;
+      clearTimeout(ending.timer);
+      touchStream.up(ending.point);
+      if (!touch) hideDots();
+    }
 
     // Right-click on the device screen: in AX mode, select the element under the
     // cursor and open the Copy menu for it; otherwise open the clipboard menu.
