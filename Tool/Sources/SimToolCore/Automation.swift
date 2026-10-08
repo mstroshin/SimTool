@@ -50,6 +50,11 @@ public enum AxeClient {
     }
 }
 
+/// Device input. Every touch — tap, long press, swipe, drag, scroll, fling —
+/// is a timed path played by the one HID helper (`SimulatorDirectInputClient`),
+/// the same one the viewer's live finger uses, so touches never mix transports.
+/// Coordinates are screen points, the accessibility tree's space; an `id` or
+/// `label` target is resolved to its frame center through that tree.
 public enum SimulatorInputClient {
     public static func tap(
         deviceUDID: String,
@@ -58,39 +63,130 @@ public enum SimulatorInputClient {
         id: String? = nil,
         label: String? = nil
     ) async throws -> ProcessOutput {
-        var args = ["tap", "--udid", deviceUDID]
-        if let x, let y { args += ["-x", "\(x)", "-y", "\(y)"] }
-        if let id { args += ["--id", id] }
-        if let label { args += ["--label", label] }
-        return try await AxeClient.run(args)
+        let point = try await target(deviceUDID: deviceUDID, x: x, y: y, id: id, label: label, action: "Tap")
+        return try await perform(.tap(at: point), deviceUDID: deviceUDID)
     }
 
-    /// AXe's `touch` command only takes coordinates, so an `id`/`label` target
-    /// is resolved to its frame center through the accessibility tree first.
     public static func longPress(
         deviceUDID: String,
         x: Double? = nil,
         y: Double? = nil,
         id: String? = nil,
         label: String? = nil,
-        duration: Double = 1.0
+        duration: Double = TouchStroke.longPressDuration
     ) async throws -> ProcessOutput {
-        let point: (x: Double, y: Double)
-        if let x, let y {
-            point = (x, y)
-        } else if id != nil || label != nil {
-            point = try await frameCenter(deviceUDID: deviceUDID, id: id, label: label)
-        } else {
-            throw SimToolError("Long press requires x/y coordinates or an id/label target")
+        let point = try await target(deviceUDID: deviceUDID, x: x, y: y, id: id, label: label, action: "Long press")
+        var output = try await perform(.longPress(at: point, duration: max(0.1, duration)), deviceUDID: deviceUDID)
+        if duration < TouchStroke.longPressMinimum {
+            let held = String(format: "%g", duration), needed = String(format: "%g", TouchStroke.longPressMinimum)
+            output.stderr = Data("warning: a \(held) s press may register as a tap — UIKit's long press fires after 0.5 s; hold \(needed) s or longer.\n".utf8)
         }
-        return try await AxeClient.run([
-            "touch",
-            "-x", "\(point.x)",
-            "-y", "\(point.y)",
-            "--down", "--up",
-            "--delay", "\(max(0.1, duration))",
-            "--udid", deviceUDID,
-        ])
+        return output
+    }
+
+    /// A finger from start to end. It moves at `velocity` points per second, or
+    /// covers the distance in `duration` seconds, or else at scroll speed, then
+    /// rests `hold` seconds (a quarter second by default, which leaves a scroll
+    /// view where the finger stopped) before lifting; `hold: 0` lifts in motion.
+    public static func swipe(
+        deviceUDID: String,
+        startX: Double,
+        startY: Double,
+        endX: Double,
+        endY: Double,
+        duration: Double? = nil,
+        velocity: Double? = nil,
+        hold: Double? = nil
+    ) async throws -> ProcessOutput {
+        let from = TouchPoint(x: startX, y: startY), to = TouchPoint(x: endX, y: endY)
+        let speed = velocity ?? duration.map { from.distance(to: to) / max(0.017, $0) } ?? TouchStroke.scrollVelocity
+        return try await perform(
+            TouchStroke(from: from, to: to, velocity: speed, hold: hold ?? TouchStroke.scrollHold),
+            deviceUDID: deviceUDID
+        )
+    }
+
+    /// Press until the item lifts (0.8 s), carry it at 300 pt/s, rest 0.5 s,
+    /// drop — reordering, moving icons, sliders.
+    public static func drag(
+        deviceUDID: String,
+        startX: Double,
+        startY: Double,
+        endX: Double,
+        endY: Double,
+        press: Double? = nil,
+        velocity: Double? = nil,
+        hold: Double? = nil
+    ) async throws -> ProcessOutput {
+        try await perform(
+            .drag(
+                from: TouchPoint(x: startX, y: startY),
+                to: TouchPoint(x: endX, y: endY),
+                press: press ?? TouchStroke.dragPress,
+                velocity: velocity ?? TouchStroke.dragVelocity,
+                hold: hold ?? TouchStroke.dragHold
+            ),
+            deviceUDID: deviceUDID
+        )
+    }
+
+    /// Moves the content by `distance` points (half the screen by default) and
+    /// leaves it there. `direction` is the way the finger moves.
+    public static func scroll(
+        deviceUDID: String,
+        direction: TouchDirection,
+        distance: Double? = nil,
+        x: Double? = nil,
+        y: Double? = nil
+    ) async throws -> ProcessOutput {
+        let screen = try await SimulatorDirectInputClient.shared.screenSize(deviceUDID: deviceUDID)
+        let start = try startPoint(x: x, y: y)
+        return try await perform(TouchGeometry.scroll(direction, distance: distance, from: start, on: screen), deviceUDID: deviceUDID)
+    }
+
+    /// ~200 points of travel lifted in motion, so the content keeps going.
+    public static func fling(
+        deviceUDID: String,
+        direction: TouchDirection,
+        velocity: Double = TouchStroke.flingVelocity,
+        x: Double? = nil,
+        y: Double? = nil
+    ) async throws -> ProcessOutput {
+        let screen = try await SimulatorDirectInputClient.shared.screenSize(deviceUDID: deviceUDID)
+        let start = try startPoint(x: x, y: y)
+        return try await perform(TouchGeometry.fling(direction, velocity: velocity, from: start, on: screen), deviceUDID: deviceUDID)
+    }
+
+    /// The screen in points.
+    public static func screenSize(deviceUDID: String) async throws -> SimulatorScreenSize {
+        try await SimulatorDirectInputClient.shared.screenSize(deviceUDID: deviceUDID)
+    }
+
+    private static func perform(_ stroke: TouchStroke, deviceUDID: String) async throws -> ProcessOutput {
+        try await SimulatorDirectInputClient.shared.perform(stroke, deviceUDID: deviceUDID)
+        return ProcessOutput(status: 0)
+    }
+
+    private static func startPoint(x: Double?, y: Double?) throws -> TouchPoint? {
+        if (x == nil) != (y == nil) { throw SimToolError("A start point needs both x and y") }
+        guard let x, let y else { return nil }
+        return TouchPoint(x: x, y: y)
+    }
+
+    private static func target(
+        deviceUDID: String,
+        x: Double?,
+        y: Double?,
+        id: String?,
+        label: String?,
+        action: String
+    ) async throws -> TouchPoint {
+        if let x, let y { return TouchPoint(x: x, y: y) }
+        if id != nil || label != nil {
+            let center = try await frameCenter(deviceUDID: deviceUDID, id: id, label: label)
+            return TouchPoint(x: center.x, y: center.y)
+        }
+        throw SimToolError("\(action) requires x/y coordinates or an id/label target")
     }
 
     private static func frameCenter(deviceUDID: String, id: String?, label: String?) async throws -> (x: Double, y: Double) {
@@ -107,34 +203,15 @@ public enum SimulatorInputClient {
             guard matches,
                   let frame = node.frame,
                   let x = frame.x, let y = frame.y,
-                  let width = frame.width, let height = frame.height else { continue }
+                  let width = frame.width, let height = frame.height,
+                  width > 0, height > 0 else { continue }
             return (x + width / 2, y + height / 2)
         }
-        throw SimToolError("No element matching \(id.map { "id \"\($0)\"" } ?? "label \"\(label ?? "")\"") with a frame to long-press")
+        throw SimToolError("No element matching \(id.map { "id \"\($0)\"" } ?? "label \"\(label ?? "")\"") with a frame on screen")
     }
 
     public static func typeText(_ text: String, deviceUDID: String) async throws -> ProcessOutput {
         try await AxeClient.run(["type", "--stdin", "--udid", deviceUDID], stdin: Data(text.utf8))
-    }
-
-    public static func swipe(
-        deviceUDID: String,
-        startX: Double,
-        startY: Double,
-        endX: Double,
-        endY: Double,
-        duration: Double? = nil
-    ) async throws -> ProcessOutput {
-        var args = [
-            "swipe",
-            "--start-x", "\(startX)",
-            "--start-y", "\(startY)",
-            "--end-x", "\(endX)",
-            "--end-y", "\(endY)",
-            "--udid", deviceUDID,
-        ]
-        if let duration { args += ["--duration", "\(duration)"] }
-        return try await AxeClient.run(args)
     }
 
     public static func button(_ name: String, deviceUDID: String) async throws -> ProcessOutput {

@@ -210,17 +210,23 @@ struct ToolCheck: Codable {
 struct Input: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Send input to a simulator.",
-        subcommands: [Tap.self, LongPress.self, TypeText.self, Paste.self, Swipe.self, Button.self]
+        discussion: """
+        Every touch is played by SimTool's own HID helper as a timed path, in \
+        screen points (the space `simtool ax tree` reports frames in).
+        """,
+        subcommands: [Tap.self, LongPress.self, TypeText.self, Paste.self, Swipe.self, Scroll.self, Fling.self, Drag.self, Button.self]
     )
 }
+
+extension TouchDirection: ExpressibleByArgument {}
 
 extension Input {
     struct Tap: AsyncParsableCommand {
         static let configuration = CommandConfiguration(commandName: "tap", abstract: "Tap screen coordinates or an accessibility target.")
 
         @Option var device: String?
-        @Option(help: "X coordinate in screen pixels.") var x: Double?
-        @Option(help: "Y coordinate in screen pixels.") var y: Double?
+        @Option(help: "X coordinate in screen points.") var x: Double?
+        @Option(help: "Y coordinate in screen points.") var y: Double?
         @Option(help: "Accessibility identifier.") var id: String?
         @Option(help: "Accessibility label.") var label: String?
         @OptionGroup var common: CommonJSON
@@ -239,11 +245,11 @@ extension Input {
         )
 
         @Option var device: String?
-        @Option(help: "X coordinate in screen pixels.") var x: Double?
-        @Option(help: "Y coordinate in screen pixels.") var y: Double?
+        @Option(help: "X coordinate in screen points.") var x: Double?
+        @Option(help: "Y coordinate in screen points.") var y: Double?
         @Option(help: "Accessibility identifier.") var id: String?
         @Option(help: "Accessibility label.") var label: String?
-        @Option(help: "Hold duration in seconds.") var duration: Double = 1.0
+        @Option(help: "Hold duration in seconds (UIKit needs more than 0.5).") var duration: Double = 1.0
         @OptionGroup var common: CommonJSON
 
         func run() async throws {
@@ -327,15 +333,30 @@ extension Input {
     }
 
     struct Swipe: AsyncParsableCommand {
-        static let configuration = CommandConfiguration(commandName: "swipe", abstract: "Swipe from one pixel coordinate to another.")
+        static let configuration = CommandConfiguration(
+            commandName: "swipe",
+            abstract: "Move a finger from one point to another.",
+            discussion: """
+            The finger moves at --velocity points per second (or covers the distance in \
+            --duration seconds; 600 pt/s by default), then rests --hold seconds before \
+            lifting. The default quarter-second rest leaves a scroll view where the \
+            finger stopped; --hold 0 lifts in motion, so the content keeps going.
+            """
+        )
 
         @Option var device: String?
-        @Option var startX: Double
-        @Option var startY: Double
-        @Option var endX: Double
-        @Option var endY: Double
-        @Option(help: "Duration in seconds.") var duration: Double?
+        @Option(help: "Start X in screen points.") var startX: Double
+        @Option(help: "Start Y in screen points.") var startY: Double
+        @Option(help: "End X in screen points.") var endX: Double
+        @Option(help: "End Y in screen points.") var endY: Double
+        @Option(help: "Seconds the move takes.") var duration: Double?
+        @Option(help: "Finger speed in points per second.") var velocity: Double?
+        @Option(help: "Seconds the finger rests at the end before lifting (default 0.25).") var hold: Double?
         @OptionGroup var common: CommonJSON
+
+        func validate() throws {
+            if duration != nil, velocity != nil { throw ValidationError("Pass --duration or --velocity, not both.") }
+        }
 
         func run() async throws {
             let device = try await resolveConfiguredDevice(device)
@@ -345,7 +366,104 @@ extension Input {
                 startY: startY,
                 endX: endX,
                 endY: endY,
-                duration: duration
+                duration: duration,
+                velocity: velocity,
+                hold: hold
+            )
+            try emitCommandResult(output, json: common.json)
+        }
+    }
+
+    struct Scroll: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "scroll",
+            abstract: "Scroll the content by a distance and leave it there.",
+            discussion: """
+            The direction is the way the finger moves: `up` drags the content up, \
+            revealing what is below. It starts 25% inside the screen (or at --x/--y), \
+            travels --distance points plus the ~10 pt a scroll view's pan swallows \
+            (half the screen by default), slows down and rests before lifting, so \
+            there is no inertia.
+            """
+        )
+
+        @Argument(help: "up, down, left or right — the way the finger moves.") var direction: TouchDirection
+        @Option var device: String?
+        @Option(help: "How far the content moves, in points.") var distance: Double?
+        @Option(help: "Start X in screen points.") var x: Double?
+        @Option(help: "Start Y in screen points.") var y: Double?
+        @OptionGroup var common: CommonJSON
+
+        func run() async throws {
+            let device = try await resolveConfiguredDevice(device)
+            let output = try await SimulatorInputClient.scroll(deviceUDID: device.udid, direction: direction, distance: distance, x: x, y: y)
+            try emitCommandResult(output, json: common.json)
+        }
+    }
+
+    struct Fling: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "fling",
+            abstract: "Flick the content: ~200 points lifted in motion, so it keeps going.",
+            discussion: "The direction is the way the finger moves: `up` throws the content up."
+        )
+
+        @Argument(help: "up, down, left or right — the way the finger moves.") var direction: TouchDirection
+        @Option var device: String?
+        @Option(help: "slow (750 pt/s), normal (1000), fast (1250) or points per second.") var speed: String = "normal"
+        @Option(help: "Start X in screen points.") var x: Double?
+        @Option(help: "Start Y in screen points.") var y: Double?
+        @OptionGroup var common: CommonJSON
+
+        func validate() throws {
+            if FlingSpeed.parse(speed) == nil { throw ValidationError("--speed takes slow, normal, fast or a positive number of points per second.") }
+        }
+
+        func run() async throws {
+            let device = try await resolveConfiguredDevice(device)
+            let output = try await SimulatorInputClient.fling(
+                deviceUDID: device.udid,
+                direction: direction,
+                velocity: FlingSpeed.parse(speed) ?? FlingSpeed.normal,
+                x: x,
+                y: y
+            )
+            try emitCommandResult(output, json: common.json)
+        }
+    }
+
+    struct Drag: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "drag",
+            abstract: "Press until the item lifts, carry it, and drop it.",
+            discussion: """
+            Long-press-and-drag: reordering lists, moving items, dragging handles. The \
+            finger rests --press seconds (0.8) so the item lifts, moves at --velocity \
+            points per second (300), and rests --hold seconds (0.5) before dropping.
+            """
+        )
+
+        @Option var device: String?
+        @Option(help: "Start X in screen points.") var startX: Double
+        @Option(help: "Start Y in screen points.") var startY: Double
+        @Option(help: "End X in screen points.") var endX: Double
+        @Option(help: "End Y in screen points.") var endY: Double
+        @Option(help: "Seconds the finger rests before moving.") var press: Double?
+        @Option(help: "Finger speed in points per second.") var velocity: Double?
+        @Option(help: "Seconds the finger rests at the end before lifting.") var hold: Double?
+        @OptionGroup var common: CommonJSON
+
+        func run() async throws {
+            let device = try await resolveConfiguredDevice(device)
+            let output = try await SimulatorInputClient.drag(
+                deviceUDID: device.udid,
+                startX: startX,
+                startY: startY,
+                endX: endX,
+                endY: endY,
+                press: press,
+                velocity: velocity,
+                hold: hold
             )
             try emitCommandResult(output, json: common.json)
         }
@@ -374,6 +492,11 @@ func emitCommandResult(_ output: ProcessOutput, json: Bool) throws {
     if json {
         try printJSON(CommandResultPayload(ok: true, stdout: output.stdoutString, stderr: output.stderrString))
     } else {
+        // SimTool's own warnings (a long press too short to register) reach the
+        // terminal; tool chatter on stderr stays out of it.
+        for line in output.stderrString.split(separator: "\n") where line.hasPrefix("warning:") {
+            FileHandle.standardError.write(Data((line + "\n").utf8))
+        }
         let trimmed = output.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty { makeNoora().success("ok") }
         else { print(trimmed) }
@@ -1292,13 +1415,21 @@ struct TestCommand: AsyncParsableCommand {
                 - tap: { id: settingsButton }
                 - longPress: { id: optionToggle, duration: 1.5 }
                 - type: "hello"
-                - swipe: up
+                - swipe: up                   # = scroll: up — the finger moves up
+                - scroll: { direction: up, distance: 300, id: feed }
+                - fling: { direction: up, speed: fast }
+                - drag: { from: { label: "Milk" }, to: { label: "Eggs" } }
                 - assertVisible: { text: "Welcome", criterion: AC-1 }
                 - assertHidden: { label: "Loading" }
                 - wait: 2
 
             Every step polls the accessibility tree until its target appears (or
             disappears for assertHidden), so tests need no explicit sleeps.
+            Directions are the way the finger moves: `scroll: up` drags the
+            content up, revealing what is below, and leaves it where the finger
+            stopped (half a screen, or `distance:` points); `fling` lifts in
+            motion so the content keeps going; `drag` presses 0.8 s until the
+            item lifts, carries it and rests before dropping it — reordering.
             Setup commands reset persisted state; their exit codes are recorded
             in the session but never fail the test. They also learn where this
             run's server is — `{server}` in the command, and `SIMTOOL_SERVER`

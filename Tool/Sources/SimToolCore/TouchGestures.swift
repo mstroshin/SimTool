@@ -252,3 +252,106 @@ public struct TouchStroke: Equatable, Sendable {
         TouchPoint(x: from.x + (to.x - from.x) * fraction, y: from.y + (to.y - from.y) * fraction)
     }
 }
+
+/// The way the finger moves. `up` drags the content up, revealing what is below.
+public enum TouchDirection: String, CaseIterable, Codable, Equatable, Sendable {
+    case up, down, left, right
+
+    var unit: (x: Double, y: Double) {
+        switch self {
+        case .up: (0, -1)
+        case .down: (0, 1)
+        case .left: (-1, 0)
+        case .right: (1, 0)
+        }
+    }
+}
+
+/// Named fling speeds, in points per second.
+public enum FlingSpeed {
+    public static let slow = 750.0
+    public static let normal = TouchStroke.flingVelocity
+    public static let fast = 1250.0
+
+    /// `slow`, `normal`, `fast`, or a number of points per second.
+    public static func parse(_ text: String) -> Double? {
+        switch text.lowercased() {
+        case "slow": slow
+        case "normal", "": normal
+        case "fast": fast
+        default: Double(text).flatMap { $0 > 0 ? $0 : nil }
+        }
+    }
+}
+
+/// Where direction-based gestures start and how far they go, so a test reads
+/// `scroll: up` instead of coordinates.
+public enum TouchGeometry {
+    /// Gestures stay this far from the screen edges, out of the system's edge
+    /// gestures (home indicator, Notification and Control Center, back).
+    public static let edgeMargin = 20.0
+    /// A direction gesture starts this far inside the screen from the edge the
+    /// finger moves away from.
+    public static let startInset = 0.25
+
+    /// The default start: 25 % inside the screen on the side the finger leaves,
+    /// centered on the other axis.
+    public static func start(for direction: TouchDirection, on screen: SimulatorScreenSize) -> TouchPoint {
+        let point: TouchPoint = switch direction {
+        case .up: TouchPoint(x: screen.width / 2, y: screen.height * (1 - startInset))
+        case .down: TouchPoint(x: screen.width / 2, y: screen.height * startInset)
+        case .left: TouchPoint(x: screen.width * (1 - startInset), y: screen.height / 2)
+        case .right: TouchPoint(x: screen.width * startInset, y: screen.height / 2)
+        }
+        return clamped(point, on: screen)
+    }
+
+    /// The end of a `distance`-point move from `start`, kept inside the margins.
+    public static func end(from start: TouchPoint, direction: TouchDirection, distance: Double, on screen: SimulatorScreenSize) -> TouchPoint {
+        let unit = direction.unit
+        return clamped(TouchPoint(x: start.x + unit.x * distance, y: start.y + unit.y * distance), on: screen)
+    }
+
+    public static func clamped(_ point: TouchPoint, on screen: SimulatorScreenSize) -> TouchPoint {
+        let margin = min(edgeMargin, screen.width / 4, screen.height / 4)
+        return TouchPoint(
+            x: min(screen.width - margin, max(margin, point.x)),
+            y: min(screen.height - margin, max(margin, point.y))
+        )
+    }
+
+    /// A scroll that moves the content by `distance` points (half the screen
+    /// along the direction by default) and leaves it there.
+    public static func scroll(
+        _ direction: TouchDirection,
+        distance: Double? = nil,
+        from start: TouchPoint? = nil,
+        on screen: SimulatorScreenSize
+    ) -> TouchStroke {
+        let origin = start.map { clamped($0, on: screen) } ?? self.start(for: direction, on: screen)
+        let travel = distance.map { $0 + TouchStroke.panSlop } ?? defaultTravel(direction, on: screen)
+        return .scroll(from: origin, to: end(from: origin, direction: direction, distance: travel, on: screen))
+    }
+
+    /// A fling: ~200 points of travel, lifted at `velocity`.
+    public static func fling(
+        _ direction: TouchDirection,
+        velocity: Double = TouchStroke.flingVelocity,
+        from start: TouchPoint? = nil,
+        on screen: SimulatorScreenSize
+    ) -> TouchStroke {
+        let origin = start.map { clamped($0, on: screen) } ?? self.start(for: direction, on: screen)
+        return .fling(
+            from: origin,
+            to: end(from: origin, direction: direction, distance: TouchStroke.flingDistance, on: screen),
+            velocity: velocity
+        )
+    }
+
+    private static func defaultTravel(_ direction: TouchDirection, on screen: SimulatorScreenSize) -> Double {
+        switch direction {
+        case .up, .down: screen.height * (1 - 2 * startInset)
+        case .left, .right: screen.width * (1 - 2 * startInset)
+        }
+    }
+}

@@ -63,6 +63,32 @@ final class SimToolCommandSurfaceTests: XCTestCase {
         XCTAssertThrowsError(try Input.Paste.parse(["--stdin", "--image", "shot.png"]))
     }
 
+    func testInputHasTheGestureCommands() throws {
+        let names = Input.configuration.subcommands.map { commandName(for: $0) }
+        for name in ["tap", "long-press", "swipe", "scroll", "fling", "drag"] {
+            XCTAssertTrue(names.contains(name), "missing input \(name)")
+        }
+
+        let swipe = try Input.Swipe.parse(["--start-x", "200", "--start-y", "600", "--end-x", "200", "--end-y", "300", "--velocity", "800", "--hold", "0"])
+        XCTAssertEqual(swipe.velocity, 800)
+        XCTAssertEqual(swipe.hold, 0)
+        XCTAssertThrowsError(try Input.Swipe.parse(["--start-x", "1", "--start-y", "1", "--end-x", "2", "--end-y", "2", "--duration", "1", "--velocity", "800"]))
+
+        let scroll = try Input.Scroll.parse(["up", "--distance", "300"])
+        XCTAssertEqual(scroll.direction, .up)
+        XCTAssertEqual(scroll.distance, 300)
+        XCTAssertThrowsError(try Input.Scroll.parse(["sideways"]))
+
+        XCTAssertEqual(try Input.Fling.parse(["down"]).speed, "normal")
+        XCTAssertNoThrow(try Input.Fling.parse(["left", "--speed", "fast"]))
+        XCTAssertNoThrow(try Input.Fling.parse(["left", "--speed", "1800"]))
+        XCTAssertThrowsError(try Input.Fling.parse(["left", "--speed", "ludicrous"]))
+
+        let drag = try Input.Drag.parse(["--start-x", "100", "--start-y", "140", "--end-x", "100", "--end-y", "290", "--press", "1"])
+        XCTAssertEqual(drag.press, 1)
+        XCTAssertNil(drag.velocity)
+    }
+
     func testTopLevelCommandIncludesAppNamespace() {
         let names = SimTool.configuration.subcommands.map { commandName(for: $0) }
         XCTAssertTrue(names.contains("app"))

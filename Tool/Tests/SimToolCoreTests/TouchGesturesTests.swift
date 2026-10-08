@@ -62,7 +62,7 @@ final class TouchGesturesTests: XCTestCase {
 
     func testMovesNeverComeFasterThanTheBuilderTakes() {
         let strokes = [
-            TouchStroke.fling(from: TouchPoint(x: 200, y: 600), to: TouchPoint(x: 200, y: 400), velocity: FlingSpeedFixture.fast),
+            TouchStroke.fling(from: TouchPoint(x: 200, y: 600), to: TouchPoint(x: 200, y: 400), velocity: FlingSpeed.fast),
             TouchStroke.scroll(from: TouchPoint(x: 200, y: 600), to: TouchPoint(x: 200, y: 100)),
             TouchStroke.drag(from: TouchPoint(x: 100, y: 100), to: TouchPoint(x: 300, y: 500)),
         ]
@@ -124,13 +124,51 @@ final class TouchGesturesTests: XCTestCase {
         )
     }
 
+    // MARK: - direction gestures
+
+    func testDirectionGesturesStartAQuarterInsideAndTravelHalfTheScreen() {
+        let up = TouchGeometry.scroll(.up, on: screen)
+        XCTAssertEqual(up.from, TouchPoint(x: 200, y: 600))
+        XCTAssertEqual(up.to, TouchPoint(x: 200, y: 200))
+        XCTAssertEqual(up.hold, TouchStroke.scrollHold)
+
+        let right = TouchGeometry.scroll(.right, on: screen)
+        XCTAssertEqual(right.from, TouchPoint(x: 100, y: 400))
+        XCTAssertEqual(right.to, TouchPoint(x: 300, y: 400))
+    }
+
+    func testAScrollByDistanceAddsThePanSlop() {
+        let stroke = TouchGeometry.scroll(.down, distance: 100, from: TouchPoint(x: 150, y: 300), on: screen)
+        XCTAssertEqual(stroke.from, TouchPoint(x: 150, y: 300))
+        XCTAssertEqual(stroke.to, TouchPoint(x: 150, y: 300 + 100 + TouchStroke.panSlop))
+    }
+
+    func testGesturesStayClearOfTheEdges() {
+        let stroke = TouchGeometry.scroll(.up, distance: 2000, from: TouchPoint(x: 5, y: 795), on: screen)
+        XCTAssertEqual(stroke.from, TouchPoint(x: TouchGeometry.edgeMargin, y: 800 - TouchGeometry.edgeMargin))
+        XCTAssertEqual(stroke.to.y, TouchGeometry.edgeMargin)
+    }
+
+    func testFlingTravelsTwoHundredPointsAtItsSpeed() {
+        let stroke = TouchGeometry.fling(.left, velocity: FlingSpeed.slow, on: screen)
+        XCTAssertEqual(stroke.from, TouchPoint(x: 300, y: 400))
+        XCTAssertEqual(stroke.to, TouchPoint(x: 100, y: 400))
+        XCTAssertEqual(stroke.velocity, 750)
+        XCTAssertEqual(stroke.hold, 0)
+    }
+
+    func testFlingSpeedNames() {
+        XCTAssertEqual(FlingSpeed.parse("slow"), 750)
+        XCTAssertEqual(FlingSpeed.parse("Normal"), 1000)
+        XCTAssertEqual(FlingSpeed.parse("fast"), 1250)
+        XCTAssertEqual(FlingSpeed.parse("1800"), 1800)
+        XCTAssertNil(FlingSpeed.parse("-5"))
+        XCTAssertNil(FlingSpeed.parse("warp"))
+    }
+
     func testShortMovesStillGetOneStep() {
         let path = TouchStroke.fling(from: TouchPoint(x: 100, y: 100), to: TouchPoint(x: 100, y: 102)).path(on: screen)
         XCTAssertEqual(path.samples.map(\.phase), [.down, .move, .up])
         XCTAssertEqual(path.samples[1].time, TouchStroke.sampleInterval, accuracy: 1e-9)
     }
-}
-
-private enum FlingSpeedFixture {
-    static let fast = 1250.0
 }

@@ -106,6 +106,29 @@ swift run simtool logs tail --app com.example.MyApp --stdout --seconds 4 --json
 swift run simtool network snapshot --seconds 2 --limit 50 --json
 ```
 
+Touches are played by SimTool's own HID helper as timed paths, in screen points
+(the space `ax tree` reports frames in) — the same helper the viewer's live
+finger uses:
+
+```sh
+swift run simtool input tap --label Continue
+swift run simtool input long-press --id photo --duration 1.2
+swift run simtool input scroll up --distance 300     # content moves 300 pt and stays
+swift run simtool input fling up --speed fast        # lifted in motion, keeps going
+swift run simtool input swipe --start-x 200 --start-y 700 --end-x 200 --end-y 300 --hold 0
+swift run simtool input drag --start-x 200 --start-y 140 --end-x 200 --end-y 290
+```
+
+Directions are the way the finger moves: `scroll up` drags the content up,
+revealing what is below. A `scroll` (and a `swipe`, unless `--hold 0`) slows
+down and rests a quarter second before lifting, which leaves the content where
+the finger stopped; a `fling` lifts in motion. A `drag` presses 0.8 s until the
+item lifts, carries it at 300 pt/s and rests 0.5 s before dropping it — list
+reordering and moving items. A `long-press` shorter than ~0.6 s warns that it may
+land as a tap. `POST /api/v1/input` takes the same gestures (`scroll`, `fling`,
+`drag`, and `swipe` with `velocity`/`hold`), and YAML tests have `scroll:`,
+`fling:` and `drag:` steps.
+
 `input type` reaches only characters on a US keyboard. For anything else —
 Cyrillic, accents, emoji, several lines — use `input paste`: it puts the text on
 the simulator clipboard and presses ⌘V in the focused field.
@@ -679,8 +702,12 @@ stdout/`print`) into a bounded buffer that clients poll incrementally by cursor;
 `GET /api/v1/logs` remains the one-shot bounded snapshot.
 
 `POST /api/v1/input` takes an `action` — `tap`, `longPress`, `type`, `paste`,
-`swipe`, `button`, `shake`, `terminate`, `launch` — plus that action's fields
-(`text` for `type` and `paste`). Images go as the raw request body instead:
+`swipe`, `scroll`, `fling`, `drag`, `button`, `shake`, `terminate`, `launch` —
+plus that action's fields: `x`/`y` or `id`/`label` for `tap` and `longPress`
+(`duration` for the press), `startX`/`startY`/`endX`/`endY` with `velocity`,
+`duration`, `hold` (and `press` for `drag`), `direction` with `distance` or
+`velocity` and an optional start `x`/`y` for `scroll` and `fling`, `text` for
+`type` and `paste`. Coordinates are screen points. Images go as the raw request body instead:
 `POST /api/v1/input/paste-image` pastes one into the focused field, and
 `POST /api/v1/photos` adds an image or a video to Photos. Both read the type from
 `Content-Type` and an optional percent-encoded `X-SimTool-Filename` header.
