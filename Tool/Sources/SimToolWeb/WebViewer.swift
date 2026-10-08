@@ -24,9 +24,6 @@ public enum WebViewer {
                   <button id="shake" class="icon-btn" type="button" title="Shake">📳</button>
                   <button id="terminate" class="icon-btn" type="button" title="Terminate app">⏹️</button>
                   <button id="relaunch" class="icon-btn" type="button" title="Relaunch app">▶️</button>
-                  <button id="addPhotos" class="icon-btn" type="button" title="Add to Photos: the clipboard image, or choose files">🖼️</button>
-                  <input id="photosFile" type="file" accept="image/*,video/*" multiple hidden>
-                  <button id="paste" class="icon-btn" type="button" title="Paste the Mac clipboard — text or an image — into the focused field (⌘V)">📋</button>
                   <button id="inspectToggle" class="inspect-toggle" type="button" aria-pressed="false">
                     <span class="dot"></span><span>Inspect</span>
                   </button>
@@ -143,6 +140,12 @@ public enum WebViewer {
             <div id="testsMenu" class="ax-menu" hidden>
               <button id="testsMenuDelete" class="ax-menu-item tests-menu-delete" type="button">Delete</button>
             </div>
+            <div id="deviceMenu" class="ax-menu" hidden>
+              <button id="deviceMenuPaste" class="ax-menu-item" type="button">Paste<span class="ax-menu-key">⌘V</span></button>
+              <button id="deviceMenuPhotos" class="ax-menu-item" type="button">Add Clipboard Image to Photos</button>
+              <button id="deviceMenuPhotoFiles" class="ax-menu-item" type="button">Add Files to Photos…</button>
+            </div>
+            <input id="photosFile" type="file" accept="image/*,video/*" multiple hidden>
             <div id="filterHelpPop" class="filter-help-pop" hidden>
               <p><b>type text</b> — live substring filter over the current tab's fields</p>
               <p><b>Enter</b> — turn the text into an include chip (show only matches)</p>
@@ -185,7 +188,6 @@ public enum WebViewer {
     .toolrow { display: flex; align-items: center; gap: 8px; padding: 4px 14px 10px; }
     .icon-btn { appearance: none; width: 30px; height: 30px; display: grid; place-items: center; border: 1px solid rgba(255,255,255,0.14); border-radius: 9px; background: rgba(255,255,255,0.06); color: #cdd6e6; font-size: 14px; cursor: pointer; }
     .icon-btn:hover { background: rgba(255,255,255,0.10); }
-    .icon-btn:disabled { opacity: 0.5; cursor: progress; }
     .inspect-toggle { margin-left: auto; display: flex; align-items: center; gap: 7px; appearance: none; border: 1px solid rgba(255,255,255,0.14); border-radius: 10px; background: rgba(255,255,255,0.06); color: rgba(244,247,251,0.72); padding: 6px 12px; font: 12px ui-sans-serif, system-ui, sans-serif; cursor: pointer; }
     .inspect-toggle:hover { background: rgba(255,255,255,0.10); }
     .inspect-toggle .dot { width: 8px; height: 8px; border-radius: 999px; background: #4b5366; }
@@ -436,6 +438,7 @@ public enum WebViewer {
     .ax-menu[hidden] { display: none; }
     .ax-menu-item { appearance: none; display: block; width: 100%; text-align: left; background: none; border: 0; border-radius: 6px; color: #f4f7fb; padding: 7px 10px; font: 12px ui-sans-serif, system-ui, sans-serif; cursor: pointer; white-space: nowrap; }
     .ax-menu-item:hover { background: rgba(125,211,252,0.18); color: #bae6fd; }
+    .ax-menu-key { float: right; padding-left: 24px; color: rgba(244,247,251,0.45); }
     .tests-menu-delete { color: #f87171; }
     .tests-menu-delete:hover { background: rgba(248,113,113,0.16); color: #fca5a5; }
 
@@ -468,8 +471,10 @@ public enum WebViewer {
     const shakeButton = $("shake");
     const terminateButton = $("terminate");
     const relaunchButton = $("relaunch");
-    const pasteButton = $("paste");
-    const addPhotosButton = $("addPhotos");
+    const deviceMenu = $("deviceMenu");
+    const deviceMenuPaste = $("deviceMenuPaste");
+    const deviceMenuPhotos = $("deviceMenuPhotos");
+    const deviceMenuPhotoFiles = $("deviceMenuPhotoFiles");
     const photosFileInput = $("photosFile");
     const stage = $("stage");
 
@@ -755,7 +760,6 @@ public enum WebViewer {
     async function runPaste(label, send, failureHint = "") {
       if (pasteInFlight) return;
       pasteInFlight = true;
-      pasteButton.disabled = true;
       setStatus(label, "idle");
       try {
         const result = await send();
@@ -764,7 +768,6 @@ public enum WebViewer {
         setStatus(`paste failed: ${error.message}${failureHint}`, "err");
       } finally {
         pasteInFlight = false;
-        pasteButton.disabled = false;
       }
     }
 
@@ -777,7 +780,7 @@ public enum WebViewer {
     }
 
     function pasteImageIntoSimulator(image) {
-      runPaste("pasting image…", () => postFile("/api/v1/input/paste-image", image), " — or 🖼️ adds it to Photos");
+      runPaste("pasting image…", () => postFile("/api/v1/input/paste-image", image), " — or right-click the screen to add it to Photos");
     }
 
     // Files and clipboard images go as the raw body; the name rides in a header.
@@ -822,13 +825,12 @@ public enum WebViewer {
       else pasteIntoSimulator(content ? content.text : "");
     }
 
-    // Add to Photos: the clipboard image, or files chosen on the Mac when the
-    // clipboard holds none. Either way they land where a photo picker offers them.
+    // Add to Photos: the clipboard image or files chosen on the Mac land where
+    // a photo picker offers them.
     let photosInFlight = false;
     async function addToPhotos(files) {
       if (photosInFlight || !files.length) return;
       photosInFlight = true;
-      addPhotosButton.disabled = true;
       try {
         let result = null;
         for (const [index, file] of files.entries()) {
@@ -840,7 +842,6 @@ public enum WebViewer {
         setStatus(`add to Photos failed: ${error.message}`, "err");
       } finally {
         photosInFlight = false;
-        addPhotosButton.disabled = false;
       }
     }
 
@@ -854,11 +855,22 @@ public enum WebViewer {
           }
         }
       } catch (_) {
-        // No clipboard access: the file chooser below is the other way in.
+        setStatus("Add to Photos: clipboard access was denied — use Add Files to Photos…", "err");
+        return;
       }
-      if (image) { addToPhotos([image]); return; }
-      setStatus("no image on the clipboard — choose files to add to Photos", "idle");
-      photosFileInput.click();
+      if (image) addToPhotos([image]);
+      else setStatus("Add to Photos: the clipboard holds no image — use Add Files to Photos…", "err");
+    }
+
+    // Right-click on the device screen (outside AX mode): the clipboard actions.
+    function showDeviceMenu(x, y) {
+      deviceMenu.hidden = false;
+      const rect = deviceMenu.getBoundingClientRect();
+      deviceMenu.style.left = Math.max(6, Math.min(x, window.innerWidth - rect.width - 6)) + "px";
+      deviceMenu.style.top = Math.max(6, Math.min(y, window.innerHeight - rect.height - 6)) + "px";
+    }
+    function hideDeviceMenu() {
+      deviceMenu.hidden = true;
     }
 
     // The viewer's own fields (inspector filter and the like) keep their native paste.
@@ -3114,8 +3126,9 @@ public enum WebViewer {
     shakeButton.addEventListener("click", pressShake);
     terminateButton.addEventListener("click", pressTerminate);
     relaunchButton.addEventListener("click", pressRelaunch);
-    pasteButton.addEventListener("click", pasteFromClipboard);
-    addPhotosButton.addEventListener("click", addClipboardImageToPhotos);
+    deviceMenuPaste.addEventListener("click", () => { hideDeviceMenu(); pasteFromClipboard(); });
+    deviceMenuPhotos.addEventListener("click", () => { hideDeviceMenu(); addClipboardImageToPhotos(); });
+    deviceMenuPhotoFiles.addEventListener("click", () => { hideDeviceMenu(); photosFileInput.click(); });
     photosFileInput.addEventListener("change", () => {
       const files = Array.from(photosFileInput.files || []);
       photosFileInput.value = "";
@@ -3207,9 +3220,10 @@ public enum WebViewer {
       event.stopPropagation();
       if (filterHelpPop.hidden) showFilterHelp(); else hideFilterHelp();
     });
-    function hidePopups() { hideAxMenu(); hideNetworkMenu(); hideNetworkLaunchMenu(); hideLogsMenu(); hideLogsLaunchMenu(); hideTestsMenu(); hideFilterHelp(); }
+    function hidePopups() { hideAxMenu(); hideDeviceMenu(); hideNetworkMenu(); hideNetworkLaunchMenu(); hideLogsMenu(); hideLogsLaunchMenu(); hideTestsMenu(); hideFilterHelp(); }
     document.addEventListener("click", (event) => {
       if (!axMenu.hidden && !axMenu.contains(event.target)) hideAxMenu();
+      if (!deviceMenu.hidden && !deviceMenu.contains(event.target)) hideDeviceMenu();
       if (!networkMenu.hidden && !networkMenu.contains(event.target)) hideNetworkMenu();
       if (!networkLaunchMenu.hidden && !networkLaunchMenu.contains(event.target)) hideNetworkLaunchMenu();
       if (!logsMenu.hidden && !logsMenu.contains(event.target)) hideLogsMenu();
@@ -3229,6 +3243,8 @@ public enum WebViewer {
     canvas.addEventListener("pointerdown", (event) => {
       if (!streamWidth || !streamHeight) return;
       if (event.button !== 0) return; // primary button / touch only
+      // A click that dismisses the clipboard menu must not also tap the device.
+      if (!deviceMenu.hidden) { hideDeviceMenu(); event.preventDefault(); return; }
       gesture = {
         pointerId: event.pointerId,
         startClientX: event.clientX,
@@ -3267,11 +3283,15 @@ public enum WebViewer {
       gesture = null;
     });
 
-    // Right-click on the device screen (AX mode only): select the element under the
-    // cursor and open the Copy menu for it.
+    // Right-click on the device screen: in AX mode, select the element under the
+    // cursor and open the Copy menu for it; otherwise open the clipboard menu.
     canvas.addEventListener("contextmenu", (event) => {
-      if (!axSelectMode()) return;
       event.preventDefault();
+      if (!axSelectMode()) {
+        hidePopups();
+        showDeviceMenu(event.clientX, event.clientY);
+        return;
+      }
       const node = axHitTest(event.clientX, event.clientY);
       if (!node) return;
       selectAxNode(node._key, true);

@@ -120,10 +120,11 @@ back to `simctl pbcopy` (text only) on older Xcode.
 
 In the browser viewer, ⌘V anywhere on the page outside its own fields pastes
 the Mac clipboard — text, or an image when it holds no text — into the
-simulator, and so does the 📋 button (it asks the browser for clipboard
-access). The 🖼️ button next to Relaunch adds the clipboard image to the
-simulator's Photos library (`simctl addmedia`), where a photo picker offers it;
-with no image on the clipboard it opens a file chooser for images and videos.
+simulator. Right-clicking the device screen opens a menu with the same
+**Paste** (it asks the browser for clipboard access), **Add Clipboard Image to
+Photos** and **Add Files to Photos…** (images and videos): both put the media
+in the simulator's Photos library (`simctl addmedia`), where a photo picker
+offers it. In the AX inspector the right-click keeps its element Copy menu.
 
 ### Tests and sessions
 

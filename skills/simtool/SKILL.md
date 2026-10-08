@@ -253,7 +253,8 @@ frame is usually the splash — capture again to see the settled screen.
   the focused field. It fails when no text field changed and no keyboard is up:
   tap the field first. `paste --image <file>` pastes an image the same way; only
   fields that take images react. For a photo picker, put the image in the
-  library instead: `xcrun simctl addmedia <udid> <file>…` (or the viewer's 🖼️).
+  library instead: `xcrun simctl addmedia <udid> <file>…` (or right-click the
+  viewer's screen › Add to Photos).
 - `simtool ax …` — read the accessibility tree / find an element.
 - `simtool logs …` — OSLog stream; a `--stdout` mode **relaunches** the app to
   attach its console (useful when the app logs richly to stdout — networking,
