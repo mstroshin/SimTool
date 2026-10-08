@@ -3,7 +3,7 @@ class Simtool < Formula
   homepage "https://github.com/mstroshin/SimTool"
   url "https://github.com/mstroshin/SimTool/releases/download/v0.12.0/simtool-v0.12.0-macos-arm64.tar.gz"
   version "0.12.0"
-  sha256 "c384ed30af6a88d7c886012df115f7714b0856a73814ebc6834ab73b208be78b"
+  sha256 "874c555e077316b2b9ebe29efa82b738f26ddb4c923aa6165c4745a2faee2c21"
 
   def install
     bin.install "bin/simtool"
