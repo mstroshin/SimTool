@@ -71,6 +71,19 @@ The wheel or trackpad scrolls by dragging a finger too. Hold Option to add a
 second finger mirrored through the screen center — spreading or circling the
 pointer pinches or rotates — and Option-Shift to move both fingers together.
 
+The keyboard works as in Simulator.app. **⌨️** toggles the software keyboard
+(Toggle Software Keyboard). The **Keyboard** toggle, or ⇧⌘K, types into the
+simulator with the Mac keyboard and connects its hardware keyboard (Connect
+Hardware Keyboard), so iOS keeps the software keyboard out of the way until ⌨️
+or ⌘K brings it back. Keys travel as physical keys — the simulator's own layout
+decides the character — with modifiers, arrows, ⌫, ⏎, Tab and Esc, which iOS
+uses; ⇧⌘K leaves the mode, and ⌘V pastes the Mac clipboard as text. A ring
+around the screen shows the keys go to the device; it turns dashed while they
+go elsewhere — to a SimTool field such as the inspector filter, which keeps
+its keys, or to another window. Off, the keyboard belongs to the page and the
+browser. Keys reach the simulator in a few milliseconds over the same helper as
+the finger; ⌘W, ⌘T and ⌘Q stay with the browser.
+
 `serve` runs fully headless: when `--device`, `--host`, or `--port` are omitted
 it falls back to `simulator:` and `server:` from `.simtool/config.yml` (when one
 is discovered, or passed via `--config`), and boots the target simulator via
@@ -702,20 +715,24 @@ stdout/`print`) into a bounded buffer that clients poll incrementally by cursor;
 `GET /api/v1/logs` remains the one-shot bounded snapshot.
 
 `POST /api/v1/input` takes an `action` — `tap`, `longPress`, `type`, `paste`,
-`swipe`, `scroll`, `fling`, `drag`, `button`, `shake`, `terminate`, `launch` —
-plus that action's fields: `x`/`y` or `id`/`label` for `tap` and `longPress`
-(`duration` for the press), `startX`/`startY`/`endX`/`endY` with `velocity`,
-`duration`, `hold` (and `press` for `drag`), `direction` with `distance` or
-`velocity` and an optional start `x`/`y` for `scroll` and `fling`, `text` for
-`type` and `paste`. Coordinates are screen points. Images go as the raw request body instead:
+`swipe`, `scroll`, `fling`, `drag`, `button`, `shake`, `terminate`, `launch`,
+`software-keyboard`, `hardware-keyboard` — plus that action's fields: `x`/`y` or
+`id`/`label` for `tap` and `longPress` (`duration` for the press),
+`startX`/`startY`/`endX`/`endY` with `velocity`, `duration`, `hold` (and `press`
+for `drag`), `direction` with `distance` or `velocity` and an optional start
+`x`/`y` for `scroll` and `fling`, `text` for `type` and `paste`, `enabled` for
+`hardware-keyboard` (connect or disconnect it); `software-keyboard` toggles the
+software keyboard. Coordinates are screen points. Images go as the raw request body instead:
 `POST /api/v1/input/paste-image` pastes one into the focused field, and
 `POST /api/v1/photos` adds an image or a video to Photos. Both read the type from
 `Content-Type` and an optional percent-encoded `X-SimTool-Filename` header.
 
-`/api/v1/input/stream` is the viewer's live finger: a WebSocket taking one JSON
-frame per touch event, `{"t": "down"|"move"|"up", "x": 0.5, "y": 0.7}` with
-coordinates as fractions of the screen, plus `x2`/`y2` for a second finger.
-Frames are never answered; moves are coalesced, downs and ups never dropped, and
-a finger still down when the socket closes is lifted where it was.
+`/api/v1/input/stream` is the viewer's live finger and keyboard: a WebSocket
+taking one JSON frame per touch event, `{"t": "down"|"move"|"up", "x": 0.5,
+"y": 0.7}` with coordinates as fractions of the screen, plus `x2`/`y2` for a
+second finger, and one per key, `{"t": "keydown"|"keyup", "code": "KeyA"}` with
+the browser's `KeyboardEvent.code`. Frames are never answered; moves are
+coalesced, downs, ups and keys never dropped, and when the socket closes a
+finger still down is lifted where it was and held keys are released.
 
 `SimToolClient` exposes these routes as typed async Swift calls.

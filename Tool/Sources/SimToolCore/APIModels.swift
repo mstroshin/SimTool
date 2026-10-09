@@ -355,6 +355,8 @@ public struct SimulatorInputPayload: Codable, Equatable, Sendable {
     public var coordinateSpace: String?
     public var sourceWidth: Double?
     public var sourceHeight: Double?
+    /// On or off (hardware-keyboard).
+    public var enabled: Bool?
 
     public init(
         action: String? = nil,
@@ -377,7 +379,8 @@ public struct SimulatorInputPayload: Codable, Equatable, Sendable {
         name: String? = nil,
         coordinateSpace: String? = nil,
         sourceWidth: Double? = nil,
-        sourceHeight: Double? = nil
+        sourceHeight: Double? = nil,
+        enabled: Bool? = nil
     ) {
         self.action = action
         self.type = type
@@ -400,6 +403,7 @@ public struct SimulatorInputPayload: Codable, Equatable, Sendable {
         self.coordinateSpace = coordinateSpace
         self.sourceWidth = sourceWidth
         self.sourceHeight = sourceHeight
+        self.enabled = enabled
     }
 }
 

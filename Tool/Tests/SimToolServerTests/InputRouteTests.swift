@@ -93,6 +93,7 @@ final class InputRouteTests: XCTestCase {
             (#"{"action": "drag", "startX": 1, "startY": 2}"#, "Drag requires startX, startY, endX, and endY"),
             (#"{"action": "swipe", "startX": 1}"#, "Swipe requires startX, startY, endX, and endY"),
             (#"{"action": "longPress", "x": 10}"#, "requires both x and y"),
+            (#"{"action": "hardware-keyboard"}"#, "Hardware keyboard input requires enabled"),
         ]
         for (body, expected) in cases {
             let (status, text) = try await post(body)

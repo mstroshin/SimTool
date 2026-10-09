@@ -142,7 +142,7 @@ extension SimulatorInputClient {
             allowed = grant?.status == 0
         }
 
-        _ = try await AxeClient.run(["key-combo", "--modifiers", "227", "--key", "25", "--udid", deviceUDID])
+        try await SimulatorDirectInputClient.shared.press(.v, modifiers: [.leftCommand], deviceUDID: deviceUDID)
 
         guard let before else { return .unverifiable }
         let baseline = PasteVerification.textInputs(in: before)
