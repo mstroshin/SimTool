@@ -3,27 +3,32 @@ import SimToolCore
 @testable import SimToolServer
 import XCTest
 
-final class LiveTouchChannelTests: XCTestCase {
+final class LiveInputChannelTests: XCTestCase {
     private final class Recorder: @unchecked Sendable {
         private let lock = NSLock()
         private var stored: [String] = []
         private var storedDowns = 0
         var lines: [String] { lock.withLock { stored } }
         var downs: Int { lock.withLock { storedDowns } }
-        func record(_ event: LiveTouchEvent) { lock.withLock { stored.append(Self.describe(event)) } }
+        func record(_ event: LiveInputEvent) { lock.withLock { stored.append(Self.describe(event)) } }
 
         /// The helper's own line format, rebuilt from the public fields.
-        static func describe(_ event: LiveTouchEvent) -> String {
-            let points = [event.first] + (event.second.map { [$0] } ?? [])
-            let coordinates = points.flatMap { [$0.x, $0.y] }.map { String(format: "%.5f", $0) }
-            return ([event.phase.rawValue + (event.second == nil ? "" : "2")] + coordinates).joined(separator: " ")
+        static func describe(_ event: LiveInputEvent) -> String {
+            switch event {
+            case let .touch(touch):
+                let points = [touch.first] + (touch.second.map { [$0] } ?? [])
+                let coordinates = points.flatMap { [$0.x, $0.y] }.map { String(format: "%.5f", $0) }
+                return ([touch.phase.rawValue + (touch.second == nil ? "" : "2")] + coordinates).joined(separator: " ")
+            case let .key(key):
+                return "key \(key.key.usage) \(key.isDown ? 1 : 0)"
+            }
         }
         func noteDown() { lock.withLock { storedDowns += 1 } }
     }
 
-    private func makeChannel() -> (LiveTouchChannel, Recorder) {
+    private func makeChannel() -> (LiveInputChannel, Recorder) {
         let recorder = Recorder()
-        let channel = LiveTouchChannel(emit: { recorder.record($0) }, onDown: { recorder.noteDown() })
+        let channel = LiveInputChannel(emit: { recorder.record($0) }, onDown: { recorder.noteDown() })
         return (channel, recorder)
     }
 
@@ -76,6 +81,54 @@ final class LiveTouchChannelTests: XCTestCase {
         channel.receive(#"{"t":"down","x":0.5,"y":0.5}"#)
         channel.disconnect()
         XCTAssertEqual(recorder.lines.count, 3)
+    }
+
+    func testKeysBecomeHelperEventsInOrderWithTheFinger() {
+        let (channel, recorder) = makeChannel()
+        channel.receive(#"{"t":"down","x":0.5,"y":0.2}"#)
+        channel.receive(#"{"t":"up","x":0.5,"y":0.2}"#)
+        channel.receive(#"{"t":"keydown","code":"ShiftLeft"}"#)
+        channel.receive(#"{"t":"keydown","code":"KeyH"}"#)
+        channel.receive(#"{"t":"keyup","code":"KeyH"}"#)
+        channel.receive(#"{"t":"keyup","code":"ShiftLeft"}"#)
+        XCTAssertEqual(recorder.lines, [
+            "down 0.50000 0.20000", "up 0.50000 0.20000",
+            "key 225 1", "key 11 1", "key 11 0", "key 225 0",
+        ])
+        XCTAssertEqual(recorder.downs, 3, "a key press starts an input like a touch does")
+    }
+
+    func testAKeyGoesDownOnceAndUpOnlyAfterItWentDown() {
+        let (channel, recorder) = makeChannel()
+        channel.receive(#"{"t":"keyup","code":"KeyA"}"#)
+        channel.receive(#"{"t":"keydown","code":"KeyA"}"#)
+        channel.receive(#"{"t":"keydown","code":"KeyA"}"#)
+        channel.receive(#"{"t":"keyup","code":"KeyA"}"#)
+        channel.receive(#"{"t":"keyup","code":"KeyA"}"#)
+        XCTAssertEqual(recorder.lines, ["key 4 1", "key 4 0"])
+    }
+
+    func testKeysWithoutAKeyboardUsageAreIgnored() {
+        let (channel, recorder) = makeChannel()
+        channel.receive(#"{"t":"keydown","code":"Fn"}"#)
+        channel.receive(#"{"t":"keydown"}"#)
+        channel.receive(#"{"t":"keydown","code":7}"#)
+        XCTAssertEqual(recorder.lines, [])
+        XCTAssertEqual(recorder.downs, 0)
+    }
+
+    func testAViewerThatVanishesWhileTypingReleasesItsKeysLastPressedFirst() {
+        let (channel, recorder) = makeChannel()
+        channel.receive(#"{"t":"down","x":0.5,"y":0.5}"#)
+        channel.receive(#"{"t":"keydown","code":"MetaLeft"}"#)
+        channel.receive(#"{"t":"keydown","code":"ShiftLeft"}"#)
+        channel.receive(#"{"t":"keydown","code":"ArrowLeft"}"#)
+        channel.receive(#"{"t":"keyup","code":"ShiftLeft"}"#)
+        channel.disconnect()
+        XCTAssertEqual(Array(recorder.lines.suffix(3)), ["up 0.50000 0.50000", "key 80 0", "key 227 0"])
+        channel.receive(#"{"t":"keydown","code":"KeyA"}"#)
+        channel.disconnect()
+        XCTAssertEqual(recorder.lines.count, 8, "nothing gets through once the viewer is gone")
     }
 
     func testDisconnectWithoutAFingerDownSendsNothing() {

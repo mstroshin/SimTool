@@ -214,7 +214,7 @@ struct Input: AsyncParsableCommand {
         Every touch is played by SimTool's own HID helper as a timed path, in \
         screen points (the space `simtool ax tree` reports frames in).
         """,
-        subcommands: [Tap.self, LongPress.self, TypeText.self, Paste.self, Swipe.self, Scroll.self, Fling.self, Drag.self, Button.self]
+        subcommands: [Tap.self, LongPress.self, TypeText.self, Paste.self, Swipe.self, Scroll.self, Fling.self, Drag.self, Button.self, Keyboard.self]
     )
 }
 
@@ -482,6 +482,37 @@ extension Input {
                 try await ProcessRunner.runXcrun(["simctl", "launch", device.udid, "com.apple.springboard"])
             } else {
                 try await SimulatorInputClient.button(name, deviceUDID: device.udid)
+            }
+            try emitCommandResult(output, json: common.json)
+        }
+    }
+
+    struct Keyboard: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "keyboard",
+            abstract: "Show, hide or toggle the software keyboard.",
+            discussion: """
+            Presses Eject, as Simulator.app's Toggle Software Keyboard does. `show` and \
+            `hide` confirm the keyboard on screen (or off it) in the accessibility tree; \
+            `show` fails when no text field is focused — tap one first. `toggle` presses \
+            once and checks nothing.
+            """
+        )
+
+        enum Action: String, ExpressibleByArgument, CaseIterable {
+            case show, hide, toggle
+        }
+
+        @Argument(help: "show, hide or toggle") var action: Action
+        @Option var device: String?
+        @OptionGroup var common: CommonJSON
+
+        func run() async throws {
+            let device = try await resolveConfiguredDevice(device)
+            let output = switch action {
+            case .show: try await SimulatorInputClient.setSoftwareKeyboard(visible: true, deviceUDID: device.udid)
+            case .hide: try await SimulatorInputClient.setSoftwareKeyboard(visible: false, deviceUDID: device.udid)
+            case .toggle: try await SimulatorInputClient.toggleSoftwareKeyboard(deviceUDID: device.udid)
             }
             try emitCommandResult(output, json: common.json)
         }
@@ -1419,6 +1450,7 @@ struct TestCommand: AsyncParsableCommand {
                 - scroll: { direction: up, distance: 300, id: feed }
                 - fling: { direction: up, speed: fast }
                 - drag: { from: { label: "Milk" }, to: { label: "Eggs" } }
+                - keyboard: hide              # or show — the software keyboard
                 - assertVisible: { text: "Welcome", criterion: AC-1 }
                 - assertHidden: { label: "Loading" }
                 - wait: 2

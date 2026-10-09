@@ -3,16 +3,19 @@ import Foundation
 
 /// Touches the simulator the way Simulator.app does: Indigo HID messages built
 /// by SimulatorKit and sent through `SimDeviceLegacyHIDClient`, from one helper
-/// process per device that stays up between touches.
+/// process per device that stays up between touches. The same helper types as
+/// a hardware keyboard, the way Device Hub does on Xcode 27 (see the helper's
+/// keyboard section).
 ///
-/// Two ways in. Answered commands — a tap, a timed `TouchPath` — return once
-/// the finger has lifted. Live events (`stream`) are written and forgotten: a
+/// Two ways in. Answered commands — a tap, a timed `TouchPath`, a shortcut —
+/// return once done. Live events (`stream`) are written and forgotten: a
 /// finger that follows a pointer cannot wait for a reply per move, so the helper
-/// coalesces moves itself and never drops a down or an up.
+/// coalesces moves itself and never drops a down or an up; keys ride along in
+/// the same order.
 public actor SimulatorDirectInputClient {
     public static let shared = SimulatorDirectInputClient()
 
-    private static let helperVersion = "3"
+    private static let helperVersion = "4"
     /// Part of the cached binary's name, so any change to the helper's source
     /// compiles a fresh one instead of reusing a stale build of the same version.
     private static let helperFingerprint = SHA256.hash(data: Data(SimulatorDirectInputHelperSource.source.utf8))
@@ -58,7 +61,33 @@ public actor SimulatorDirectInputClient {
     /// Events reach the helper in the order of these calls; a failure drops the
     /// helper, and the next event starts a fresh one.
     public func stream(_ event: LiveTouchEvent, deviceUDID: String) async {
-        let line = event.helperLine
+        await stream(line: event.helperLine, deviceUDID: deviceUDID)
+    }
+
+    /// Writes one live key event, in order with the live touches.
+    public func stream(_ event: LiveKeyEvent, deviceUDID: String) async {
+        await stream(line: event.helperLine, deviceUDID: deviceUDID)
+    }
+
+    /// Presses `key` with `modifiers` held — a shortcut such as ⌘V.
+    public func press(_ key: KeyboardKey, modifiers: [KeyboardKey] = [], deviceUDID: String) async throws {
+        try await answered(SimulatorDirectInputCommand.press(key, modifiers: modifiers).line, deviceUDID: deviceUDID, timeoutSeconds: Self.keyboardTimeout)
+    }
+
+    /// Presses Eject, which toggles the software keyboard.
+    public func toggleSoftwareKeyboard(deviceUDID: String) async throws {
+        try await answered(SimulatorDirectInputCommand.ejectKey.line, deviceUDID: deviceUDID, timeoutSeconds: Self.keyboardTimeout)
+    }
+
+    public func setHardwareKeyboard(connected: Bool, deviceUDID: String) async throws {
+        try await answered(SimulatorDirectInputCommand.hardwareKeyboard(connected: connected).line, deviceUDID: deviceUDID, timeoutSeconds: Self.keyboardTimeout)
+    }
+
+    /// Room for the helper's first key to connect to the guest's keyboard
+    /// daemon, which may have to start first.
+    private static let keyboardTimeout: TimeInterval = 7
+
+    private func stream(line: String, deviceUDID: String) async {
         do {
             let current = try await session(for: deviceUDID)
             try current.write(line)
@@ -120,7 +149,8 @@ public actor SimulatorDirectInputClient {
         }
         DirectInputLog.write("response value=\(response)")
         guard response == "ok" || response.hasPrefix("ok ") else {
-            throw SimToolError("The simulator refused the touch (\(response)).")
+            let reason = response.hasPrefix("err ") ? String(response.dropFirst(4)) : response
+            throw SimToolError("The simulator refused the input (\(reason)).")
         }
         return response
     }
@@ -252,6 +282,18 @@ struct SimulatorDirectInputCommand: Equatable {
 
     static func tap(x: Double, y: Double) -> Self {
         Self(line: "tap \(TouchRatio(x: x, y: y).helperText)")
+    }
+
+    /// The helper holds at most three modifiers; extra ones are dropped.
+    static func press(_ key: KeyboardKey, modifiers: [KeyboardKey]) -> Self {
+        Self(line: (["press", "\(key.usage)"] + modifiers.prefix(3).map { "\($0.usage)" }).joined(separator: " "))
+    }
+
+    /// Eject, on the Consumer page (12).
+    static let ejectKey = Self(line: "button 12 184")
+
+    static func hardwareKeyboard(connected: Bool) -> Self {
+        Self(line: "hwkeyboard \(connected ? 1 : 0)")
     }
 
     /// Reads `ok W H SCALE`, the helper's answer to `size`.
@@ -438,21 +480,28 @@ enum SimulatorDirectInputHelperSource {
     #import <math.h>
     #import <time.h>
     #import <unistd.h>
+    #import <xpc/xpc.h>
 
-    // Touches one booted simulator through SimulatorKit's Indigo HID messages.
-    // Commands arrive one per line on stdin; coordinates are fractions of the
-    // screen (0…1 from the top-left corner).
+    // Touches one booted simulator through SimulatorKit's Indigo HID messages,
+    // and types on it as a hardware keyboard. Commands arrive one per line on
+    // stdin; coordinates are fractions of the screen (0…1 from the top-left
+    // corner), keys USB HID usages on the keyboard page (4 is A, 225 left shift).
     //
-    // Answered "ok" (or "err") once done:
+    // Answered "ok" (or "err [reason]") once done:
     //   tap X Y [MS]            down, rest MS ms (default 60), up
     //   swipe X1 Y1 X2 Y2 MS    straight line, lifted in motion
     //   path P,MS,X,Y …         timed touch path: P is d, m or u, MS the offset
     //                           from the start; the finger is lifted even on error
     //   size                    "ok W H SCALE" — the screen in points
+    //   press K [M …]           key K with up to three modifier keys M held
+    //   button PAGE USAGE       presses one HID usage of another page; 12 184
+    //                           (Eject) toggles the software keyboard
+    //   hwkeyboard 1|0          connects or disconnects the hardware keyboard
     // Streamed, never answered (a live finger must not wait on a reply):
     //   down X Y | move X Y | up X Y
     //   down2 X1 Y1 X2 Y2 | move2 … | up2 …     two fingers
-    // q (or end of input) lifts any finger and exits.
+    //   key K 1|0               key K down (1) or up (0)
+    // q (or end of input) lifts any finger, releases any key and exits.
     //
     // Everything that builds or sends a message runs on one worker thread: the
     // builder keeps global state (its last-message time, the second finger).
@@ -549,6 +598,9 @@ enum SimulatorDirectInputHelperSource {
     static void (*sendMessage)(id, SEL, void *, BOOL, dispatch_queue_t, id);
     static SEL sendSelector;
     static void *(*buildMouse)(CGPoint *, CGPoint *, unsigned int, int, CGFloat, CGFloat, unsigned int);
+    static void *(*buildKey)(unsigned int usage, unsigned int op);
+    static void *(*buildUsage)(unsigned int target, unsigned int page, unsigned int usage, unsigned int op);
+    static BOOL keysOverDTUHID = NO;
 
     static BOOL openClient(NSString *udid) {
       NSError *err = nil;
@@ -568,7 +620,161 @@ enum SimulatorDirectInputHelperSource {
       id type = ((id (*)(id, SEL))objc_msgSend)(device, sel_registerName("deviceType"));
       CGSize pixels = ((CGSize (*)(id, SEL))objc_msgSend)(type, sel_registerName("mainScreenSize"));
       if (pixels.width > 0 && pixels.height > 0) { pixelX = 1.0 / pixels.width; pixelY = 1.0 / pixels.height; }
+      buildKey = (void *)dlsym(RTLD_DEFAULT, "IndigoHIDMessageForKeyboardArbitrary");
+      buildUsage = (void *)dlsym(RTLD_DEFAULT, "IndigoHIDMessageForHIDArbitrary");
+      NSString *coreSimulator = [NSBundle bundleForClass:[device class]].infoDictionary[@"CFBundleVersion"];
+      keysOverDTUHID = coreSimulator && [coreSimulator compare:@"1155.4" options:NSNumericSearch] != NSOrderedAscending;
       return YES;
+    }
+
+    // MARK: - the keyboard (worker thread only)
+    //
+    // From CoreSimulator 1155.4 (Xcode 27) the guest drops legacy Indigo
+    // keyboard and button input. There keys go the way Device Hub sends them:
+    // as XPC messages to the guest's dtuhidd, over a connection built from the
+    // simulator's Mach port. Older toolchains take them as Indigo messages.
+
+    static const char *DigitizerService = "com.apple.coredevice.feature.remote.hid.digitizer";
+    static xpc_connection_t dtuhid;
+    static volatile int dtuhidBroken = 0;   // set by XPC when the connection dies
+    static const char *dtuhidFailure;       // why the last attempt failed,
+    static uint64_t dtuhidRetryNs = 0;      // repeated without retrying until then
+    static unsigned char held[256];         // keys this helper holds down
+
+    static xpc_object_t dtuhidMessage(const char *type, xpc_object_t payload, bool barrier) {
+      xpc_object_t message = xpc_dictionary_create(NULL, NULL, 0);
+      xpc_dictionary_set_string(message, "messageType", type);
+      xpc_dictionary_set_bool(message, "isBarrier", barrier);
+      xpc_dictionary_set_string(message, "featureIdentifier", DigitizerService);
+      xpc_dictionary_set_value(message, "payload", payload);
+      return message;
+    }
+
+    // dtuhidd's HIDButtonState is 1 (down) or 2 (up), as is Indigo's op.
+    static xpc_object_t keyPayload(unsigned usage, BOOL down) {
+      xpc_object_t payload = xpc_dictionary_create(NULL, NULL, 0);
+      xpc_dictionary_set_uint64(payload, "usageCode", usage);
+      xpc_dictionary_set_uint64(payload, "state", down ? 1 : 2);
+      return payload;
+    }
+
+    // dtuhidd is launched on demand, and a port can be vended for one that
+    // cannot run, so only an answered barrier proves a daemon is listening.
+    static const char *dtuhidOpen(void) {
+      if (dtuhid) { xpc_connection_cancel(dtuhid); dtuhid = nil; }
+      dtuhidBroken = 0;
+      xpc_object_t (*endpointFromPort)(mach_port_t, uint64_t, uint64_t) = dlsym(RTLD_DEFAULT, "xpc_endpoint_create_mach_port_4sim");
+      void (*enableSim2Host)(xpc_connection_t) = dlsym(RTLD_DEFAULT, "xpc_connection_enable_sim2host_4sim");
+      if (!endpointFromPort || !enableSim2Host) { return "the XPC calls for dtuhidd are missing"; }
+      NSError *err = nil;
+      mach_port_t port = ((mach_port_t (*)(id, SEL, NSString *, NSError **))objc_msgSend)(device, sel_registerName("lookup:error:"), @(DigitizerService), &err);
+      if (port == MACH_PORT_NULL) { return "the simulator vends no dtuhidd keyboard service"; }
+      xpc_object_t endpoint = endpointFromPort(port, 0, 0);
+      xpc_connection_t connection = endpoint ? xpc_connection_create_from_endpoint(endpoint) : nil;
+      if (!connection) { return "cannot connect to dtuhidd"; }
+      enableSim2Host(connection);   // without it dtuhidd sees the peer but never a message
+      xpc_connection_set_event_handler(connection, ^(xpc_object_t event) {
+        if (event == XPC_ERROR_CONNECTION_INTERRUPTED || event == XPC_ERROR_CONNECTION_INVALID) { dtuhidBroken = 1; }
+      });
+      xpc_connection_resume(connection);
+      dispatch_semaphore_t answered = dispatch_semaphore_create(0);
+      __block BOOL alive = NO;
+      // Usage 0 is "no event": the daemon answers, the guest sees nothing.
+      xpc_connection_send_message_with_reply(connection, dtuhidMessage("IndigoKeyboardButtonEvent", keyPayload(0, NO), true),
+                                             dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^(xpc_object_t reply) {
+        alive = xpc_get_type(reply) == XPC_TYPE_DICTIONARY;
+        dispatch_semaphore_signal(answered);
+      });
+      if (dispatch_semaphore_wait(answered, dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC)) != 0 || !alive) {
+        xpc_connection_cancel(connection);
+        return "dtuhidd does not answer";
+      }
+      usleep(200000);   // it opens its keyboard just after answering
+      dtuhid = connection;
+      return NULL;
+    }
+
+    // Connects on first use and after XPC drops the connection. A failed
+    // attempt is not repeated for two seconds, so keys typed meanwhile fail at
+    // once instead of each waiting out the daemon.
+    static const char *dtuhidConnect(void) {
+      if (dtuhid && !dtuhidBroken) { return NULL; }
+      if (dtuhidFailure && nowNs() < dtuhidRetryNs) { return dtuhidFailure; }
+      dtuhidFailure = dtuhidOpen();
+      if (dtuhidFailure) { dtuhidRetryNs = nowNs() + 2000000000ULL; }
+      return dtuhidFailure;
+    }
+
+    // Returns NULL once sent, else why not.
+    static const char *sendKey(unsigned usage, BOOL down) {
+      if (keysOverDTUHID) {
+        const char *failure = dtuhidConnect();
+        if (failure) { return failure; }
+        xpc_connection_send_message(dtuhid, dtuhidMessage("IndigoKeyboardButtonEvent", keyPayload(usage, down), false));
+        return NULL;
+      }
+      if (!buildKey) { return "IndigoHIDMessageForKeyboardArbitrary not found"; }
+      void *msg = buildKey(usage, down ? 1 : 2);
+      if (!msg) { return "the keyboard message could not be built"; }
+      sendMessage(client, sendSelector, msg, YES, nil, nil);
+      return NULL;
+    }
+
+    static const char *keyEvent(unsigned usage, BOOL down) {
+      if (usage == 0 || usage > 255) { return "no such key"; }
+      const char *failure = sendKey(usage, down);
+      if (!failure) { held[usage] = down; }
+      return failure;
+    }
+
+    // A usage of another page (Consumer 12 holds Eject, which toggles the
+    // software keyboard), pressed and released.
+    static const char *pressUsage(unsigned page, unsigned usage) {
+      for (int down = 1; down >= 0; down--) {
+        if (keysOverDTUHID) {
+          const char *failure = dtuhidConnect();
+          if (failure) { return failure; }
+          xpc_object_t payload = xpc_dictionary_create(NULL, NULL, 0);
+          xpc_dictionary_set_uint64(payload, "usagePage", page);
+          xpc_dictionary_set_uint64(payload, "usageCode", usage);
+          xpc_dictionary_set_uint64(payload, "state", down ? 1 : 2);
+          xpc_connection_send_message(dtuhid, dtuhidMessage("IndigoButtonEvent", payload, false));
+        } else {
+          // Indigo addresses an arbitrary usage to the digitizer service.
+          void *msg = buildUsage ? buildUsage(0x32, page, usage, down ? 1 : 2) : NULL;
+          if (!msg) { return "IndigoHIDMessageForHIDArbitrary not available"; }
+          sendMessage(client, sendSelector, msg, YES, nil, nil);
+        }
+        if (down) { usleep(40000); }
+      }
+      return NULL;
+    }
+
+    static void releaseKeys(void) {
+      for (unsigned usage = 1; usage < 256; usage++) {
+        if (held[usage]) { keyEvent(usage, NO); }
+      }
+    }
+
+    // Waits until XPC has handed over everything sent so far.
+    static void settleKeys(void) {
+      if (!keysOverDTUHID || !dtuhid) { return; }
+      dispatch_semaphore_t sent = dispatch_semaphore_create(0);
+      xpc_connection_send_barrier(dtuhid, ^{ dispatch_semaphore_signal(sent); });
+      dispatch_semaphore_wait(sent, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC));
+    }
+
+    // Simulator.app's Connect Hardware Keyboard: with it the guest hides the
+    // software keyboard while a hardware one types.
+    static const char *setHardwareKeyboard(BOOL connected) {
+      SEL selector = sel_registerName("setHardwareKeyboardEnabled:keyboardType:error:");
+      if (![device respondsToSelector:selector]) { return "this CoreSimulator cannot connect a hardware keyboard"; }
+      NSError *err = nil;
+      BOOL ok = ((BOOL (*)(id, SEL, BOOL, unsigned char, NSError **))objc_msgSend)(device, selector, connected, 0, &err);
+      if (!ok) { return "the simulator refused the hardware keyboard"; }
+      // Typing usually follows, and its first key should not wait for dtuhidd.
+      if (connected && keysOverDTUHID) { return dtuhidConnect(); }
+      return NULL;
     }
 
     // MARK: - the finger (worker thread only)
@@ -650,8 +856,11 @@ enum SimulatorDirectInputHelperSource {
 
     // MARK: - commands
 
-    typedef enum { CmdDown, CmdMove, CmdUp, CmdTap, CmdSwipe, CmdPath, CmdSize, CmdQuit } Kind;
-    typedef struct { Kind kind; int count; Spot spot; double x2, y2; int ms; char *text; } Command;
+    typedef enum { CmdDown, CmdMove, CmdUp, CmdTap, CmdSwipe, CmdPath, CmdSize, CmdKey, CmdPress, CmdButton, CmdHardwareKeyboard, CmdQuit } Kind;
+    typedef struct {
+      Kind kind; int count; Spot spot; double x2, y2; int ms; char *text;
+      unsigned usage, page, mods[3]; int modCount; BOOL on;   // keyboard commands
+    } Command;
 
     static BOOL runPath(char *text) {
       uint64_t start = nowNs();
@@ -694,6 +903,25 @@ enum SimulatorDirectInputHelperSource {
       fflush(stdout);
     }
 
+    static void replyFailure(const char *failure) {
+      if (failure) { printf("err %s\n", failure); } else { printf("ok\n"); }
+      fflush(stdout);
+    }
+
+    // Modifiers down in order, the key down and up, modifiers up in reverse.
+    static const char *runPress(Command *c) {
+      const char *failure = NULL;
+      int down = 0;   // modifiers held so far
+      while (down < c->modCount && !(failure = keyEvent(c->mods[down], YES))) { down++; }
+      if (!failure) {
+        failure = keyEvent(c->usage, YES);
+        if (!failure) { usleep(30000); failure = keyEvent(c->usage, NO); }
+      }
+      while (down > 0) { keyEvent(c->mods[--down], NO); }
+      settleKeys();
+      return failure;
+    }
+
     // Returns NO when the helper should exit.
     static BOOL perform(Command *c) {
       switch (c->kind) {
@@ -724,7 +952,23 @@ enum SimulatorDirectInputHelperSource {
           fflush(stdout);
           return YES;
         }
-        case CmdQuit: fingerUp(last); return NO;
+        case CmdKey: {
+          // stderr is read only once the helper exits: one line per kind of failure.
+          static const char *reported;
+          const char *failure = keyEvent(c->usage, c->on);
+          if (failure && failure != reported) { say(failure); }
+          reported = failure;
+          return YES;
+        }
+        case CmdPress: replyFailure(runPress(c)); return YES;
+        case CmdButton: {
+          const char *failure = pressUsage(c->page, c->usage);
+          settleKeys();
+          replyFailure(failure);
+          return YES;
+        }
+        case CmdHardwareKeyboard: replyFailure(setHardwareKeyboard(c->on)); return YES;
+        case CmdQuit: fingerUp(last); releaseKeys(); settleKeys(); return NO;
       }
       return YES;
     }
@@ -808,6 +1052,14 @@ enum SimulatorDirectInputHelperSource {
       if (!strcmp(name, "swipe") && n >= 4) {
         c->kind = CmdSwipe; c->spot.x = v[0]; c->spot.y = v[1]; c->x2 = v[2]; c->y2 = v[3]; c->ms = n >= 5 ? ms : 200; return YES;
       }
+      if (!strcmp(name, "key") && n >= 2) { c->kind = CmdKey; c->usage = (unsigned)v[0]; c->on = v[1] != 0; return YES; }
+      if (!strcmp(name, "press") && n >= 1) {
+        c->kind = CmdPress; c->usage = (unsigned)v[0]; c->modCount = MIN(n, 4) - 1;
+        for (int i = 0; i < c->modCount; i++) { c->mods[i] = (unsigned)v[i + 1]; }
+        return YES;
+      }
+      if (!strcmp(name, "button") && n >= 2) { c->kind = CmdButton; c->page = (unsigned)v[0]; c->usage = (unsigned)v[1]; return YES; }
+      if (!strcmp(name, "hwkeyboard") && n >= 1) { c->kind = CmdHardwareKeyboard; c->on = v[0] != 0; return YES; }
       size_t len = strlen(name);
       BOOL two = len > 1 && name[len - 1] == '2';
       if (two) { name[len - 1] = 0; }
@@ -835,7 +1087,7 @@ enum SimulatorDirectInputHelperSource {
           if (parse(line, &c)) {
             enqueue(c);
             if (c.kind == CmdQuit) { break; }
-          } else if (strncmp(line, "down", 4) && strncmp(line, "move", 4) && strncmp(line, "up", 2)) {
+          } else if (strncmp(line, "down", 4) && strncmp(line, "move", 4) && strncmp(line, "up", 2) && strncmp(line, "key ", 4)) {
             // Malformed acked commands still get their answer; streamed ones stay silent.
             printf("err\n");
             fflush(stdout);

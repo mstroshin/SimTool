@@ -97,8 +97,8 @@ public final class StreamServer: @unchecked Sendable {
     private var screenWidth = 0
     private var screenHeight = 0
     private var started = false
-    private let liveTouchLock = NSLock()
-    private var liveTouches: [ObjectIdentifier: (channel: LiveTouchChannel, events: AsyncStream<LiveTouchEvent>.Continuation)] = [:]
+    private let liveInputLock = NSLock()
+    private var liveInputs: [ObjectIdentifier: (channel: LiveInputChannel, events: AsyncStream<LiveInputEvent>.Continuation)] = [:]
 
     public init(config: StreamServerConfig) {
         self.config = config
@@ -128,7 +128,7 @@ public final class StreamServer: @unchecked Sendable {
     }
 
     public func stop() {
-        closeLiveTouches()
+        closeLiveInputs()
         shutdownTestSessions()
         stopLogCapture()
         frameCapture.stop()
@@ -178,11 +178,12 @@ public final class StreamServer: @unchecked Sendable {
         }
 
         server.POST["/api/v1/input"] = { request in self.handleInput(request) }
-        // The viewer's live finger: down/move/up frames, never answered.
+        // The viewer's live finger and keys: down/move/up and keydown/keyup
+        // frames, never answered.
         server["/api/v1/input/stream"] = websocket(
-            text: { session, text in self.liveTouchChannel(for: session)?.receive(text) },
-            connected: { session in self.openLiveTouchChannel(for: session) },
-            disconnected: { session in self.closeLiveTouchChannel(for: session) }
+            text: { session, text in self.liveInputChannel(for: session)?.receive(text) },
+            connected: { session in self.openLiveInputChannel(for: session) },
+            disconnected: { session in self.closeLiveInputChannel(for: session) }
         )
         server.POST["/api/v1/input/paste-image"] = { request in self.handlePasteImage(request) }
         server.POST["/api/v1/photos"] = { request in self.handleAddToPhotos(request) }
@@ -530,40 +531,43 @@ public final class StreamServer: @unchecked Sendable {
         }
     }
 
-    private func openLiveTouchChannel(for session: WebSocketSession) {
+    private func openLiveInputChannel(for session: WebSocketSession) {
         let udid = config.device.udid
         let directInput = directInput
         let testSessions = testSessions
-        let (events, continuation) = AsyncStream<LiveTouchEvent>.makeStream()
+        let (events, continuation) = AsyncStream<LiveInputEvent>.makeStream()
         // One consumer per viewer keeps its events in order; the helper starts
         // now so the first touch does not wait for it.
         Task {
             try? await directInput.prepare(deviceUDID: udid)
             for await event in events {
-                await directInput.stream(event, deviceUDID: udid)
+                switch event {
+                case let .touch(touch): await directInput.stream(touch, deviceUDID: udid)
+                case let .key(key): await directInput.stream(key, deviceUDID: udid)
+                }
             }
         }
-        let channel = LiveTouchChannel(
+        let channel = LiveInputChannel(
             emit: { continuation.yield($0) },
             onDown: { testSessions.noteInput(at: Date()) }
         )
-        liveTouchLock.withLock { liveTouches[ObjectIdentifier(session)] = (channel, continuation) }
+        liveInputLock.withLock { liveInputs[ObjectIdentifier(session)] = (channel, continuation) }
     }
 
-    private func liveTouchChannel(for session: WebSocketSession) -> LiveTouchChannel? {
-        liveTouchLock.withLock { liveTouches[ObjectIdentifier(session)]?.channel }
+    private func liveInputChannel(for session: WebSocketSession) -> LiveInputChannel? {
+        liveInputLock.withLock { liveInputs[ObjectIdentifier(session)]?.channel }
     }
 
-    private func closeLiveTouchChannel(for session: WebSocketSession) {
-        guard let entry = liveTouchLock.withLock({ liveTouches.removeValue(forKey: ObjectIdentifier(session)) }) else { return }
+    private func closeLiveInputChannel(for session: WebSocketSession) {
+        guard let entry = liveInputLock.withLock({ liveInputs.removeValue(forKey: ObjectIdentifier(session)) }) else { return }
         entry.channel.disconnect()
         entry.events.finish()
     }
 
-    private func closeLiveTouches() {
-        let entries = liveTouchLock.withLock {
-            defer { liveTouches.removeAll() }
-            return Array(liveTouches.values)
+    private func closeLiveInputs() {
+        let entries = liveInputLock.withLock {
+            defer { liveInputs.removeAll() }
+            return Array(liveInputs.values)
         }
         for entry in entries {
             entry.channel.disconnect()
@@ -955,6 +959,14 @@ public final class StreamServer: @unchecked Sendable {
                 throw SimToolError("Launch requires an app bundle id: start the server with --app or pass name")
             }
             return try await ProcessRunner.runXcrun(["simctl", "launch", "--terminate-running-process", config.device.udid, bundleId])
+        case "software-keyboard":
+            guard let visible = input.visible else {
+                return try await SimulatorInputClient.toggleSoftwareKeyboard(deviceUDID: config.device.udid)
+            }
+            return try await SimulatorInputClient.setSoftwareKeyboard(visible: visible, deviceUDID: config.device.udid)
+        case "hardware-keyboard":
+            guard let connected = input.enabled else { throw SimToolError("Hardware keyboard input requires enabled: true or false") }
+            return try await SimulatorInputClient.setHardwareKeyboard(connected: connected, deviceUDID: config.device.udid)
         case "button":
             guard let name = input.name else { throw SimToolError("Button input requires name") }
             if name.lowercased() == "home" {

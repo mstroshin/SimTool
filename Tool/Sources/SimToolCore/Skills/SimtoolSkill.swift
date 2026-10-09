@@ -284,6 +284,10 @@ extension AgentSkill {
             react. For a photo picker, put the image in the library instead: `xcrun
             simctl addmedia <udid> <file>…` (or right-click the viewer's screen › Add to
             Photos).
+          - `keyboard show|hide` — the software keyboard, confirmed on screen (or off
+            it) through the accessibility tree; idempotent. Hide it when it covers the
+            button you need; `show` fails when no text field is focused — tap one
+            first. `keyboard toggle` presses once without checking (Simulator.app's ⌘K).
         - `simtool ax …` — read the accessibility tree / find an element.
         - `simtool logs …` — OSLog stream; a `--stdout` mode **relaunches** the app to
           attach its console (useful when the app logs richly to stdout — networking,

@@ -24,6 +24,10 @@ public enum WebViewer {
                   <button id="shake" class="icon-btn" type="button" title="Shake">📳</button>
                   <button id="terminate" class="icon-btn" type="button" title="Terminate app">⏹️</button>
                   <button id="relaunch" class="icon-btn" type="button" title="Relaunch app">▶️</button>
+                  <button id="softKeyboard" class="icon-btn" type="button" title="Toggle software keyboard (⌘K while typing into the simulator)">⌨️</button>
+                  <button id="keyboardToggle" class="inspect-toggle" type="button" aria-pressed="false" title="Type into the simulator with the Mac keyboard (⇧⌘K)">
+                    <span class="dot"></span><span>Keyboard</span>
+                  </button>
                   <button id="inspectToggle" class="inspect-toggle" type="button" aria-pressed="false">
                     <span class="dot"></span><span>Inspect</span>
                   </button>
@@ -53,6 +57,7 @@ public enum WebViewer {
                     <span id="statusDot" class="status-dot idle"></span>
                     <span id="statusText">opening stream</span>
                     <span id="fps">-- fps</span>
+                    <span id="kbdBadge" class="kbd-badge" hidden></span>
                     <span id="deviceName" class="device-name">—</span>
                   </div>
                 </div>
@@ -157,6 +162,7 @@ public enum WebViewer {
             </div>
           </main>
           <script>\(touchScript)
+        \(keyboardScript)
         \(javascript)</script>
         </body>
         </html>
@@ -195,6 +201,7 @@ public enum WebViewer {
     .inspect-toggle .dot { width: 8px; height: 8px; border-radius: 999px; background: #4b5366; }
     .inspect-toggle.on { background: rgba(125,211,252,0.16); border-color: transparent; color: #bae6fd; }
     .inspect-toggle.on .dot { background: #7dd3fc; box-shadow: 0 0 8px rgba(125,211,252,0.85); }
+    .inspect-toggle + .inspect-toggle { margin-left: 0; }
 
     /* Stage holds the device behind the drawer; the status bar and inspector overlay its bottom. */
     .stage { position: relative; min-height: 0; background: #000; overflow: hidden; }
@@ -203,6 +210,9 @@ public enum WebViewer {
     .screen-wrap.actual { display: grid; justify-items: center; align-items: start; overflow: auto; }
     .surface { position: relative; width: 360px; height: 780px; max-width: 100%; max-height: 100%; border-radius: 22px; overflow: hidden; background: #03040a; box-shadow: 0 0 0 1px rgba(255,255,255,0.10), 0 22px 60px rgba(0,0,0,0.36); }
     canvas { display: block; width: 100%; height: 100%; object-fit: contain; image-rendering: auto; cursor: crosshair; touch-action: none; }
+    /* Mac keyboard → simulator: a ring says the keys go to the device; dashed while they go elsewhere. */
+    .surface.kbd-capture { outline: 2px solid #7dd3fc; outline-offset: 3px; box-shadow: 0 0 0 1px rgba(255,255,255,0.10), 0 0 28px rgba(125,211,252,0.5), 0 22px 60px rgba(0,0,0,0.36); }
+    .surface.kbd-capture.kbd-paused { outline: 2px dashed rgba(125,211,252,0.45); box-shadow: 0 0 0 1px rgba(255,255,255,0.10), 0 22px 60px rgba(0,0,0,0.36); }
     #placeholder { position: absolute; inset: 0; display: grid; place-items: center; color: rgba(255,255,255,0.52); font-size: 13px; pointer-events: none; }
 
     .statusbar { position: absolute; left: 0; right: 0; bottom: 0; z-index: 1; display: flex; align-items: center; gap: 8px; padding: 6px 12px; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; color: rgba(244,247,251,0.64); background: linear-gradient(rgba(3,5,12,0), rgba(3,5,12,0.74)); pointer-events: none; }
@@ -210,6 +220,8 @@ public enum WebViewer {
     .status-dot.err { background: #f87171; box-shadow: 0 0 6px rgba(248,113,113,0.7); }
     .status-dot.idle { background: #4b5366; box-shadow: none; }
     .statusbar .device-name { margin-left: auto; color: #bae6fd; }
+    .statusbar .kbd-badge { color: #7dd3fc; }
+    .statusbar .kbd-badge.paused { color: rgba(244,247,251,0.5); }
 
     /* Inspector drawer: always slides up from the bottom over the device. */
     .inspector { position: absolute; left: 0; right: 0; bottom: 0; z-index: 3; height: 62%; display: flex; flex-direction: column; min-height: 0; background: #0b1020; border-top: 1px solid rgba(255,255,255,0.10); border-radius: 16px 16px 0 0; box-shadow: 0 -12px 32px rgba(0,0,0,0.55); }
@@ -469,9 +481,9 @@ public enum WebViewer {
     /// The live-touch channel, kept apart from the page script so it can be
     /// exercised on its own.
     static let touchScript = #"""
-    // Live touch: one WebSocket carries the viewer's finger to the device.
-    // Moves coalesce to one per animation frame; downs and ups are never
-    // dropped, and a move still waiting goes out before the up that ends it.
+    // Live touch: one WebSocket carries the viewer's finger — and its keys —
+    // to the device. Moves coalesce to one per animation frame; downs, ups and
+    // keys are never dropped, and a move still waiting goes out first.
     // While the socket reconnects, the newest 32 messages of the last 1.5 s
     // wait for it — older ones would replay a gesture the user has finished.
     function createTouchStream(options) {
@@ -544,8 +556,74 @@ public enum WebViewer {
           nextFrame(() => { frameScheduled = false; flushMove(); });
         },
         up(first, second) { flushMove(); send(message("up", first, second)); },
+        key(message) { flushMove(); send(message); },
         get connected() { return open; },
         close() { closed = true; if (socket) socket.close(); }
+      };
+    }
+    """#
+
+    /// The Mac keyboard bridge, kept apart from the page script so it can be
+    /// exercised on its own.
+    static let keyboardScript = #"""
+    // Mac keyboard → simulator. While on, keys reach the device as a hardware
+    // keyboard's, by physical key (KeyboardEvent.code): the device's own
+    // layout picks the character, as in Simulator.app. The device repeats a
+    // held key itself, so the browser's repeats are dropped. Every key sent
+    // down goes up again — on release, when the mode goes off, or when the page
+    // loses the keyboard — and a modifier pressed while the page did not have
+    // the keyboard catches up with the next key.
+    function createKeyboardBridge(options) {
+      const send = options.send;
+      const isMac = !!options.isMac;
+      const modifiers = [
+        ["shiftKey", "ShiftLeft", "ShiftRight"],
+        ["ctrlKey", "ControlLeft", "ControlRight"],
+        ["altKey", "AltLeft", "AltRight"],
+        ["metaKey", "MetaLeft", "MetaRight"]
+      ];
+      const isModifier = (code) => modifiers.some(([, left, right]) => code === left || code === right);
+      const held = [];
+      let enabled = false;
+
+      function down(code) { held.push(code); send({ t: "keydown", code }); }
+      function up(code) { held.splice(held.indexOf(code), 1); send({ t: "keyup", code }); }
+      function press(code) { send({ t: "keydown", code }); send({ t: "keyup", code }); }
+      function releaseAll() { while (held.length) up(held[held.length - 1]); }
+
+      function syncModifiers(event) {
+        for (const [flag, left, right] of modifiers) {
+          if (event.code === left || event.code === right) continue;
+          const pressed = held.filter((code) => code === left || code === right);
+          if (event[flag] && !pressed.length) down(left);
+          if (!event[flag]) pressed.forEach(up);
+        }
+      }
+
+      return {
+        get enabled() { return enabled; },
+        setEnabled(on) { if (!on) releaseAll(); enabled = !!on; },
+        // Each returns whether the key went to the device; the page then keeps it to itself.
+        keydown(event) {
+          const code = event.code;
+          if (!enabled || !code || code === "Unidentified") return false;
+          // Mac browsers report Caps Lock turning on and off rather than the key: each event is a press.
+          if (code === "CapsLock") { press(code); return true; }
+          if (event.repeat || held.includes(code)) return true;
+          syncModifiers(event);
+          // macOS reports no keyup for a key released while ⌘ is down, so under ⌘ a key is a press.
+          if (isMac && event.metaKey && !isModifier(code)) { press(code); return true; }
+          down(code);
+          return true;
+        },
+        keyup(event) {
+          const code = event.code;
+          if (code === "CapsLock") { if (enabled && isMac) press(code); return enabled; }
+          if (!held.includes(code)) return false;
+          up(code);
+          return true;
+        },
+        releaseAll
       };
     }
     """#
@@ -565,6 +643,9 @@ public enum WebViewer {
     const shakeButton = $("shake");
     const terminateButton = $("terminate");
     const relaunchButton = $("relaunch");
+    const softKeyboardButton = $("softKeyboard");
+    const keyboardToggle = $("keyboardToggle");
+    const kbdBadge = $("kbdBadge");
     const deviceMenu = $("deviceMenu");
     const deviceMenuPaste = $("deviceMenuPaste");
     const deviceMenuPhotos = $("deviceMenuPhotos");
@@ -3429,6 +3510,98 @@ public enum WebViewer {
     // A finger never outlives the page's attention.
     window.addEventListener("blur", () => { endTouch(); endWheelDrag(); });
     document.addEventListener("visibilitychange", () => { if (document.hidden) { endTouch(); endWheelDrag(); } });
+
+    // ---- Mac keyboard → simulator ----
+    // Off, the keyboard is the page's: SimTool's shortcuts and the browser's.
+    // On, keys go to the device, except into SimTool's own text fields, ⇧⌘K
+    // (which turns the mode off — Esc is a key iOS uses), ⌘K (Simulator.app's
+    // Toggle Software Keyboard), ⌘V (the paste event pastes the Mac clipboard
+    // as text) and Esc while a SimTool menu is open.
+    const keyboardBridge = createKeyboardBridge({
+      send: (message) => touchStream.key(message),
+      isMac: /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent)
+    });
+    let hardwareKeyboardRequests = Promise.resolve();
+
+    const isKeyboardModeChord = (event) => event.code === "KeyK" && event.shiftKey && (event.metaKey || event.ctrlKey) && !event.altKey;
+    const isSoftKeyboardChord = (event) => event.code === "KeyK" && event.metaKey && !event.shiftKey && !event.ctrlKey && !event.altKey;
+    const isPasteChord = (event) => event.code === "KeyV" && event.metaKey && !event.ctrlKey && !event.altKey;
+
+    function popupOpen() {
+      return [axMenu, deviceMenu, networkMenu, networkLaunchMenu, logsMenu, logsLaunchMenu, testsMenu, filterHelpPop].some((menu) => !menu.hidden);
+    }
+
+    function updateKeyboardIndicator() {
+      const on = keyboardBridge.enabled;
+      const live = on && document.hasFocus() && !isEditableTarget(document.activeElement);
+      keyboardToggle.classList.toggle("on", on);
+      keyboardToggle.setAttribute("aria-pressed", String(on));
+      surface.classList.toggle("kbd-capture", on);
+      surface.classList.toggle("kbd-paused", on && !live);
+      kbdBadge.hidden = !on;
+      kbdBadge.classList.toggle("paused", on && !live);
+      kbdBadge.textContent = live ? "keyboard → simulator" : "keyboard paused";
+    }
+
+    function setKeyboardMode(on) {
+      if (keyboardBridge.enabled === on) return;
+      keyboardBridge.setEnabled(on);
+      updateKeyboardIndicator();
+      // Simulator.app's Connect Hardware Keyboard goes with it, in the order the toggle flips.
+      hardwareKeyboardRequests = hardwareKeyboardRequests.then(async () => {
+        try {
+          await api("/api/v1/input", { method: "POST", body: JSON.stringify({ action: "hardware-keyboard", enabled: on }) });
+        } catch (error) {
+          setStatus(`hardware keyboard ${on ? "connect" : "disconnect"} failed: ${error.message}`, "err");
+        }
+      });
+    }
+
+    async function toggleSoftwareKeyboard() {
+      try {
+        await api("/api/v1/input", { method: "POST", body: JSON.stringify({ action: "software-keyboard" }) });
+      } catch (error) {
+        setStatus(`software keyboard failed: ${error.message}`, "err");
+      }
+    }
+
+    function keepFromPage(event) { event.preventDefault(); event.stopPropagation(); }
+
+    // Capture phase: ahead of the page's own key handlers.
+    window.addEventListener("keydown", (event) => {
+      if (isKeyboardModeChord(event)) {
+        keepFromPage(event);
+        if (!event.repeat) setKeyboardMode(!keyboardBridge.enabled);
+        return;
+      }
+      if (!keyboardBridge.enabled || isEditableTarget(event.target)) return;
+      if (event.code === "Escape" && popupOpen()) return;
+      if (isPasteChord(event)) return;
+      if (isSoftKeyboardChord(event)) {
+        keepFromPage(event);
+        if (!event.repeat) toggleSoftwareKeyboard();
+        return;
+      }
+      if (keyboardBridge.keydown(event)) keepFromPage(event);
+    }, true);
+    window.addEventListener("keyup", (event) => {
+      if (event.code === "CapsLock" && isEditableTarget(event.target)) return;
+      if (keyboardBridge.keyup(event)) keepFromPage(event);
+    }, true);
+    window.addEventListener("focus", updateKeyboardIndicator);
+    window.addEventListener("blur", () => { keyboardBridge.releaseAll(); updateKeyboardIndicator(); });
+    document.addEventListener("visibilitychange", () => { if (document.hidden) keyboardBridge.releaseAll(); });
+    document.addEventListener("focusin", (event) => {
+      if (isEditableTarget(event.target)) keyboardBridge.releaseAll();
+      updateKeyboardIndicator();
+    });
+    document.addEventListener("focusout", () => setTimeout(updateKeyboardIndicator, 0));
+    // A press on the screen hands the keyboard back to the device.
+    canvas.addEventListener("pointerdown", () => {
+      if (keyboardBridge.enabled && isEditableTarget(document.activeElement)) document.activeElement.blur();
+    }, true);
+    keyboardToggle.addEventListener("click", () => setKeyboardMode(!keyboardBridge.enabled));
+    softKeyboardButton.addEventListener("click", toggleSoftwareKeyboard);
 
     // iOS drops synthetic scroll events, so a wheel or trackpad scroll drags a
     // finger instead: down under the cursor, moved by each (inverted) delta,
