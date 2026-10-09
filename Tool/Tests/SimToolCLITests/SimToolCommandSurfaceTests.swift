@@ -89,6 +89,16 @@ final class SimToolCommandSurfaceTests: XCTestCase {
         XCTAssertNil(drag.velocity)
     }
 
+    func testInputShowsAndHidesTheSoftwareKeyboard() throws {
+        let names = Input.configuration.subcommands.map { commandName(for: $0) }
+        XCTAssertTrue(names.contains("keyboard"))
+        XCTAssertEqual(try Input.Keyboard.parse(["show"]).action, .show)
+        XCTAssertEqual(try Input.Keyboard.parse(["hide", "--device", "X", "--json"]).action, .hide)
+        XCTAssertEqual(try Input.Keyboard.parse(["toggle"]).action, .toggle)
+        XCTAssertThrowsError(try Input.Keyboard.parse([]))
+        XCTAssertThrowsError(try Input.Keyboard.parse(["open"]))
+    }
+
     func testTopLevelCommandIncludesAppNamespace() {
         let names = SimTool.configuration.subcommands.map { commandName(for: $0) }
         XCTAssertTrue(names.contains("app"))

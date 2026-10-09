@@ -83,6 +83,27 @@ public struct LiveKeyEvent: Equatable, Sendable {
     var helperLine: String { "key \(key.usage) \(isDown ? 1 : 0)" }
 }
 
+/// Where the software keyboard is, read off an accessibility tree. iOS keeps
+/// the keyboard's layout in the tree while it is hidden, parked just below the
+/// screen, so on screen means its top is above the screen's bottom edge.
+enum SoftwareKeyboardVisibility {
+    static let layoutIdentifier = "UIKeyboardLayoutStar Preview"
+
+    static func isOnScreen(in tree: AccessibilityTreePayload) -> Bool {
+        let screen = tree.roots.first(where: { $0.type == "Application" }) ?? tree.roots.first
+        guard let screenHeight = screen?.frame?.height, screenHeight > 0 else { return false }
+        func visit(_ node: AccessibilityNode) -> Bool {
+            if node.accessibilityIdentifier == layoutIdentifier,
+               let top = node.frame?.y, let height = node.frame?.height,
+               height > 0, top < screenHeight - 1 {
+                return true
+            }
+            return node.children.contains(where: visit)
+        }
+        return tree.roots.contains(where: visit)
+    }
+}
+
 extension SimulatorInputClient {
     /// Simulator.app's Toggle Software Keyboard (⌘K), which Device Hub sends
     /// as the Eject key of a hardware keyboard: iOS shows the software keyboard
@@ -90,6 +111,34 @@ extension SimulatorInputClient {
     public static func toggleSoftwareKeyboard(deviceUDID: String) async throws -> ProcessOutput {
         try await SimulatorDirectInputClient.shared.toggleSoftwareKeyboard(deviceUDID: deviceUDID)
         return ProcessOutput(status: 0)
+    }
+
+    /// Shows or hides the software keyboard and confirms it on screen. Eject
+    /// flips a flag iOS keeps rather than the keyboard itself — with no
+    /// hardware keyboard connected one press may change nothing visible — so a
+    /// second press follows when the first did not do it.
+    public static func setSoftwareKeyboard(visible: Bool, deviceUDID: String) async throws -> ProcessOutput {
+        let shown = visible ? "shown" : "hidden"
+        if try await softwareKeyboardOnScreen(deviceUDID: deviceUDID) == visible {
+            return ProcessOutput(status: 0, stdout: Data("The software keyboard is already \(shown).".utf8))
+        }
+        for _ in 1...2 {
+            try await SimulatorDirectInputClient.shared.toggleSoftwareKeyboard(deviceUDID: deviceUDID)
+            let deadline = Date().addingTimeInterval(1.5)
+            repeat {
+                try await Task.sleep(for: .milliseconds(250))
+                if try await softwareKeyboardOnScreen(deviceUDID: deviceUDID) == visible {
+                    return ProcessOutput(status: 0, stdout: Data("The software keyboard is \(shown).".utf8))
+                }
+            } while Date() < deadline
+        }
+        throw SimToolError(visible
+            ? "The software keyboard did not come up: no text field is focused. Tap one first."
+            : "The software keyboard stayed on screen.")
+    }
+
+    private static func softwareKeyboardOnScreen(deviceUDID: String) async throws -> Bool {
+        SoftwareKeyboardVisibility.isOnScreen(in: try await SimulatorAccessibilityClient.normalizedTree(deviceUDID: deviceUDID))
     }
 
     /// Simulator.app's Connect Hardware Keyboard (⇧⌘K): connected, iOS treats

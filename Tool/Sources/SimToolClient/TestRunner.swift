@@ -114,6 +114,8 @@ public struct TestRunner {
             _ = try await waitForMatch(target, timeout: timeout)
         case .assertHidden(let target, let timeout):
             try await waitForAbsence(target, timeout: timeout)
+        case .keyboard(let visible):
+            try check(await client.softwareKeyboard(visible: visible), action: visible ? "show keyboard" : "hide keyboard")
         case .pause(let seconds):
             try await Task.sleep(for: .milliseconds(Int(seconds * 1000)))
         }

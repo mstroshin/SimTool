@@ -357,6 +357,8 @@ public struct SimulatorInputPayload: Codable, Equatable, Sendable {
     public var sourceHeight: Double?
     /// On or off (hardware-keyboard).
     public var enabled: Bool?
+    /// Shown or hidden (software-keyboard); absent, it toggles.
+    public var visible: Bool?
 
     public init(
         action: String? = nil,
@@ -380,7 +382,8 @@ public struct SimulatorInputPayload: Codable, Equatable, Sendable {
         coordinateSpace: String? = nil,
         sourceWidth: Double? = nil,
         sourceHeight: Double? = nil,
-        enabled: Bool? = nil
+        enabled: Bool? = nil,
+        visible: Bool? = nil
     ) {
         self.action = action
         self.type = type
@@ -404,6 +407,7 @@ public struct SimulatorInputPayload: Codable, Equatable, Sendable {
         self.sourceWidth = sourceWidth
         self.sourceHeight = sourceHeight
         self.enabled = enabled
+        self.visible = visible
     }
 }
 

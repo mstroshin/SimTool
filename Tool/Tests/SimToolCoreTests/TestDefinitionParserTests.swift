@@ -91,6 +91,22 @@ final class TestDefinitionParserTests: XCTestCase {
         }
     }
 
+    func testParsesKeyboardSteps() throws {
+        let test = try TestDefinitionParser.parse("""
+        steps:
+          - keyboard: show
+          - keyboard: Hide
+        """)
+        XCTAssertEqual(test.steps.map(\.action), [.keyboard(visible: true), .keyboard(visible: false)])
+        XCTAssertEqual(test.steps.map(\.description), ["Show keyboard", "Hide keyboard"])
+        // A test says what it wants; toggle would depend on how the run started.
+        for step in ["- keyboard: toggle", "- keyboard: { visible: true }"] {
+            XCTAssertThrowsError(try TestDefinitionParser.parse("steps:\n  \(step)\n"), step) { error in
+                XCTAssertTrue("\(error)".contains("takes show or hide"), "\(step) → \(error)")
+            }
+        }
+    }
+
     func testLongPressDurationIsOptional() throws {
         let test = try TestDefinitionParser.parse("""
         steps:

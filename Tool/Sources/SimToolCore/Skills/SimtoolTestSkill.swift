@@ -207,6 +207,7 @@ extension AgentSkill {
           - scroll: { direction: up, distance: 300, id: feed }   # starting on an element
           - fling: { direction: up, speed: fast }                 # slow | normal | fast | pt/s
           - drag: { from: { label: "Milk" }, to: { label: "Eggs" } }   # or by: { x: 0, y: 120 }
+          - keyboard: hide             # or show — the software keyboard, confirmed on screen
           - assertVisible: { text: "Welcome", criterion: AC-1 }   # alias of waitFor
           - assertHidden: { label: "Loading" }
           - wait: 2                    # escape hatch; prefer waitFor / assertHidden

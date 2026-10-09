@@ -369,13 +369,15 @@ public enum TestStepAction: Equatable, Sendable, CustomStringConvertible {
     case drag(from: TestTarget, to: TestDragDestination, press: Double?, speed: Double?, hold: Double?, timeout: Double?)
     case waitFor(TestTarget, timeout: Double?)
     case assertHidden(TestTarget, timeout: Double?)
+    /// Shows (true) or hides the software keyboard.
+    case keyboard(visible: Bool)
     case pause(Double)
 
     /// Whether this action checks a result, and so may carry a `criterion:`.
     public var isAssertion: Bool {
         switch self {
         case .waitFor, .assertHidden: true
-        case .tap, .longPress, .type, .swipe, .scroll, .fling, .drag, .pause: false
+        case .tap, .longPress, .type, .swipe, .scroll, .fling, .drag, .keyboard, .pause: false
         }
     }
 
@@ -393,6 +395,7 @@ public enum TestStepAction: Equatable, Sendable, CustomStringConvertible {
         case .drag(let from, let to, _, _, _, _): "Drag \(from) \(to)"
         case .waitFor(let target, _): "Wait for \(target)"
         case .assertHidden(let target, _): "Assert hidden \(target)"
+        case .keyboard(let visible): visible ? "Show keyboard" : "Hide keyboard"
         case .pause(let seconds): "Pause \(seconds.formatted())s"
         }
     }
@@ -883,10 +886,16 @@ public enum TestDefinitionParser {
         case "assertHidden":
             let (target, timeout) = try targetAndTimeout(value, context: context)
             action = .assertHidden(target, timeout: timeout)
+        case "keyboard":
+            switch scalarString(value).lowercased() {
+            case "show": action = .keyboard(visible: true)
+            case "hide": action = .keyboard(visible: false)
+            default: throw SimToolError("\(context): `keyboard:` takes show or hide.")
+            }
         case "wait":
             action = .pause(try seconds(value, context: context))
         default:
-            throw SimToolError("Step \(index + 1): unknown step `\(keyword)`. Known steps: tap, longPress, type, swipe, scroll, fling, drag, waitFor, assertVisible, assertHidden, wait.")
+            throw SimToolError("Step \(index + 1): unknown step `\(keyword)`. Known steps: tap, longPress, type, swipe, scroll, fling, drag, keyboard, waitFor, assertVisible, assertHidden, wait.")
         }
         if criterion != nil, !action.isAssertion {
             throw SimToolError("\(context): `criterion:` marks the assertion that checks the claim, so it belongs on assertVisible, assertHidden or waitFor — not on `\(keyword)`.")

@@ -61,6 +61,11 @@ public struct SimToolClient: Sendable {
         try await input(SimulatorInputPayload(action: "paste", text: text))
     }
 
+    /// Shows or hides the software keyboard and confirms it on screen.
+    public func softwareKeyboard(visible: Bool) async throws -> CommandResultPayload {
+        try await input(SimulatorInputPayload(action: "software-keyboard", visible: visible))
+    }
+
     /// Pastes an image (PNG, JPEG, HEIC, …) into the focused field the same way.
     public func pasteImage(_ data: Data, contentType: String) async throws -> CommandResultPayload {
         try await sendFile(path: "input/paste-image", data: data, contentType: contentType, filename: nil)

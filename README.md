@@ -82,7 +82,10 @@ around the screen shows the keys go to the device; it turns dashed while they
 go elsewhere — to a SimTool field such as the inspector filter, which keeps
 its keys, or to another window. Off, the keyboard belongs to the page and the
 browser. Keys reach the simulator in a few milliseconds over the same helper as
-the finger; ⌘W, ⌘T and ⌘Q stay with the browser.
+the finger; ⌘W, ⌘T and ⌘Q stay with the browser. Agents show and hide the
+software keyboard with `simtool input keyboard show|hide` and YAML tests with a
+`keyboard: show|hide` step; both confirm the keyboard on screen (or off it)
+through the accessibility tree, and `show` fails when no text field is focused.
 
 `serve` runs fully headless: when `--device`, `--host`, or `--port` are omitted
 it falls back to `simulator:` and `server:` from `.simtool/config.yml` (when one
@@ -110,6 +113,7 @@ swift run simtool kill <session-id> --json
 
 ```sh
 swift run simtool input button home --json
+swift run simtool input keyboard hide --json   # show | hide | toggle the software keyboard
 swift run simtool ax tree --json
 swift run simtool ax tree --flat --labeled
 swift run simtool ax find Continue --json
@@ -721,8 +725,9 @@ stdout/`print`) into a bounded buffer that clients poll incrementally by cursor;
 `startX`/`startY`/`endX`/`endY` with `velocity`, `duration`, `hold` (and `press`
 for `drag`), `direction` with `distance` or `velocity` and an optional start
 `x`/`y` for `scroll` and `fling`, `text` for `type` and `paste`, `enabled` for
-`hardware-keyboard` (connect or disconnect it); `software-keyboard` toggles the
-software keyboard. Coordinates are screen points. Images go as the raw request body instead:
+`hardware-keyboard` (connect or disconnect it), `visible` for
+`software-keyboard` (show or hide it and confirm it on screen; without it, a
+toggle). Coordinates are screen points. Images go as the raw request body instead:
 `POST /api/v1/input/paste-image` pastes one into the focused field, and
 `POST /api/v1/photos` adds an image or a video to Photos. Both read the type from
 `Content-Type` and an optional percent-encoded `X-SimTool-Filename` header.

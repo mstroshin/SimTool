@@ -960,7 +960,10 @@ public final class StreamServer: @unchecked Sendable {
             }
             return try await ProcessRunner.runXcrun(["simctl", "launch", "--terminate-running-process", config.device.udid, bundleId])
         case "software-keyboard":
-            return try await SimulatorInputClient.toggleSoftwareKeyboard(deviceUDID: config.device.udid)
+            guard let visible = input.visible else {
+                return try await SimulatorInputClient.toggleSoftwareKeyboard(deviceUDID: config.device.udid)
+            }
+            return try await SimulatorInputClient.setSoftwareKeyboard(visible: visible, deviceUDID: config.device.udid)
         case "hardware-keyboard":
             guard let connected = input.enabled else { throw SimToolError("Hardware keyboard input requires enabled: true or false") }
             return try await SimulatorInputClient.setHardwareKeyboard(connected: connected, deviceUDID: config.device.udid)

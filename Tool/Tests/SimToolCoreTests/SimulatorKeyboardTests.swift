@@ -49,6 +49,41 @@ final class SimulatorKeyboardTests: XCTestCase {
         XCTAssertEqual(SimulatorDirectInputCommand.hardwareKeyboard(connected: false).line, "hwkeyboard 0")
     }
 
+    // MARK: - software keyboard on screen
+
+    private func tree(screenHeight: Double, keyboardTop: Double?) -> AccessibilityTreePayload {
+        var children: [AccessibilityNode] = [
+            AccessibilityNode(id: "0.0", type: "TextField", frame: AccessibilityFrame(x: 20, y: 120, width: 380, height: 44), children: []),
+        ]
+        if let keyboardTop {
+            let key = AccessibilityNode(id: "0.1.0", label: "q", type: "Button", frame: AccessibilityFrame(x: 4, y: keyboardTop + 7, width: 41, height: 56), children: [])
+            children.append(AccessibilityNode(
+                id: "0.1",
+                accessibilityIdentifier: "UIKeyboardLayoutStar Preview",
+                type: "Group",
+                frame: AccessibilityFrame(x: 0, y: keyboardTop, width: 420, height: 245),
+                children: [key]
+            ))
+        }
+        let app = AccessibilityNode(id: "0", label: "App", type: "Application", frame: AccessibilityFrame(x: 0, y: 0, width: 420, height: screenHeight), children: children)
+        return AccessibilityTreePayload(roots: [app])
+    }
+
+    func testTheKeyboardIsOnScreenWhileItsLayoutIsAboveTheBottomEdge() {
+        XCTAssertTrue(SoftwareKeyboardVisibility.isOnScreen(in: tree(screenHeight: 912, keyboardTop: 609)))
+    }
+
+    func testAHiddenKeyboardIsParkedBelowTheScreen() {
+        // iOS 27 parks it past the edge, iOS 26.4 exactly at it.
+        XCTAssertFalse(SoftwareKeyboardVisibility.isOnScreen(in: tree(screenHeight: 912, keyboardTop: 929)))
+        XCTAssertFalse(SoftwareKeyboardVisibility.isOnScreen(in: tree(screenHeight: 874, keyboardTop: 874)))
+    }
+
+    func testNoKeyboardLayoutMeansNoKeyboard() {
+        XCTAssertFalse(SoftwareKeyboardVisibility.isOnScreen(in: tree(screenHeight: 912, keyboardTop: nil)))
+        XCTAssertFalse(SoftwareKeyboardVisibility.isOnScreen(in: AccessibilityTreePayload(roots: [])))
+    }
+
     func testHelperSourceSpeaksTheKeyboardCommands() {
         let source = SimulatorDirectInputHelperSource.source
         for command in ["\"key\"", "\"press\"", "\"button\"", "\"hwkeyboard\""] {
