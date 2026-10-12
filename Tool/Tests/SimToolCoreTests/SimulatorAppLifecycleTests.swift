@@ -350,6 +350,51 @@ final class SimulatorAppLifecycleTests: XCTestCase {
         XCTAssertEqual(payload.checksum, fingerprint.checksum)
     }
 
+    func testBuildsForASimulatorAndForAnyShareOneCacheEntry() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let project = root.appendingPathComponent("Example.xcodeproj", isDirectory: true)
+        try write("Example.xcodeproj/project.pbxproj", contents: "project", root: root)
+        try write("Sources/App.swift", contents: "struct App {}", root: root)
+
+        let cache = SimulatorAppBuildCache(
+            simtoolDirectory: root.appendingPathComponent(".simtool", isDirectory: true),
+            derivedDataRoot: root.appendingPathComponent("derived", isDirectory: true)
+        )
+        let anySimulator = try SimulatorAppBuildSelection.validated(workspacePath: nil, projectPath: project.path, scheme: "Example")
+        let device = SimulatorDevice(udid: "DEVICE", name: "iPhone", runtime: "iOS", state: "Booted", isAvailable: true)
+        let oneSimulator = anySimulator.targeting(device)
+
+        XCTAssertNil(anySimulator.deviceUDID)
+        XCTAssertEqual(oneSimulator.deviceUDID, "DEVICE")
+        XCTAssertEqual(oneSimulator.identity, anySimulator.identity)
+        XCTAssertEqual(try cache.identityKey(for: oneSimulator.identity), try cache.identityKey(for: anySimulator.identity))
+        XCTAssertEqual(try cache.derivedDataPath(for: oneSimulator.identity), try cache.derivedDataPath(for: anySimulator.identity))
+
+        // A build for any simulator — say `app build` without --device — is
+        // reused by a run that builds for one, and the other way round.
+        let app = root.appendingPathComponent("Build/Example.app", isDirectory: true)
+        try FileManager.default.createDirectory(at: app, withIntermediateDirectories: true)
+        let fingerprint = try SimulatorAppBuildFingerprinter.fingerprint(selection: anySimulator, cacheRoot: cache.derivedDataRoot)
+        XCTAssertEqual(try SimulatorAppBuildFingerprinter.fingerprint(selection: oneSimulator, cacheRoot: cache.derivedDataRoot), fingerprint)
+        try cache.write(SimulatorAppBuildCacheMetadata(
+            identity: anySimulator.identity,
+            checksum: fingerprint.checksum,
+            inputFileCount: fingerprint.inputFileCount,
+            appBundlePath: app.path,
+            bundleIdentifier: "com.example.app"
+        ))
+        XCTAssertTrue(try SimulatorAppLifecycleClient.plan(selection: oneSimulator, cache: cache).isCacheHit)
+        XCTAssertTrue(try SimulatorAppLifecycleClient.plan(selection: anySimulator, cache: cache).isCacheHit)
+
+        // On a miss the plan keeps the device, so xcodebuild still gets it.
+        let forced = try SimulatorAppLifecycleClient.plan(selection: oneSimulator, force: true, cache: cache)
+        XCTAssertTrue(
+            SimulatorAppLifecycleClient.xcodebuildArguments(selection: forced.selection, derivedDataPath: forced.derivedDataPath)
+                .contains("platform=iOS Simulator,id=DEVICE")
+        )
+    }
+
     func testPlanForceIgnoresValidCache() throws {
         let root = try makeTempDirectory()
         defer { try? FileManager.default.removeItem(at: root) }

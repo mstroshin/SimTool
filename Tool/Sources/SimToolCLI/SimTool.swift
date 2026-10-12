@@ -1169,7 +1169,7 @@ extension AppCommand {
     struct Build: AsyncParsableCommand {
         static let configuration = CommandConfiguration(commandName: "build", abstract: "Build an iOS simulator app with checksum caching.")
 
-        @Option(name: .shortAndLong, help: "Simulator UDID or name to build for — its architecture only, which is faster. Defaults to any iOS simulator.")
+        @Option(name: .shortAndLong, help: "Simulator UDID or name to build for — its architecture only, which is faster. Defaults to any iOS simulator; `app launch`, `run` and `test run` always build for the simulator they launch on.")
         var device: String?
 
         @OptionGroup var buildOptions: AppBuildOptions
@@ -1215,7 +1215,7 @@ extension AppCommand {
     struct Launch: AsyncParsableCommand {
         static let configuration = CommandConfiguration(commandName: "launch", abstract: "Build if needed, install if needed, and launch an app on a simulator.")
 
-        @Option(name: .shortAndLong, help: "Simulator UDID or name. Defaults to the first booted simulator.")
+        @Option(name: .shortAndLong, help: "Simulator UDID or name to launch on; the build targets it alone. Defaults to `simulator:` from .simtool/config.yml, else the booted simulator.")
         var device: String?
 
         @Option(name: .customLong("env"), help: "Runtime environment entry for the app process, in KEY=VALUE format. Repeatable.")
@@ -1246,7 +1246,7 @@ extension AppCommand {
                 return
             }
             let resolved = try await resolveSimulatorWithProgress(device)
-            let buildPayload = try await buildAppWithProgress(selection: selection, force: buildOptions.force, cache: buildCache)
+            let buildPayload = try await buildAppWithProgress(selection: selection.targeting(resolved), force: buildOptions.force, cache: buildCache)
             let payload = try await installAndLaunchAppWithProgress(
                 build: buildPayload,
                 device: resolved,
@@ -1733,7 +1733,7 @@ struct TestCommand: AsyncParsableCommand {
             return {
                 let device = try await SimulatorDeviceClient.resolve((try? await client.config())?.udid)
                 let cache = SimulatorAppBuildCache(simtoolDirectory: SimToolDirectory.resolve())
-                let payload = try await SimulatorAppLifecycleClient.build(selection: selection, cache: cache)
+                let payload = try await SimulatorAppLifecycleClient.build(selection: selection.targeting(device), cache: cache)
                 let installed = try await SimulatorAppLifecycleClient.install(
                     build: payload,
                     device: device,
@@ -2360,7 +2360,7 @@ struct Run: AsyncParsableCommand {
     @Flag(name: .long, help: "Print verbose diagnostic output to stderr.")
     var verbose = false
 
-    @Option(name: .shortAndLong, help: "Simulator UDID or name to run on, overriding `simulator:` in the config. Pass 'booted' for the first booted simulator.")
+    @Option(name: .shortAndLong, help: "Simulator UDID or name to run on — and to build for, its architecture only — overriding `simulator:` in the config. Pass 'booted' for the first booted simulator.")
     var device: String?
 
     @Option(help: "Path to the project config. Defaults to .simtool/config.yml discovered from the working directory upward.")
@@ -2390,7 +2390,10 @@ struct Run: AsyncParsableCommand {
             setenv("SIMCTL_CHILD_SIMTOOL_SERVER_URL", projectConfig.appFacingServerURL, 1)
         }
 
-        // `--device` overrides `simulator:` from the config when provided.
+        // `--device` overrides `simulator:` from the config when provided. The
+        // simulator is resolved before the build, which is for it alone; with
+        // nothing to resolve (no booted device either) the run fails here, as
+        // there would be nowhere to install the build anyway.
         let simulatorSelector = device ?? projectConfig.simulator
         let booted: SimulatorDevice
         let launch: SimulatorAppLaunchPayload
@@ -2398,7 +2401,7 @@ struct Run: AsyncParsableCommand {
             let resolved = try await SimulatorDeviceClient.resolve(simulatorSelector)
             booted = try await SimulatorDeviceClient.ensureBooted(resolved)
             launch = try await SimulatorAppLifecycleClient.launch(
-                selection: try projectConfig.buildSelection(),
+                selection: try projectConfig.buildSelection(for: booted),
                 device: booted,
                 force: force,
                 cache: buildCache
@@ -2407,7 +2410,7 @@ struct Run: AsyncParsableCommand {
             let resolved = try await resolveSimulatorWithProgress(simulatorSelector)
             booted = try await bootSimulatorWithProgress(resolved)
             let buildPayload = try await buildAppWithProgress(
-                selection: try projectConfig.buildSelection(),
+                selection: try projectConfig.buildSelection(for: booted),
                 force: force,
                 cache: buildCache
             )

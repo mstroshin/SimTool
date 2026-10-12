@@ -78,10 +78,12 @@ workspace.
   **refuses to guess when several simulators are booted and neither was
   given**. That refusal is deliberate: on a machine running parallel checkouts,
   guessing means driving another one's simulator, where the taps land elsewhere
-  and the accessibility tree merely looks stale. `app build` takes `--device`
-  too, to build for that simulator only (faster); without it, it builds for any
-  simulator. `simtool app build/launch` boots nothing itself — boot first
-  (`xcrun simctl boot <udid>` / open Simulator.app). List devices:
+  and the accessibility tree merely looks stale. `app launch`, `run` and
+  `test run` build for the simulator they launch on — its architecture only.
+  `app build` takes `--device` too, to do the same (faster); without it, it
+  builds for any simulator. Either build is reused by the others: the target is
+  not part of the cache key. `simtool app build/launch` boots nothing itself —
+  boot first (`xcrun simctl boot <udid>` / open Simulator.app). List devices:
   `simtool devices --json`.
 - **Build settings**: if the project only builds with extra xcodebuild
   settings (e.g. `MACOSX_DEPLOYMENT_TARGET=15.0` for a macro whose generated

@@ -188,6 +188,12 @@ public struct ProjectConfig: Codable, Equatable, Sendable {
         try build.selection()
     }
 
+    /// The configured build, for the simulator it is about to be installed on —
+    /// what `run` and `test run` build. Same cache entry as `buildSelection()`.
+    public func buildSelection(for device: SimulatorDevice) throws -> SimulatorAppBuildSelection {
+        try buildSelection().targeting(device)
+    }
+
     /// Looks up a configured launch profile by name, throwing a clear error that
     /// lists the available names on a miss — a test naming a profile that does
     /// not exist must say so, not launch with no arguments at all.

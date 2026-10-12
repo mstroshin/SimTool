@@ -190,6 +190,73 @@ final class ProjectConfigLoaderTests: XCTestCase {
         XCTAssertEqual(config.build.settings(for: otherProject), [:])
     }
 
+    func testRunBuildsForTheConfiguredSimulatorOnly() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try writeConfig("""
+        simulator: 5A1C0DE0-0000-4000-8000-00000000BEEF
+        bundleId: com.example.MyApp
+        build:
+          workspace: App.xcworkspace
+          scheme: App
+          configuration: Debug
+          derivedDataPath: DerivedData
+          settings:
+            MACOSX_DEPLOYMENT_TARGET: 15.0
+        """, in: root)
+        let config = try ProjectConfigLoader.load(startDirectory: root)
+        let devices = [
+            SimulatorDevice(udid: "0THER-B00TED", name: "iPhone 16", runtime: "iOS-18", state: "Booted", isAvailable: true),
+            SimulatorDevice(udid: "5A1C0DE0-0000-4000-8000-00000000BEEF", name: "iPhone 17 Pro", runtime: "iOS-26", state: "Shutdown", isAvailable: true),
+        ]
+        // What `run` does: resolve the simulator first, then build for it.
+        let device = try SimulatorDeviceClient.selectDevice(nil, configured: config.simulator, from: devices)
+        let selection = try config.buildSelection(for: device)
+        let derivedData = root.appendingPathComponent("DerivedData").path
+
+        // One architecture, not every simulator's: the build is for this device.
+        XCTAssertEqual(SimulatorAppLifecycleClient.xcodebuildArguments(selection: selection, derivedDataPath: derivedData), [
+            "xcodebuild",
+            "-workspace", root.appendingPathComponent("App.xcworkspace").path,
+            "-scheme", "App",
+            "-configuration", "Debug",
+            "-destination", "platform=iOS Simulator,id=5A1C0DE0-0000-4000-8000-00000000BEEF",
+            "-derivedDataPath", derivedData,
+            "MACOSX_DEPLOYMENT_TARGET=15.0",
+            "build",
+        ])
+        // Locating the built product asks about the same destination.
+        let settingsArguments = SimulatorAppLifecycleClient.xcodebuildArguments(
+            selection: selection, derivedDataPath: derivedData, showBuildSettings: true
+        )
+        XCTAssertTrue(settingsArguments.contains("platform=iOS Simulator,id=5A1C0DE0-0000-4000-8000-00000000BEEF"), "\(settingsArguments)")
+        // The cache entry is the one a build without a device uses.
+        XCTAssertEqual(selection.identity, try config.buildSelection().identity)
+    }
+
+    func testRunOnTheBootedSimulatorBuildsForThatSimulator() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try writeConfig("""
+        simulator: booted
+        bundleId: com.example.MyApp
+        build:
+          project: App.xcodeproj
+          scheme: App
+        """, in: root)
+        let config = try ProjectConfigLoader.load(startDirectory: root)
+        let devices = [
+            SimulatorDevice(udid: "SHUT-DOWN", name: "iPhone 16", runtime: "iOS-18", state: "Shutdown", isAvailable: true),
+            SimulatorDevice(udid: "B00TED-UDID", name: "iPhone 17 Pro", runtime: "iOS-26", state: "Booted", isAvailable: true),
+        ]
+        // `booted` is a selector, not a destination: it resolves to a UDID first.
+        let device = try SimulatorDeviceClient.selectDevice(nil, configured: config.simulator, from: devices)
+        let arguments = SimulatorAppLifecycleClient.xcodebuildArguments(selection: try config.buildSelection(for: device), derivedDataPath: nil)
+
+        let destination = try XCTUnwrap(arguments.firstIndex(of: "-destination"))
+        XCTAssertEqual(arguments[destination + 1], "platform=iOS Simulator,id=B00TED-UDID")
+    }
+
     func testInvalidBuildSettingNameThrows() throws {
         try assertLoadThrows("""
         simulator: iPhone 16 Pro

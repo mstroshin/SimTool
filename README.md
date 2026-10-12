@@ -271,9 +271,10 @@ inline argv/env), `reset:` (UserDefaults, data container, permission alerts,
 locale) and `mocks:` (backend answers, applied before launch). See
 `simtool test run --help` for the full file format.
 
-When the project config says how to build the app, a run rebuilds and reinstalls
-it first — only when the sources changed, since the checksum cache decides — and
-before the recorder starts, together with `reset:` and `setup:`. So the video
+When the project config says how to build the app, a run rebuilds it for the
+run's simulator and reinstalls it first — only when the sources changed, since
+the checksum cache decides — and before the recorder starts, together with
+`reset:` and `setup:`. So the video
 holds the run itself rather than minutes of an Xcode build, while the staging
 still appears in the timeline and its logs are still captured. `--no-build`
 judges whatever is already installed.
@@ -382,11 +383,17 @@ swift run simtool app build --device <udid-or-name> --workspace MyApp.xcworkspac
 
 Without `--device` the build targets any iOS simulator, so xcodebuild compiles
 every simulator architecture (arm64 and x86_64); with it, only that simulator's —
-noticeably faster. A project that only builds with extra xcodebuild settings —
-say a deployment target its generated dependencies miss — gets them from
-`build.settings` in `.simtool/config.yml` (below) on every build of that
-workspace or project, or per command with repeatable
-`--build-setting KEY=VALUE` on `app build`, `app launch` and `app test`:
+noticeably faster. `app launch`, `run` and `test run` always build for the
+simulator they install on, resolved before the build (`--device`, then
+`simulator:` from the config, then the booted one — `booted` becomes a UDID
+too). The target is not part of the cache key: a build for one simulator, for
+another or for any is reused by all of them.
+
+A project that only builds with extra xcodebuild settings — say a deployment
+target its generated dependencies miss — gets them from `build.settings` in
+`.simtool/config.yml` (below) on every build of that workspace or project, or
+per command with repeatable `--build-setting KEY=VALUE` on `app build`,
+`app launch` and `app test`:
 
 ```sh
 swift run simtool app build --workspace MyApp.xcworkspace --scheme MyApp \
@@ -673,13 +680,13 @@ Relative `workspace`/`project`/`derivedDataPath` paths resolve against the confi
 file's directory.
 
 `simtool run` reads the config, boots the configured simulator if needed, builds
-(reusing the checksum cache), installs, and launches the app, then starts the
-viewer server and prints its URL (`Open http://…`, or the `url` field with
-`--json`) — handy for scripts that open the page themselves. Pass `--web` to
-also open the browser viewer. It runs in the foreground like `serve` (Ctrl-C
-stops it), or pass `--detach` to leave the viewer server running in the
-background once the app is launched — build and launch still report in the
-foreground, and the printed session (`url` with `--json`) is ready to open.
+for that simulator only (reusing the checksum cache), installs, and launches the
+app, then starts the viewer server and prints its URL (`Open http://…`, or the
+`url` field with `--json`) — handy for scripts that open the page themselves.
+Pass `--web` to also open the browser viewer. It runs in the foreground like
+`serve` (Ctrl-C stops it), or pass `--detach` to leave the viewer server running
+in the background once the app is launched — build and launch still report in
+the foreground, and the printed session (`url` with `--json`) is ready to open.
 
 ```sh
 swift run simtool run            # server only; open the printed URL yourself

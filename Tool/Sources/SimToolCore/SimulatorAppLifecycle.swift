@@ -44,6 +44,18 @@ public struct SimulatorAppBuildSelection: Codable, Equatable, Sendable {
         self.identity = identity
     }
 
+    /// This selection, built for `device` alone. Whatever installs the build on
+    /// a simulator it has already resolved goes through here: the generic
+    /// destination compiles every simulator architecture, which on a large
+    /// project doubles a build that can already run for half an hour. The
+    /// identity is untouched, so the cache entry is shared with builds for any
+    /// other simulator, or for none.
+    public func targeting(_ device: SimulatorDevice) -> SimulatorAppBuildSelection {
+        var targeted = self
+        targeted.deviceUDID = device.udid
+        return targeted
+    }
+
     public static func validated(
         workspacePath: String?,
         projectPath: String?,
@@ -725,6 +737,8 @@ public enum SimulatorAppLifecycleClient {
         )
     }
 
+    /// Builds for `device` only (see `SimulatorAppBuildSelection.targeting`),
+    /// then installs and launches there.
     public static func launch(
         selection: SimulatorAppBuildSelection,
         device: SimulatorDevice,
@@ -737,7 +751,7 @@ public enum SimulatorAppLifecycleClient {
         progress: (@Sendable (String) -> Void)? = nil
     ) async throws -> SimulatorAppLaunchPayload {
         let buildPayload = try await build(
-            selection: selection,
+            selection: selection.targeting(device),
             force: force,
             cache: cache,
             timeoutSeconds: timeoutSeconds,
