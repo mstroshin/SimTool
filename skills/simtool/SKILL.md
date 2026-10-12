@@ -91,6 +91,13 @@ workspace.
   — every `app build` / `app launch` / `app test` / `run` of that workspace
   picks them up — or pass `--build-setting KEY=VALUE` per command. Don't run
   `xcodebuild` by hand to get around a missing setting.
+- **Building in Xcode**: `builder: xcode-mcp` in the config's `build:` block
+  (or `--builder xcode-mcp` on `run` / `app build` / `app launch`) builds in
+  Xcode over its MCP tools instead of xcodebuild — often much faster, since
+  Xcode keeps the workspace loaded. Xcode builds the scheme's Run configuration
+  with the project's own settings, so `derivedDataPath` / `settings` don't
+  apply. If it fails with "approve", Xcode is waiting for the user to approve
+  `simtool`: ask them to, then rerun — don't fall back to xcodebuild silently.
 - **Launch profiles**: name the argv recipes your tests and runs need in
   `profiles:` in `.simtool/config.yml`, and refer to them by name from a test's
   `launch.profile`. Values may interpolate `${VAR}` from the shell, so accounts
@@ -104,7 +111,7 @@ workspace.
       env: { SOME_FLAG: "1" }
   ```
 - **Lifecycle**: a launch is build (cached by source checksum → reuses the `.app`
-  when nothing changed, else `xcodebuild`) → install if needed → **cold** launch
+  when nothing changed, else `xcodebuild` or Xcode) → install if needed → **cold** launch
   (so launch args/env always take effect). Use the force-rebuild flag to bypass a
   valid cache. See `simtool app build --help` / `simtool app launch --help`.
 

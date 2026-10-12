@@ -257,6 +257,59 @@ final class ProjectConfigLoaderTests: XCTestCase {
         XCTAssertEqual(arguments[destination + 1], "platform=iOS Simulator,id=B00TED-UDID")
     }
 
+    func testXcodeBuilderLeavesTheXcodebuildOnlyKeysOut() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try writeConfig("""
+        simulator: booted
+        bundleId: com.example.MyApp
+        build:
+          workspace: App.xcworkspace
+          scheme: App
+          derivedDataPath: DerivedData
+          settings:
+            MACOSX_DEPLOYMENT_TARGET: 15.0
+          builder: xcode-mcp
+        """, in: root)
+        let config = try ProjectConfigLoader.load(startDirectory: root)
+        XCTAssertEqual(config.build.builder, .xcodeMCP)
+
+        // Xcode builds into its own DerivedData with the project's own
+        // settings, so neither reaches its build nor its cache entry.
+        let xcode = try config.buildSelection()
+        XCTAssertEqual(xcode.builder, .xcodeMCP)
+        XCTAssertEqual(xcode.identity.builder, .xcodeMCP)
+        XCTAssertNil(xcode.identity.derivedDataPath)
+        XCTAssertNil(xcode.identity.buildSettings)
+
+        // `--builder xcodebuild` builds the same config the way it always did.
+        let xcodebuild = try config.buildSelection(builder: .xcodebuild)
+        XCTAssertNil(xcodebuild.identity.builder)
+        XCTAssertEqual(xcodebuild.identity.derivedDataPath.map { URL(fileURLWithPath: $0).lastPathComponent }, "DerivedData")
+        XCTAssertEqual(xcodebuild.identity.buildSettings, ["MACOSX_DEPLOYMENT_TARGET=15.0"])
+
+        // Like `settings`, the builder applies to builds of the configured source only.
+        let sameWorkspace = try SimulatorAppBuildSelection.validated(
+            workspacePath: root.appendingPathComponent("App.xcworkspace").path, projectPath: nil, scheme: "OtherScheme"
+        )
+        let otherProject = try SimulatorAppBuildSelection.validated(
+            workspacePath: nil, projectPath: root.appendingPathComponent("App.xcodeproj").path, scheme: "App"
+        )
+        XCTAssertEqual(config.build.builder(for: sameWorkspace), .xcodeMCP)
+        XCTAssertNil(config.build.builder(for: otherProject))
+    }
+
+    func testUnknownBuilderThrows() throws {
+        try assertLoadThrows("""
+        simulator: booted
+        bundleId: com.example.MyApp
+        build:
+          workspace: App.xcworkspace
+          scheme: App
+          builder: xcode
+        """, contains: "Unknown `build.builder`")
+    }
+
     func testInvalidBuildSettingNameThrows() throws {
         try assertLoadThrows("""
         simulator: iPhone 16 Pro

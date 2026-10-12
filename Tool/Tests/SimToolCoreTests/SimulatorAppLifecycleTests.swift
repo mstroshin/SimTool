@@ -395,6 +395,60 @@ final class SimulatorAppLifecycleTests: XCTestCase {
         )
     }
 
+    func testXcodeBuildsKeepACacheEntryOfTheirOwn() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let project = root.appendingPathComponent("Example.xcodeproj", isDirectory: true)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        let cache = SimulatorAppBuildCache(
+            simtoolDirectory: root.appendingPathComponent(".simtool", isDirectory: true),
+            derivedDataRoot: root.appendingPathComponent("derived", isDirectory: true)
+        )
+
+        let xcodebuild = try SimulatorAppBuildSelection.validated(workspacePath: nil, projectPath: project.path, scheme: "Example")
+        let xcode = try SimulatorAppBuildSelection.validated(workspacePath: nil, projectPath: project.path, scheme: "Example", builder: .xcodeMCP)
+
+        // An xcodebuild identity encodes as it did before there was a second
+        // builder, so existing cache entries stay valid.
+        XCTAssertFalse(try JSON.string(xcodebuild.identity, pretty: false).contains("builder"))
+        XCTAssertEqual(
+            try SimulatorAppBuildSelection.validated(workspacePath: nil, projectPath: project.path, scheme: "Example", builder: .xcodebuild).identity,
+            xcodebuild.identity
+        )
+        XCTAssertEqual(xcodebuild.builder, .xcodebuild)
+        // Xcode's product comes from its own settings and DerivedData: never
+        // handed to an xcodebuild run, nor the other way round.
+        XCTAssertEqual(xcode.builder, .xcodeMCP)
+        XCTAssertNotEqual(try cache.identityKey(for: xcode.identity), try cache.identityKey(for: xcodebuild.identity))
+        // Building for one simulator still shares the entry, as with xcodebuild.
+        let device = SimulatorDevice(udid: "DEVICE", name: "iPhone", runtime: "iOS", state: "Booted", isAvailable: true)
+        XCTAssertEqual(xcode.targeting(device).identity, xcode.identity)
+
+        // What only xcodebuild can take is refused, not dropped in silence.
+        XCTAssertThrowsError(try SimulatorAppBuildSelection.validated(
+            workspacePath: nil, projectPath: project.path, scheme: "Example", derivedDataPath: root.path, builder: .xcodeMCP
+        )) { XCTAssertTrue("\($0)".contains("own DerivedData"), "\($0)") }
+        XCTAssertThrowsError(try SimulatorAppBuildSelection.validated(
+            workspacePath: nil, projectPath: project.path, scheme: "Example", buildSettings: ["ENABLE_PREVIEWS": "NO"], builder: .xcodeMCP
+        )) { XCTAssertTrue("\($0)".contains("own settings"), "\($0)") }
+    }
+
+    func testXcodeBuildingAnotherConfigurationFails() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let project = root.appendingPathComponent("Example.xcodeproj", isDirectory: true)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        let debug = try SimulatorAppBuildSelection.validated(workspacePath: nil, projectPath: project.path, scheme: "Example", builder: .xcodeMCP)
+
+        XCTAssertNoThrow(try SimulatorAppLifecycleClient.checkConfiguration("Debug", of: debug))
+        XCTAssertNoThrow(try SimulatorAppLifecycleClient.checkConfiguration(nil, of: debug))
+        // Xcode builds the scheme's Run configuration; caching a Release app
+        // as the Debug one would hand it to every later Debug run.
+        XCTAssertThrowsError(try SimulatorAppLifecycleClient.checkConfiguration("Release", of: debug)) { error in
+            XCTAssertTrue("\(error)".contains("Run configuration Release, not Debug"), "\(error)")
+        }
+    }
+
     func testPlanForceIgnoresValidCache() throws {
         let root = try makeTempDirectory()
         defer { try? FileManager.default.removeItem(at: root) }

@@ -962,7 +962,10 @@ struct AppBuildOptions: ParsableArguments {
     @Option(name: .customLong("build-setting"), help: buildSettingHelp)
     var buildSettings: [String] = []
 
-    @Flag(help: "Force a new xcodebuild run even when the checksum cache is valid.")
+    @Option(help: builderHelp)
+    var builder: SimulatorAppBuilder?
+
+    @Flag(help: "Force a new build even when the checksum cache is valid.")
     var force = false
 
     func selection() throws -> SimulatorAppBuildSelection {
@@ -972,7 +975,8 @@ struct AppBuildOptions: ParsableArguments {
             scheme: scheme,
             configuration: configuration,
             derivedDataPath: derivedDataPath,
-            buildSettings: buildSettings
+            buildSettings: buildSettings,
+            builder: builder
         )
     }
 }
@@ -997,32 +1001,44 @@ struct AppTestOptions: ParsableArguments {
     var buildSettings: [String] = []
 
     func selection() throws -> SimulatorAppBuildSelection {
+        // `xcodebuild test` runs the tests whatever `build.builder` says.
         try appBuildSelection(
             workspace: workspace,
             project: project,
             scheme: scheme,
             configuration: configuration,
             derivedDataPath: derivedDataPath,
-            buildSettings: buildSettings
+            buildSettings: buildSettings,
+            builder: .xcodebuild
         )
     }
 }
+
+extension SimulatorAppBuilder: ExpressibleByArgument {}
 
 private let buildSettingHelp = ArgumentHelp(
     "xcodebuild build setting, KEY=VALUE (e.g. MACOSX_DEPLOYMENT_TARGET=15.0). Repeatable.",
     discussion: "Adds to `build.settings` from .simtool/config.yml, which applies on its own whenever this builds the configured workspace or project; a flag wins over the config for the same key."
 )
 
+private let builderHelp = ArgumentHelp(
+    "What builds the app: xcodebuild, or xcode-mcp — Xcode itself, over its MCP tools (`xcrun mcpbridge`).",
+    discussion: "Defaults to `build.builder` from .simtool/config.yml, else xcodebuild. Xcode keeps the workspace loaded and builds into its own DerivedData, often much faster than a cold xcodebuild; it builds the scheme's Run configuration with the project's own settings, so --derived-data-path and --build-setting do not apply. Xcode asks to approve SimTool on first use."
+)
+
 /// The build selection a command line asks for, with the project config's
-/// `build.settings` when it describes the same workspace or project and the
-/// `--build-setting` flags on top.
+/// `build.settings` and `build.builder` when it describes the same workspace
+/// or project, and the flags on top. Xcode takes no build settings, so with
+/// `xcode-mcp` the configured ones stay out and a `--build-setting` is an
+/// error.
 private func appBuildSelection(
     workspace: String?,
     project: String?,
     scheme: String?,
     configuration: String?,
     derivedDataPath: String?,
-    buildSettings: [String]
+    buildSettings: [String],
+    builder: SimulatorAppBuilder?
 ) throws -> SimulatorAppBuildSelection {
     let explicit = try SimulatorAppBuildSelection.parseBuildSettings(buildSettings)
     let base = try SimulatorAppBuildSelection.validated(
@@ -1032,16 +1048,19 @@ private func appBuildSelection(
         configuration: configuration,
         derivedDataPath: derivedDataPath
     )
-    let configured = try ProjectConfigLoader.loadIfPresent()?.build.settings(for: base) ?? [:]
+    let configBuild = try ProjectConfigLoader.loadIfPresent()?.build
+    let builder = builder ?? configBuild?.builder(for: base) ?? .xcodebuild
+    let configured = builder == .xcodebuild ? configBuild?.settings(for: base) ?? [:] : [:]
     let settings = configured.merging(explicit) { _, flag in flag }
-    guard !settings.isEmpty else { return base }
+    guard !settings.isEmpty || builder != .xcodebuild else { return base }
     return try SimulatorAppBuildSelection.validated(
         workspacePath: workspace,
         projectPath: project,
         scheme: scheme,
         configuration: configuration,
         derivedDataPath: derivedDataPath,
-        buildSettings: settings
+        buildSettings: settings,
+        builder: builder
     )
 }
 
@@ -1107,6 +1126,7 @@ func buildAppWithProgress(
 ) async throws -> SimulatorAppBuildPayload {
     let scheme = selection.identity.scheme
     let configuration = selection.identity.configuration
+    let builtBy = selection.builder == .xcodeMCP ? " in Xcode" : ""
 
     // Checksum stage: fingerprint the sources and resolve the cache. Kept
     // separate from the build so a slow fingerprint on a large project reads as
@@ -1121,11 +1141,11 @@ func buildAppWithProgress(
         try SimulatorAppLifecycleClient.plan(selection: selection, force: force, cache: cache)
     }
 
-    let stage = "Building \(scheme) (\(configuration))"
+    let stage = "Building \(scheme) (\(configuration))\(builtBy)"
     let (noora, interactive) = interactiveProgressTerminal()
     return try await noora.progressStep(
         message: plan.isCacheHit ? "Reusing cached build" : stage,
-        successMessage: plan.isCacheHit ? "Reused cached build (checksum match)" : "Built \(scheme) (\(configuration))",
+        successMessage: plan.isCacheHit ? "Reused cached build (checksum match)" : "Built \(scheme) (\(configuration))\(builtBy)",
         errorMessage: "Build failed for \(scheme)",
         showSpinner: true
     ) { updateMessage in
@@ -1207,6 +1227,9 @@ extension AppCommand {
             ]
             if let settings = payload.identity.buildSettings, !settings.isEmpty {
                 takeaways.append("Build settings: \(settings.joined(separator: " "))")
+            }
+            if payload.identity.builder == .xcodeMCP {
+                takeaways.append("Built by: Xcode (MCP)")
             }
             return takeaways
         }
@@ -2354,8 +2377,11 @@ struct Run: AsyncParsableCommand {
     @Flag(name: .long, help: "Disable the SimTool state logger for the launched app (enabled by default).")
     var noState = false
 
-    @Flag(help: "Force a new xcodebuild run and reinstall even when the checksum cache is valid.")
+    @Flag(help: "Force a new build and reinstall even when the checksum cache is valid.")
     var force = false
+
+    @Option(help: builderHelp)
+    var builder: SimulatorAppBuilder?
 
     @Flag(name: .long, help: "Print verbose diagnostic output to stderr.")
     var verbose = false
@@ -2401,7 +2427,7 @@ struct Run: AsyncParsableCommand {
             let resolved = try await SimulatorDeviceClient.resolve(simulatorSelector)
             booted = try await SimulatorDeviceClient.ensureBooted(resolved)
             launch = try await SimulatorAppLifecycleClient.launch(
-                selection: try projectConfig.buildSelection(for: booted),
+                selection: try projectConfig.buildSelection(for: booted, builder: builder),
                 device: booted,
                 force: force,
                 cache: buildCache
@@ -2410,7 +2436,7 @@ struct Run: AsyncParsableCommand {
             let resolved = try await resolveSimulatorWithProgress(simulatorSelector)
             booted = try await bootSimulatorWithProgress(resolved)
             let buildPayload = try await buildAppWithProgress(
-                selection: try projectConfig.buildSelection(for: booted),
+                selection: try projectConfig.buildSelection(for: booted, builder: builder),
                 force: force,
                 cache: buildCache
             )

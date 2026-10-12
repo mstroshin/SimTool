@@ -1,6 +1,13 @@
 import CryptoKit
 import Foundation
 
+/// What builds the app: `xcodebuild` on the command line, or Xcode itself
+/// over its MCP tools (`xcrun mcpbridge`, see `XcodeMCPBuilder`).
+public enum SimulatorAppBuilder: String, Codable, CaseIterable, Sendable {
+    case xcodebuild
+    case xcodeMCP = "xcode-mcp"
+}
+
 public struct SimulatorAppBuildIdentity: Codable, Equatable, Sendable {
     public var workspacePath: String?
     public var projectPath: String?
@@ -13,6 +20,11 @@ public struct SimulatorAppBuildIdentity: Codable, Equatable, Sendable {
     /// never reuses this one's cache; nil (not empty) when there are none, so
     /// identities without settings keep the cache keys they always had.
     public var buildSettings: [String]?
+    /// `xcode-mcp` for a build Xcode makes; nil for xcodebuild, so its
+    /// identities keep the cache keys they always had. Part of the identity:
+    /// Xcode builds with its own settings into its own DerivedData, so the two
+    /// builders never hand each other a product.
+    public var builder: SimulatorAppBuilder?
 
     public init(
         workspacePath: String? = nil,
@@ -21,7 +33,8 @@ public struct SimulatorAppBuildIdentity: Codable, Equatable, Sendable {
         configuration: String = "Debug",
         sdk: String = "iphonesimulator",
         derivedDataPath: String? = nil,
-        buildSettings: [String]? = nil
+        buildSettings: [String]? = nil,
+        builder: SimulatorAppBuilder? = nil
     ) {
         self.workspacePath = workspacePath
         self.projectPath = projectPath
@@ -30,6 +43,7 @@ public struct SimulatorAppBuildIdentity: Codable, Equatable, Sendable {
         self.sdk = sdk
         self.derivedDataPath = derivedDataPath
         self.buildSettings = buildSettings
+        self.builder = builder == .xcodebuild ? nil : builder
     }
 }
 
@@ -56,18 +70,34 @@ public struct SimulatorAppBuildSelection: Codable, Equatable, Sendable {
         return targeted
     }
 
+    public var builder: SimulatorAppBuilder {
+        identity.builder ?? .xcodebuild
+    }
+
+    /// `xcode-mcp` takes no DerivedData path and no build settings: Xcode
+    /// builds the project as it stands, into its own DerivedData. Asking for
+    /// either is an error rather than a silent drop.
     public static func validated(
         workspacePath: String?,
         projectPath: String?,
         scheme: String?,
         configuration: String? = nil,
         derivedDataPath: String? = nil,
-        buildSettings: [String: String] = [:]
+        buildSettings: [String: String] = [:],
+        builder: SimulatorAppBuilder = .xcodebuild
     ) throws -> SimulatorAppBuildSelection {
         let trimmedScheme = scheme?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let trimmedConfiguration = configuration?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         for key in buildSettings.keys where !isBuildSettingName(key) {
             throw SimToolError("Invalid build setting name '\(key)': use letters, digits and underscores, as in MACOSX_DEPLOYMENT_TARGET.")
+        }
+        if builder == .xcodeMCP {
+            if canonicalPath(derivedDataPath) != nil {
+                throw SimToolError("With builder xcode-mcp, Xcode builds into its own DerivedData: a DerivedData path applies to xcodebuild builds only.")
+            }
+            if !buildSettings.isEmpty {
+                throw SimToolError("With builder xcode-mcp, Xcode builds the project with its own settings: build settings apply to xcodebuild builds only.")
+            }
         }
         let identity = SimulatorAppBuildIdentity(
             workspacePath: canonicalPath(workspacePath),
@@ -75,7 +105,8 @@ public struct SimulatorAppBuildSelection: Codable, Equatable, Sendable {
             scheme: trimmedScheme,
             configuration: trimmedConfiguration.isEmpty ? "Debug" : trimmedConfiguration,
             derivedDataPath: canonicalPath(derivedDataPath),
-            buildSettings: buildSettings.isEmpty ? nil : buildSettings.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }
+            buildSettings: buildSettings.isEmpty ? nil : buildSettings.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" },
+            builder: builder
         )
         return try SimulatorAppBuildSelection(identity: identity)
     }
@@ -239,9 +270,12 @@ public struct SimulatorAppBuildPayload: Codable, Equatable, Sendable {
     public var checksum: String
     public var inputFileCount: Int
     public var cacheHit: Bool
+    /// Whether a build ran — xcodebuild, or Xcode for `identity.builder`
+    /// `xcode-mcp`; the name predates the second builder.
     public var xcodebuildRan: Bool
     public var appBundlePath: String
     public var bundleIdentifier: String
+    /// The build step: xcodebuild's output, or Xcode's `BuildProject` result.
     public var xcodebuild: SimulatorAppProcessStepSummary
 
     public init(
@@ -643,28 +677,43 @@ public enum SimulatorAppLifecycleClient {
             )
         }
 
-        let derivedDataPath = plan.derivedDataPath
-        let buildArguments = xcodebuildArguments(selection: selection, derivedDataPath: derivedDataPath)
-        let onStdoutLine: (@Sendable (String) -> Void)? = progress.map { progress in
-            { @Sendable line in
-                if let status = XcodebuildProgress.status(forLine: line) {
-                    progress(status)
+        let product: XcodeBuildProduct
+        let buildStep: SimulatorAppProcessStepSummary
+        switch selection.builder {
+        case .xcodebuild:
+            let derivedDataPath = plan.derivedDataPath
+            let buildArguments = xcodebuildArguments(selection: selection, derivedDataPath: derivedDataPath)
+            let onStdoutLine: (@Sendable (String) -> Void)? = progress.map { progress in
+                { @Sendable line in
+                    if let status = XcodebuildProgress.status(forLine: line) {
+                        progress(status)
+                    }
                 }
             }
-        }
-        let buildOutput = try await ProcessRunner.run(
-            executable: URL(fileURLWithPath: "/usr/bin/xcrun"),
-            arguments: buildArguments,
-            timeoutSeconds: timeoutSeconds,
-            onStdoutLine: onStdoutLine
-        )
-        let buildStep = SimulatorAppProcessStepSummary(name: "xcodebuild", output: buildOutput)
-        guard buildOutput.status == 0 else {
-            let detail = XcodebuildFailure.detail(from: buildOutput)
-            throw SimToolError("xcodebuild failed for scheme \(selection.identity.scheme): \(detail)")
+            let buildOutput = try await ProcessRunner.run(
+                executable: URL(fileURLWithPath: "/usr/bin/xcrun"),
+                arguments: buildArguments,
+                timeoutSeconds: timeoutSeconds,
+                onStdoutLine: onStdoutLine
+            )
+            buildStep = SimulatorAppProcessStepSummary(name: "xcodebuild", output: buildOutput)
+            guard buildOutput.status == 0 else {
+                let detail = XcodebuildFailure.detail(from: buildOutput)
+                throw SimToolError("xcodebuild failed for scheme \(selection.identity.scheme): \(detail)")
+            }
+            product = try await builtProduct(selection: selection, derivedDataPath: derivedDataPath)
+        case .xcodeMCP:
+            let outcome = try await XcodeMCPBuilder.build(
+                selection: selection,
+                device: try await device(udid: selection.deviceUDID),
+                timeoutSeconds: timeoutSeconds,
+                progress: progress
+            )
+            try checkConfiguration(outcome.configuration, of: selection)
+            buildStep = outcome.stepSummary
+            product = XcodeBuildProduct(appBundleURL: outcome.appBundleURL)
         }
 
-        let product = try await builtProduct(selection: selection, derivedDataPath: derivedDataPath)
         let bundleIdentifier = try bundleIdentifier(appBundleURL: product.appBundleURL)
         var metadata = SimulatorAppBuildCacheMetadata(
             identity: selection.identity,
@@ -1043,6 +1092,21 @@ public enum SimulatorAppLifecycleClient {
             throw SimToolError("Unable to determine CFBundleIdentifier for app bundle: \(appBundleURL.path)")
         }
         return bundleIdentifier
+    }
+
+    /// The simulator a selection targets, for Xcode to match by name and OS
+    /// version among its run destinations.
+    private static func device(udid: String?) async throws -> SimulatorDevice? {
+        guard let udid else { return nil }
+        return try await SimulatorDeviceClient.listDevices().first { $0.udid == udid }
+    }
+
+    /// Xcode builds the scheme's Run configuration, whatever the selection
+    /// asks for; a mismatch would cache, say, a Release app as the Debug one.
+    static func checkConfiguration(_ built: String?, of selection: SimulatorAppBuildSelection) throws {
+        let expected = selection.identity.configuration
+        guard let built, !built.isEmpty, built != expected else { return }
+        throw SimToolError("Xcode built scheme \(selection.identity.scheme) in its Run configuration \(built), not \(expected). Set the scheme's Run configuration to \(expected) in Xcode, or ask for configuration \(built).")
     }
 
     private static func builtProduct(selection: SimulatorAppBuildSelection, derivedDataPath: String) async throws -> XcodeBuildProduct {
