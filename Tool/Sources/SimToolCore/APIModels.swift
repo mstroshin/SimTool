@@ -128,6 +128,14 @@ public struct ServerConfigPayload: Codable, Equatable, Sendable {
     /// are always on the same machine, so the path is the cheapest contract —
     /// no evidence upload endpoint, no absolute path baked into the artifact.
     public var testSessionsPath: String?
+    /// Changes every time a server starts. A client that polls by cursor (logs,
+    /// state) resets its cursors when it sees a new one: a restarted server
+    /// numbers its entries from zero again, and an old cursor would skip them.
+    public var instanceId: String?
+    /// The simulator runtime identifier, e.g. `com.apple.CoreSimulator.SimRuntime.iOS-26-4`.
+    public var runtime: String?
+    /// The serving simtool's version.
+    public var version: String?
 
     public init(
         device: String,
@@ -137,7 +145,10 @@ public struct ServerConfigPayload: Codable, Equatable, Sendable {
         stream: StreamPaths,
         metrics: StreamMetricsPayload,
         logApp: String? = nil,
-        testSessionsPath: String? = nil
+        testSessionsPath: String? = nil,
+        instanceId: String? = nil,
+        runtime: String? = nil,
+        version: String? = nil
     ) {
         self.device = device
         self.udid = udid
@@ -147,6 +158,9 @@ public struct ServerConfigPayload: Codable, Equatable, Sendable {
         self.metrics = metrics
         self.logApp = logApp
         self.testSessionsPath = testSessionsPath
+        self.instanceId = instanceId
+        self.runtime = runtime
+        self.version = version
     }
 }
 
