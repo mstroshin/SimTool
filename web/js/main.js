@@ -1,6 +1,8 @@
-// Start-up: read /config, start the screen, schedule the polls. A server that
-// restarts under the page is a new instance: its logs and state restart their
-// numbering, so the page resets its cursors instead of skipping new entries.
+// Start-up: read /config, start the screen, open the inspector's event stream
+// and schedule the polls that stand in for it. A server that restarts under the
+// page is a new instance: its logs and state restart their numbering, so the
+// page resets its cursors instead of skipping new entries — whichever of
+// /config and the stream's snapshot tells it first.
 
 let serverInstance = null;
 
@@ -27,25 +29,28 @@ function applyConfig(config) {
   $("sbVersion").textContent = config.version ? "simtool " + config.version : "";
 }
 
+// A new server: everything numbered by the old one is stale.
+function forgetServer() {
+  resetNetwork();
+  resetLogs();
+  resetState();
+  ax.tree = null;
+  networkLastPayload = "";
+  testsLastSessions = "";
+  testsLastDefinitions = "";
+  setMessage("The server restarted — lists were reloaded");
+}
+
 async function bootstrap() {
   const config = await apiJSON("/config");
   const instance = config.instanceId || null;
-  if (serverInstance && instance && instance !== serverInstance) {
-    // A new server: everything numbered by the old one is stale.
-    resetNetwork();
-    resetLogs();
-    resetState();
-    ax.tree = null;
-    networkLastPayload = "";
-    testsLastSessions = "";
-    testsLastDefinitions = "";
-    setMessage("The server restarted — lists were reloaded");
-  }
+  if (serverInstance && instance && instance !== serverInstance) forgetServer();
   serverInstance = instance;
   applyConfig(config);
   renderNetwork();
   renderLogs();
   renderState();
+  ensureLogsCapture().catch(() => renderLogs());
 }
 
 // The screen's size in points, for the pointer readout and the rulers; the
@@ -66,15 +71,20 @@ const ACTIVE_MS = 1500;
 const BACKGROUND_MS = 6000;
 const activeTab = (tab) => inspector.open && inspector.tab === tab;
 
-poller.add("network", () => (activeTab("network") ? ACTIVE_MS : BACKGROUND_MS), loadNetwork);
-poller.add("logs", () => (activeTab("logs") ? ACTIVE_MS : BACKGROUND_MS), pollLogs, () => !!inspector.attachedApp);
-poller.add("state", () => (activeTab("state") ? 1000 : BACKGROUND_MS), pollState);
-poller.add("ax", 2000, loadAx, () => activeTab("ax") && app.dataset.mode !== "replay");
-poller.add("tests", () => (activeTab("tests") ? ACTIVE_MS : BACKGROUND_MS), loadTests);
+// Polls stand in for the event stream only while it is down.
+const polling = () => inspectorEvents.polling;
+poller.add("network", () => (activeTab("network") ? ACTIVE_MS : BACKGROUND_MS), loadNetwork, polling);
+poller.add("logs", () => (activeTab("logs") ? ACTIVE_MS : BACKGROUND_MS), pollLogs, () => polling() && !!inspector.attachedApp);
+poller.add("state", () => (activeTab("state") ? 1000 : BACKGROUND_MS), pollState, polling);
+poller.add("tests", () => (activeTab("tests") ? ACTIVE_MS : BACKGROUND_MS), loadTests, polling);
+// The tree is not on the stream: it is read when the screen changed.
+poller.add("ax", AX_CHECK_MS, loadAx, () => activeTab("ax") && app.dataset.mode !== "replay" && axTreeStale());
 
 onReconnect(async () => {
   try { await bootstrap(); } catch (_) {}
-  for (const name of ["network", "logs", "state", "tests"]) poller.poke(name);
+  // A server that came back may be one that streams, where the last one did not.
+  startInspectorEvents();
+  for (const name of ["network", "logs", "state", "tests"]) refreshInspector(name);
 });
 
 onConnection((state) => {
@@ -86,5 +96,6 @@ onConnection((state) => {
 setInspectorOpen(inspector.open);
 setTab(inspector.tab);
 updateKeyboardIndicator();
+startInspectorEvents();
 runStream();
 bootstrap().catch((error) => setMessage("Could not read the server's configuration: " + error.message, "err")).then(loadScreenPoints);

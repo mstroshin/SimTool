@@ -83,6 +83,17 @@ final class WebViewerLogicTests: XCTestCase {
                        "mocks:\n  - method: \"*/List\"\n    body: {\"items\":[]}")
     }
 
+    // A call can arrive twice — pushed, then replayed after a reconnect — and
+    // its id says it is the same call.
+    func testPushedCallsReplaceTheirIdAndKeepOnlyTheNewest() throws {
+        let context = try makeContext()
+        context.evaluateScript("var held = [{ id: 'a', n: 1 }, { id: 'b', n: 1 }];")
+        XCTAssertEqual(value(context, "mergeNetworkEvents(held, [{ id: 'b', n: 2 }, { id: 'c', n: 1 }], 10).map(e => e.id + e.n).join()"), "a1,b2,c1")
+        XCTAssertEqual(value(context, "mergeNetworkEvents(held, [{ id: 'c' }, { id: 'd' }], 3).map(e => e.id).join()"), "b,c,d", "the oldest goes first")
+        XCTAssertEqual(value(context, "mergeNetworkEvents(held, undefined, 10).length"), "2")
+        XCTAssertEqual(value(context, "held.map(e => e.n).join()"), "1,1", "what the page held is not changed under it")
+    }
+
     // MARK: - Filters
 
     func testChipsExcludeFirstThenIncludeAnyThenTheLiveText() throws {
@@ -116,6 +127,15 @@ final class WebViewerLogicTests: XCTestCase {
         XCTAssertEqual(value(context, "isLogError({ level: 'Error', message: 'ok' })"), "true")
         XCTAssertEqual(value(context, "isLogError({ level: 'fault' })"), "true")
         XCTAssertEqual(value(context, "logLevel({})"), "Default", "a line without a level is Default")
+    }
+
+    func testALineAtOrBelowTheCursorIsNeverTakenAgain() throws {
+        let context = try makeContext()
+        context.evaluateScript("var lines = [{ sequence: 4 }, { sequence: 5 }, { sequence: 6 }];")
+        XCTAssertEqual(value(context, "linesAfter(lines, 5).map(l => l.sequence).join()"), "6")
+        XCTAssertEqual(value(context, "linesAfter(lines, null).length"), "3", "no cursor yet: every line")
+        XCTAssertEqual(value(context, "linesAfter(lines, 9).length"), "0")
+        XCTAssertEqual(value(context, "linesAfter(undefined, 1).length"), "0")
     }
 
     // MARK: - State
@@ -175,6 +195,18 @@ final class WebViewerLogicTests: XCTestCase {
     }
 
     // MARK: - Accessibility
+
+    // Measured on an iPhone 17 Pro: a still Settings screen sends 169–215-byte
+    // frames five times a second, the clock ticking over sends 612 bytes.
+    func testOnlyAFrameThatChangesThePictureCountsAsAChange() throws {
+        let context = try makeContext()
+        XCTAssertEqual(value(context, "frameChangesScreen('delta', 215, 169)"), "false", "the same picture again")
+        XCTAssertEqual(value(context, "frameChangesScreen('delta', 612, 169)"), "true", "the clock ticked over")
+        XCTAssertEqual(value(context, "frameChangesScreen('delta', 25519, 169)"), "true")
+        XCTAssertEqual(value(context, "frameChangesScreen('keyframe', 30000, 169)"), "true")
+        XCTAssertEqual(value(context, "frameChangesScreen('delta', 380, 120)"), "false", "never below 400 bytes")
+        XCTAssertEqual(value(context, "frameChangesScreen('delta', 5637, 5637)"), "false", "the first frame after a keyframe is its own measure")
+    }
 
     func testAStepNamesAnElementTheWayTheRunnerFindsIt() throws {
         let context = try makeContext()

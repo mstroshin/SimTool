@@ -239,7 +239,10 @@ function createFilter(tab, { placeholder, fields, onChange }) {
 
 let launchesById = {};
 async function loadLaunches() {
-  const payload = await apiJSON("/api/v1/launches");
+  applyLaunchesTopic(await apiJSON("/api/v1/launches"));
+}
+
+function applyLaunchesTopic(payload) {
   const map = {};
   for (const launch of payload.launches || []) map[launch.launchId] = launch;
   launchesById = map;

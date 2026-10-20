@@ -58,8 +58,11 @@ public final class StreamServer: @unchecked Sendable {
     public let config: StreamServerConfig
 
     private let server = HttpServer()
-    /// Identifies this run of the server to clients that poll by cursor.
-    private let instanceId = UUID().uuidString
+    /// Network, logs, state, tests and launches, pushed to viewers as they
+    /// change. Its instance id also tells clients that poll by cursor which run
+    /// of the server numbered what they hold.
+    private let inspectorEvents = InspectorEventHub()
+    private var testDefinitionsWatcher: TestDefinitionsWatcher?
     private let clientManager = ClientManager()
     private let frameCapture = FrameCapture()
     private let h264Encoder = H264Encoder(fps: 60)
@@ -123,6 +126,7 @@ public final class StreamServer: @unchecked Sendable {
         started = true
         installRoutes()
         wireEncoders()
+        wireInspectorEvents()
         try server.start(config.port, forceIPv4: true, priority: .userInteractive)
         if config.captureEnabled {
             try frameCapture.start(deviceUDID: config.device.udid, onFrame: frameHandler)
@@ -130,6 +134,9 @@ public final class StreamServer: @unchecked Sendable {
     }
 
     public func stop() {
+        inspectorEvents.closeAll()
+        testDefinitionsWatcher?.stop()
+        testDefinitionsWatcher = nil
         closeLiveInputs()
         shutdownTestSessions()
         stopLogCapture()
@@ -171,6 +178,10 @@ public final class StreamServer: @unchecked Sendable {
             do { return try self.jsonEncodedResponse(self.metricsPayload()) }
             catch { return self.errorResponse(error) }
         }
+
+        // The inspector's data as it changes: one Server-Sent Events stream per
+        // page. It sends no CORS header, so only the viewer's own origin reads it.
+        server.GET["/api/v1/events"] = { request in self.eventStreamResponse(request) }
 
         server.GET["/api/v1/devices"] = { _ in
             self.asyncJSONResponse {
@@ -270,7 +281,11 @@ public final class StreamServer: @unchecked Sendable {
         server.POST["/api/v1/mocks"] = { request in
             do {
                 let draft = try self.decodeJSON(MockRuleDraft.self, from: request)
-                return try self.jsonEncodedResponse(self.mockRules.add(draft))
+                return try self.jsonEncodedResponse(self.inspectorEvents.publish { changes in
+                    let created = self.mockRules.add(draft)
+                    changes.emit(.network, NetworkTopicPayload(mocks: self.mockRules.list(since: nil).rules))
+                    return created
+                })
             } catch {
                 return self.errorResponse(error, statusCode: 400, reason: "Bad Request")
             }
@@ -301,12 +316,20 @@ public final class StreamServer: @unchecked Sendable {
             guard let id = request.params[":id"], !id.isEmpty else {
                 return self.errorResponse(SimToolError("Missing mock id"), statusCode: 400, reason: "Bad Request")
             }
-            let removed = self.mockRules.remove(id: id)
+            let removed = self.inspectorEvents.publish { changes in
+                let removed = self.mockRules.remove(id: id)
+                if removed { changes.emit(.network, NetworkTopicPayload(mocks: self.mockRules.list(since: nil).rules)) }
+                return removed
+            }
             return self.jsonResponse(["ok": true, "removed": removed ? 1 : 0])
         }
 
         server.DELETE["/api/v1/mocks"] = { _ in
-            let removed = self.mockRules.clear()
+            let removed = self.inspectorEvents.publish { changes in
+                let removed = self.mockRules.clear()
+                if removed > 0 { changes.emit(.network, NetworkTopicPayload(mocks: [])) }
+                return removed
+            }
             return self.jsonResponse(["ok": true, "removed": removed])
         }
 
@@ -314,7 +337,11 @@ public final class StreamServer: @unchecked Sendable {
             guard let raw = request.params[":launchId"], let launchId = Int(raw) else {
                 return self.errorResponse(SimToolError("Missing launch id"), statusCode: 400, reason: "Bad Request")
             }
-            let removed = self.networkLoggerEvents.deleteEvents(launchId: launchId)
+            let removed = self.inspectorEvents.publish { changes in
+                let removed = self.networkLoggerEvents.deleteEvents(launchId: launchId)
+                changes.emit(.network, NetworkTopicPayload(removedLaunch: launchId))
+                return removed
+            }
             return self.jsonResponse(["ok": true, "removed": removed])
         }
 
@@ -322,7 +349,11 @@ public final class StreamServer: @unchecked Sendable {
             guard let raw = request.params[":launchId"], let launchId = Int(raw) else {
                 return self.errorResponse(SimToolError("Missing launch id"), statusCode: 400, reason: "Bad Request")
             }
-            let removed = self.logEntries.deleteEntries(launchId: launchId)
+            let removed = self.inspectorEvents.publish { changes in
+                let removed = self.logEntries.deleteEntries(launchId: launchId)
+                changes.emit(.logs, LogsTopicPayload(removedLaunch: launchId))
+                return removed
+            }
             return self.jsonResponse(["ok": true, "removed": removed])
         }
 
@@ -378,15 +409,19 @@ public final class StreamServer: @unchecked Sendable {
         server.POST["/api/v1/tests/start"] = { request in
             do {
                 let start = try self.decodeJSON(TestSessionStartRequest.self, from: request)
-                return try self.jsonEncodedResponse(self.testSessions.start(
-                    title: start.title,
-                    file: start.file,
-                    video: start.video ?? true,
-                    kind: start.kind,
-                    reference: start.reference,
-                    criteria: start.criteria ?? [],
-                    provenance: start.provenance
-                ))
+                return try self.jsonEncodedResponse(self.inspectorEvents.publish { changes in
+                    let session = try self.testSessions.start(
+                        title: start.title,
+                        file: start.file,
+                        video: start.video ?? true,
+                        kind: start.kind,
+                        reference: start.reference,
+                        criteria: start.criteria ?? [],
+                        provenance: start.provenance
+                    )
+                    changes.emit(.tests, TestsTopicPayload(session: session, run: self.testRunStatus()))
+                    return session
+                })
             } catch {
                 return self.testSessionErrorResponse(error)
             }
@@ -395,7 +430,11 @@ public final class StreamServer: @unchecked Sendable {
         server.POST["/api/v1/tests/entries"] = { request in
             do {
                 let entry = try self.decodeJSON(TestSessionEntryRequest.self, from: request)
-                return try self.jsonEncodedResponse(self.testSessions.append(entry))
+                return try self.jsonEncodedResponse(self.inspectorEvents.publish { changes in
+                    let session = try self.testSessions.append(entry)
+                    changes.emit(.tests, TestsTopicPayload(session: session))
+                    return session
+                })
             } catch {
                 return self.testSessionErrorResponse(error)
             }
@@ -413,6 +452,9 @@ public final class StreamServer: @unchecked Sendable {
                         evidence: stop.evidence
                     )
                 }
+                // Stopping awaits the recorder, so it cannot run under the hub's
+                // lock; nothing else changes a session once it is no longer active.
+                self.inspectorEvents.publish(.tests, TestsTopicPayload(session: session, run: self.testRunStatus()))
                 return try self.jsonEncodedResponse(session)
             } catch {
                 return self.testSessionErrorResponse(error)
@@ -437,7 +479,7 @@ public final class StreamServer: @unchecked Sendable {
 
         server.GET["/api/v1/tests/run"] = { _ in
             do {
-                return try self.jsonEncodedResponse(self.testRuns.status(activeSession: self.testSessions.activeSession))
+                return try self.jsonEncodedResponse(self.testRunStatus())
             } catch {
                 return self.errorResponse(error)
             }
@@ -455,6 +497,7 @@ public final class StreamServer: @unchecked Sendable {
                     video: body.video ?? true,
                     activeSession: self.testSessions.activeSession
                 )
+                self.publishTestRun()
                 return try self.jsonEncodedResponse(status)
             } catch {
                 return self.errorResponse(error, statusCode: 409, reason: "Conflict")
@@ -474,7 +517,10 @@ public final class StreamServer: @unchecked Sendable {
                 return self.errorResponse(SimToolError("Missing session id"), statusCode: 400, reason: "Bad Request")
             }
             do {
-                try self.testSessions.delete(id: id)
+                try self.inspectorEvents.publish { changes in
+                    try self.testSessions.delete(id: id)
+                    changes.emit(.tests, TestsTopicPayload(removedSession: id))
+                }
                 return self.jsonResponse(["ok": true])
             } catch {
                 return self.testSessionErrorResponse(error)
@@ -533,6 +579,80 @@ public final class StreamServer: @unchecked Sendable {
         }
     }
 
+    private func wireInspectorEvents() {
+        testRuns.onChange = { [weak self] in self?.publishTestRun() }
+        let watcher = TestDefinitionsWatcher(root: config.testsRoot) { [weak self] in self?.publishTestDefinitions() }
+        watcher.start()
+        testDefinitionsWatcher = watcher
+    }
+
+    /// `GET /api/v1/events`: the inspector topics as Server-Sent Events. The
+    /// stream opens with a snapshot or, reconnecting with `Last-Event-ID` (or
+    /// `?lastEventId=` from a page that had to open a new EventSource), with the
+    /// events it missed — and holds this connection's thread until the page goes.
+    private func eventStreamResponse(_ request: HttpRequest) -> HttpResponse {
+        // Swifter hands query values over still percent-encoded: `:` arrives as %3A.
+        let lastEventID = request.headers["last-event-id"] ?? request.queryValue("lastEventId")?.removingPercentEncoding
+        return .raw(200, "OK", [
+            "Content-Type": "text/event-stream; charset=utf-8",
+            "Cache-Control": "no-cache, no-store",
+        ]) { writer in
+            // Reconnect a second after a dropped stream or a restarted server.
+            guard (try? writer.write(Data("retry: 1000\n\n".utf8))) != nil else { return }
+            let subscription = self.inspectorEvents.subscribe(lastEventID: lastEventID) { self.inspectorSnapshot() }
+            defer { self.inspectorEvents.unsubscribe(subscription) }
+            // A comment when nothing changed for a while finds a page that is gone.
+            while let chunk = subscription.next(timeout: 15) {
+                guard (try? writer.write(chunk.isEmpty ? Data(": keep-alive\n\n".utf8) : chunk)) != nil else { return }
+            }
+        }
+    }
+
+    /// As many log lines as the viewer keeps.
+    private static let snapshotLogLimit = 3_000
+
+    /// Everything the inspector shows, each topic in the shape of its messages.
+    /// Runs under the hub's lock, so no change lands in it by halves.
+    private func inspectorSnapshot() -> InspectorSnapshotPayload {
+        let logs = logEntries.query(since: nil, limit: Self.snapshotLogLimit)
+        return InspectorSnapshotPayload(
+            instance: inspectorEvents.instanceId,
+            network: NetworkTopicPayload(
+                events: networkLoggerEvents.query(filter: NetworkLoggerEventFilter(limit: networkLoggerEvents.capacity)).events,
+                mocks: mockRules.list(since: nil).rules
+            ),
+            logs: LogsTopicPayload(entries: logs.entries, droppedCount: logs.droppedCount ?? 0),
+            state: StateTopicPayload(events: stateLoggerEvents.query(since: nil, limit: .max).events),
+            tests: TestsTopicPayload(sessions: testSessions.list().sessions, definitions: testRuns.list().tests, run: testRunStatus()),
+            launches: AppLaunchesPayload(launches: launches.snapshot())
+        )
+    }
+
+    /// Runs `body`, which may register a new app launch, and emits the launch
+    /// list first when it did — so a viewer knows the launch before its entries.
+    /// Called from inside `publish`.
+    private func trackingLaunches<T>(_ changes: inout InspectorEventHub.Changes, _ body: () -> T) -> T {
+        let before = launches.currentLaunchId()
+        let result = body()
+        if launches.currentLaunchId() != before {
+            changes.emit(.launches, AppLaunchesPayload(launches: launches.snapshot()))
+        }
+        return result
+    }
+
+    private func testRunStatus() -> TestRunStatusPayload {
+        testRuns.status(activeSession: testSessions.activeSession)
+    }
+
+    /// Read under the hub's lock, so the last status sent is the latest one.
+    private func publishTestRun() {
+        inspectorEvents.publish { $0.emit(.tests, TestsTopicPayload(run: testRunStatus())) }
+    }
+
+    private func publishTestDefinitions() {
+        inspectorEvents.publish { $0.emit(.tests, TestsTopicPayload(definitions: testRuns.list().tests)) }
+    }
+
     private func openLiveInputChannel(for session: WebSocketSession) {
         let udid = config.device.udid
         let directInput = directInput
@@ -587,7 +707,7 @@ public final class StreamServer: @unchecked Sendable {
             metrics: metricsPayload(),
             logApp: config.defaultLogApp,
             testSessionsPath: config.testSessionsRoot.path,
-            instanceId: instanceId,
+            instanceId: inspectorEvents.instanceId,
             runtime: config.device.runtime,
             version: SimToolVersion.current
         )
@@ -675,7 +795,12 @@ public final class StreamServer: @unchecked Sendable {
     private func handleNetworkLoggerIngestion(_ request: HttpRequest) -> HttpResponse {
         do {
             let batch = try decodeJSON(NetworkLoggerBatchPayload.self, from: request)
-            return try jsonEncodedResponse(networkLoggerEvents.ingest(taggedWithLaunch(batch)))
+            return try jsonEncodedResponse(inspectorEvents.publish { changes in
+                let events = trackingLaunches(&changes) { taggedWithLaunch(batch) }
+                let response = networkLoggerEvents.ingest(events)
+                if !events.isEmpty { changes.emit(.network, NetworkTopicPayload(events: events)) }
+                return response
+            })
         } catch {
             return errorResponse(error, statusCode: 400, reason: "Bad Request")
         }
@@ -698,7 +823,12 @@ public final class StreamServer: @unchecked Sendable {
     private func handleStateLoggerIngestion(_ request: HttpRequest) -> HttpResponse {
         do {
             let batch = try decodeJSON(StateLoggerBatchPayload.self, from: request)
-            return try jsonEncodedResponse(stateLoggerEvents.ingest(stateEventsTaggedWithLaunch(batch)))
+            return try jsonEncodedResponse(inspectorEvents.publish { changes in
+                let events = trackingLaunches(&changes) { stateEventsTaggedWithLaunch(batch) }
+                let recorded = stateLoggerEvents.record(events)
+                if !recorded.isEmpty { changes.emit(.state, StateTopicPayload(events: recorded)) }
+                return StateLoggerIngestionResponse(acceptedCount: recorded.count)
+            })
         } catch {
             return errorResponse(error, statusCode: 400, reason: "Bad Request")
         }
@@ -760,28 +890,32 @@ public final class StreamServer: @unchecked Sendable {
         logCapture?.stop()
         logCapture = nil
         logCaptureInfo = nil
-        logEntries.clear()
+        inspectorEvents.publish { changes in
+            logEntries.clear()
+            changes.emit(.logs, LogsTopicPayload(droppedCount: 0, cleared: true))
+        }
 
         let capture = SimulatorLogCapture(
             options: SimulatorLogCapture.Options(deviceUDID: device, app: app, captureStdout: captureStdout, bundleID: app)
         ) { [weak self] draft in
             guard let self else { return }
-            // OSLog lines carry a process id, so they drive launch detection; stdout/print has no
-            // per-line pid and adopts the current launch.
-            var launchId: Int?
-            if let pid = draft.pid {
-                launchId = self.launches.observe(pid: pid, app: app, timestamp: draft.timestamp)
-                // Crash summaries are logged by the launch that follows the crash but describe
-                // the previous one - file them under the launch that actually crashed.
-                if draft.category == Self.crashReportCategory,
-                   let current = launchId,
-                   let crashed = self.launches.launchId(preceding: current) {
-                    launchId = crashed
+            self.inspectorEvents.publish { changes in
+                // OSLog lines carry a process id, so they drive launch detection; stdout/print has no
+                // per-line pid and adopts the current launch.
+                let launchId: Int? = self.trackingLaunches(&changes) {
+                    guard let pid = draft.pid else { return self.launches.currentLaunchId() }
+                    let launchId = self.launches.observe(pid: pid, app: app, timestamp: draft.timestamp)
+                    // Crash summaries are logged by the launch that follows the crash but describe
+                    // the previous one - file them under the launch that actually crashed.
+                    if draft.category == Self.crashReportCategory,
+                       let crashed = self.launches.launchId(preceding: launchId) {
+                        return crashed
+                    }
+                    return launchId
                 }
-            } else {
-                launchId = self.launches.currentLaunchId()
+                let entry = self.logEntries.append(draft, launchId: launchId)
+                changes.emit(.logs, LogsTopicPayload(entries: [entry], droppedCount: self.logEntries.droppedCount()))
             }
-            self.logEntries.append(draft, launchId: launchId)
         }
         do {
             try capture.start()
@@ -842,9 +976,11 @@ public final class StreamServer: @unchecked Sendable {
     }
 
     private func logIdleSnapshot() -> (active: Bool, idle: TimeInterval) {
+        // A viewer on the event stream reads every line without polling for it.
+        let watched = inspectorEvents.subscriberCount > 0
         logLock.lock()
         defer { logLock.unlock() }
-        return (logCapture != nil, Date().timeIntervalSince(logLastPollAt))
+        return (logCapture != nil, watched ? 0 : Date().timeIntervalSince(logLastPollAt))
     }
 
     private func currentLogStatus() -> LogCaptureStatusPayload {

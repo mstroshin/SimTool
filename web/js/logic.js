@@ -232,6 +232,19 @@ function mockYaml(event) {
   return lines.join("\n");
 }
 
+// Calls pushed by the server joined to the ones held: a known id is replaced
+// where it stands, a new one goes last, and only the newest `max` are kept —
+// as many as the server keeps.
+function mergeNetworkEvents(held, incoming, max) {
+  const merged = held.slice();
+  const index = new Map(merged.map((event, position) => [event.id, position]));
+  for (const event of incoming || []) {
+    if (index.has(event.id)) merged[index.get(event.id)] = event;
+    else { index.set(event.id, merged.length); merged.push(event); }
+  }
+  return merged.length > max ? merged.slice(merged.length - max) : merged;
+}
+
 // ---- Filters: live text + include/exclude chips ----
 
 // "field:text" scopes a term to one field instead of the whole haystack.
@@ -309,6 +322,12 @@ function logFields(entry) {
 function logLine(entry) {
   const head = [formatClock(entry.timestamp, true), logLevel(entry), entry.subsystem].filter(Boolean).join(" ");
   return head + ": " + (entry.message || "");
+}
+
+// The lines after the cursor: a line the page already has is never added twice,
+// whichever way — stream, replay or poll — it arrives again.
+function linesAfter(entries, cursor) {
+  return cursor == null ? (entries || []).slice() : (entries || []).filter((entry) => entry.sequence > cursor);
 }
 
 // ---- State ----
@@ -434,6 +453,15 @@ function lastRunByFile(sessions) {
 }
 
 // ---- Accessibility ----
+
+// Whether a frame of the stream shows the screen changing. A still screen keeps
+// sending small frames — the same picture encoded again, about 200 bytes on a
+// phone — so the smallest frame seen is the measure of nothing happening, and a
+// change costs several times that: a clock tick 600 bytes, a push tens of KB.
+function frameChangesScreen(type, bytes, stillBytes) {
+  if (type === "keyframe") return true;
+  return bytes > Math.max(400, stillBytes * 2.5);
+}
 
 function axHasFrame(node) {
   const frame = node.frame;

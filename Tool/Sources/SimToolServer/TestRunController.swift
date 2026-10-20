@@ -26,6 +26,9 @@ final class TestRunController: @unchecked Sendable {
     private let lock = NSLock()
     private var run: ActiveRun?
     private var task: Task<Void, Never>?
+    /// Told after the run's progress or outcome changed, so the server can push
+    /// the new status instead of waiting to be asked. Set before the first run.
+    var onChange: (@Sendable () -> Void)?
 
     init(
         testsRoot: URL,
@@ -168,6 +171,7 @@ final class TestRunController: @unchecked Sendable {
 
     @discardableResult
     private func update<T>(_ mutate: (inout ActiveRun) -> T) -> T {
+        defer { onChange?() }
         lock.lock()
         defer { lock.unlock() }
         var current = run ?? ActiveRun(

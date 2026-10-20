@@ -25,19 +25,42 @@ final class WebViewerPageTests: XCTestCase {
         XCTAssertTrue(page.contains(#"screenState.connection !== "live""#), "touches wait for a live screen")
     }
 
-    // A restarted server numbers log and state entries from zero again.
+    // A restarted server numbers log and state entries from zero again: whichever
+    // of /config and the event stream's snapshot names the new instance first
+    // resets the cursors.
     func testANewServerInstanceResetsTheCursors() throws {
+        let forget = try XCTUnwrap(page.range(of: "function forgetServer()"))
+        let reset = page[forget.upperBound...].prefix(300)
+        XCTAssertTrue(reset.contains("resetLogs();"))
+        XCTAssertTrue(reset.contains("resetState();"))
         let bootstrap = try XCTUnwrap(page.range(of: "async function bootstrap()"))
-        let body = page[bootstrap.upperBound...].prefix(700)
-        XCTAssertTrue(body.contains("config.instanceId"))
-        XCTAssertTrue(body.contains("resetLogs();"))
-        XCTAssertTrue(body.contains("resetState();"))
+        XCTAssertTrue(page[bootstrap.upperBound...].prefix(300).contains("instance !== serverInstance) forgetServer();"))
+        let snapshot = try XCTUnwrap(page.range(of: "function applySnapshot(snapshot)"))
+        XCTAssertTrue(page[snapshot.upperBound...].prefix(300).contains("snapshot.instance !== serverInstance) forgetServer();"))
+    }
+
+    // One stream per page brings what the tabs used to poll; the polls only
+    // stand in while it is down, so an idle page asks for nothing.
+    func testInspectorDataIsPushedAndPollingIsTheFallback() throws {
+        XCTAssertTrue(page.contains(#"new EventSource("/api/v1/events" + resume)"#))
+        XCTAssertEqual(page.components(separatedBy: "new EventSource(").count - 1, 1, "one stream per page, not per tab")
+        for topic in ["snapshot", "network", "logs", "state", "tests", "launches"] {
+            XCTAssertTrue(page.contains(#"on("\#(topic)""#), "missing topic \(topic)")
+        }
+        for task in ["network", "logs", "state", "tests"] {
+            let add = try XCTUnwrap(page.range(of: #"poller.add("\#(task)""#), "missing poll \(task)")
+            let line = page[add.lowerBound...].prefix { $0 != "\n" }
+            XCTAssertTrue(line.contains("polling"), "\(task) polls only while the stream is down")
+        }
+        let ax = try XCTUnwrap(page.range(of: #"poller.add("ax""#))
+        XCTAssertTrue(page[ax.lowerBound...].prefix { $0 != "\n" }.contains("axTreeStale()"), "the tree is read when the screen changed")
     }
 
     func testThePageTalksToTheServersRoutes() {
         for route in ["/api/v1/input/stream", "/api/v1/input", "/api/v1/screenshot", "/api/v1/photos", "/api/v1/input/paste-image",
                       "/api/v1/network/events", "/api/v1/mocks", "/api/v1/launches", "/api/v1/logs/capture", "/api/v1/state/events",
-                      "/api/v1/ax/tree?raw=1", "/api/v1/tests/definitions", "/api/v1/tests/run", "/api/v1/tests/run/stop", "/config"] {
+                      "/api/v1/ax/tree?raw=1", "/api/v1/tests/definitions", "/api/v1/tests/run", "/api/v1/tests/run/stop", "/config",
+                      "/api/v1/events"] {
             XCTAssertTrue(page.contains(route), "missing \(route)")
         }
         for action in [#"action: "button", name: "home""#, #"action: "shake""#, #"action: "terminate""#, #"action: "launch""#,

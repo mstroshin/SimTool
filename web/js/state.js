@@ -139,12 +139,15 @@ stateModels.addEventListener("keydown", (event) => {
   if (again) again.focus();
 });
 
-async function pollState() {
-  const since = stateView.cursor == null ? "" : "&since=" + stateView.cursor;
-  const payload = await apiJSON("/api/v1/state/events?limit=500" + since);
-  if (payload.nextCursor != null) stateView.cursor = payload.nextCursor;
-  if (!payload.events || !payload.events.length) return;
-  for (const event of payload.events) {
+// ---- Snapshots pushed, or polled while the stream is down ----
+
+// Takes the events after the cursor; true when there was one.
+function takeStateEvents(events) {
+  let taken = false;
+  for (const event of events || []) {
+    if (stateView.cursor != null && event.cursor != null && event.cursor <= stateView.cursor) continue;
+    if (event.cursor != null) stateView.cursor = event.cursor;
+    taken = true;
     const previous = stateView.latest[event.modelId];
     const diffs = diffStateValues(previous ? previous.snapshot : undefined, event.snapshot, "", []);
     if (previous || event.deallocated) {
@@ -156,15 +159,32 @@ async function pollState() {
     // greyed-out model still shows what it looked like.
     stateView.latest[event.modelId] = event.deallocated && previous ? { ...event, snapshot: previous.snapshot } : event;
   }
-  renderState();
+  return taken;
 }
 
-tabHandlers.state = { show() { renderState(); poller.poke("state"); } };
+function applyStateTopic(payload, reset) {
+  if (reset) forgetStateEvents();
+  if (takeStateEvents(payload.events) || reset) renderSoon(renderState);
+}
 
-function resetState() {
+async function pollState() {
+  const since = stateView.cursor == null ? "" : "&since=" + stateView.cursor;
+  const payload = await apiJSON("/api/v1/state/events?limit=500" + since);
+  const taken = takeStateEvents(payload.events);
+  if (payload.nextCursor != null) stateView.cursor = Math.max(stateView.cursor ?? -1, payload.nextCursor);
+  if (taken) renderState();
+}
+
+tabHandlers.state = { show() { renderState(); refreshInspector("state"); } };
+
+function forgetStateEvents() {
   stateView.cursor = null;
   stateView.latest = {};
   stateView.changes = [];
   stateView.lastChange = {};
+}
+
+function resetState() {
+  forgetStateEvents();
   renderState();
 }

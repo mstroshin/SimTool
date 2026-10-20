@@ -315,7 +315,7 @@ async function runTest(file) {
     exitReplay();
     toast("Running “" + (test.name || file) + "”" + (tests.recordVideo ? " — recording" : ""), { icon: "play" });
     renderTests();
-    poller.poke("tests");
+    refreshInspector("tests");
   } catch (error) {
     fail("Could not start the test", error);
   }
@@ -447,14 +447,28 @@ let testsLastSessions = "";
 let testsLastDefinitions = "";
 async function loadTests() {
   const [sessions, definitions, run] = await Promise.all([apiJSON("/api/v1/tests"), apiJSON("/api/v1/tests/definitions"), apiJSON("/api/v1/tests/run")]);
-  const sessionsKey = JSON.stringify(sessions.sessions || []);
-  const definitionsKey = JSON.stringify([definitions.tests || [], run]);
+  applyTests(sessions.sessions || [], definitions.tests || [], run);
+}
+
+// On the stream a message carries what changed — a session, a deleted one, the
+// run, the test files — and a snapshot carries all of it.
+function applyTestsTopic(payload, reset) {
+  let sessions = reset ? payload.sessions || [] : tests.sessions;
+  if (payload.session) sessions = [payload.session].concat(sessions.filter((session) => session.id !== payload.session.id));
+  if (payload.removedSession) sessions = sessions.filter((session) => session.id !== payload.removedSession);
+  applyTests(sessions, payload.definitions || tests.definitions, payload.run || tests.run || {});
+}
+
+function applyTests(sessionList, definitionList, run) {
+  const sorted = sessionList.slice().sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt));
+  const sessionsKey = JSON.stringify(sorted);
+  const definitionsKey = JSON.stringify([definitionList, run]);
   if (sessionsKey === testsLastSessions && definitionsKey === testsLastDefinitions) return;
   const previous = tests.sessions;
   testsLastSessions = sessionsKey;
   testsLastDefinitions = definitionsKey;
-  tests.sessions = (sessions.sessions || []).slice().sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt));
-  tests.definitions = definitions.tests || [];
+  tests.sessions = sorted;
+  tests.definitions = definitionList;
   const previousRun = tests.run;
   tests.run = run;
   // Follow a run that starts anywhere — here or from a terminal: select its test
@@ -478,4 +492,4 @@ async function loadTests() {
   renderTests();
 }
 
-tabHandlers.tests = { show() { renderTests(); poller.poke("tests"); } };
+tabHandlers.tests = { show() { renderTests(); refreshInspector("tests"); } };
