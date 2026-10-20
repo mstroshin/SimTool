@@ -57,7 +57,8 @@ public struct StreamServerConfig: Sendable {
 public final class StreamServer: @unchecked Sendable {
     public let config: StreamServerConfig
 
-    private let server = HttpServer()
+    /// Every route answers through `SameOriginPolicy`.
+    private let server: HttpServer
     /// Identifies this run of the server to clients that poll by cursor.
     private let instanceId = UUID().uuidString
     private let clientManager = ClientManager()
@@ -104,6 +105,7 @@ public final class StreamServer: @unchecked Sendable {
 
     public init(config: StreamServerConfig) {
         self.config = config
+        self.server = SameOriginHttpServer(policy: SameOriginPolicy(serverHost: config.host))
         self.testSessions = TestSessionController(
             store: TestSessionStore(root: config.testSessionsRoot),
             device: config.device,
@@ -156,11 +158,6 @@ public final class StreamServer: @unchecked Sendable {
     }
 
     private func installRoutes() {
-        server.middleware.append { request in
-            guard request.method == "OPTIONS" else { return nil }
-            return self.emptyResponse(statusCode: 204, reason: "No Content")
-        }
-
         server["/"] = { _ in
             .ok(.html(WebViewer.html()))
         }
@@ -535,7 +532,6 @@ public final class StreamServer: @unchecked Sendable {
                 "Content-Type": "application/octet-stream",
                 "Cache-Control": "no-cache, no-store",
                 "Connection": "keep-alive",
-                "Access-Control-Allow-Origin": "*",
             ]) { writer in
                 let semaphore = DispatchSemaphore(value: 0)
                 client.setWriter { data in
@@ -1174,9 +1170,6 @@ public final class StreamServer: @unchecked Sendable {
             "Content-Type": "video/mp4",
             "Accept-Ranges": "bytes",
             "Cache-Control": "no-cache, no-store",
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "Content-Type",
-            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
         ]
         switch HTTPRange.parse(header: rangeHeader, fileSize: size) {
         case .unsatisfiable:
@@ -1226,22 +1219,10 @@ public final class StreamServer: @unchecked Sendable {
         return .raw(statusCode, reason, [
             "Content-Type": contentType,
             "Cache-Control": "no-cache, no-store",
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "Content-Type",
-            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
             "Content-Length": "\(data.count)",
         ]) { writer in
             try? writer.write(data)
         }
-    }
-
-    private func emptyResponse(statusCode: Int, reason: String) -> HttpResponse {
-        .raw(statusCode, reason, [
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "Content-Type",
-            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-            "Content-Length": "0",
-        ], nil)
     }
 }
 

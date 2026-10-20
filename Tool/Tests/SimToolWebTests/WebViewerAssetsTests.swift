@@ -57,6 +57,20 @@ final class WebViewerAssetsTests: XCTestCase {
         }
     }
 
+    // The server's CSP allows the page its own files and nothing else: code
+    // made from strings, workers and outside stylesheets would fail in the
+    // browser while every test here passes.
+    func testTheViewerNeedsNothingItsContentSecurityPolicyForbids() throws {
+        let script = try NSRegularExpression(pattern: #"\beval\s*\(|new\s+Function\s*\(|set(?:Timeout|Interval)\s*\(\s*["'`]|new\s+(?:Shared)?Worker\s*\(|importScripts\s*\("#)
+        let style = try NSRegularExpression(pattern: #"@import|url\(\s*["']?(?:https?:)?//"#, options: .caseInsensitive)
+        for (path, contents) in WebViewerAssets.files {
+            let pattern = path.hasSuffix(".css") ? style : script
+            let matches = pattern.matches(in: contents, range: NSRange(contents.startIndex..., in: contents))
+                .map { String(contents[Range($0.range, in: contents)!]) }
+            XCTAssertEqual(matches, [], "web/\(path)")
+        }
+    }
+
     func testTheServerServesStylesAndScriptsButNotTheTemplate() throws {
         XCTAssertEqual(WebViewer.servedAsset("viewer.css")?.contentType, "text/css; charset=utf-8")
         XCTAssertEqual(WebViewer.servedAsset("js/main.js")?.contentType, "text/javascript; charset=utf-8")

@@ -735,6 +735,17 @@ GET /api/v1/mocks/ack
 GET /api/v1/screenshot?maxDim=800
 ```
 
+The API answers the viewer's own page and clients that are not browsers — the
+CLI, `curl`, the app-side loggers posting from the simulator. A page on any
+other origin is refused with 403 on every route: it reads no answer (there are
+no CORS headers), cannot tap, mock or delete through a plain form-style POST,
+cannot open the input socket, and cannot frame the viewer — a link elsewhere
+opens it in a tab, nothing more. A `Host` other than an IP address, localhost
+or `server.host` is refused too, so a DNS-rebinding page whose name resolves to
+127.0.0.1 is not this server either. The viewer runs under a Content Security
+Policy that allows only its own files from `/assets/`; nothing under `web/` may
+be inline script or `<style>`.
+
 `mocks/ack` reports the server's mock-rule generation and the newest one an app
 has confirmed applying (learned from its poll). A run that declares `mocks:`
 waits for the two to meet before its first step — otherwise the app can still be
