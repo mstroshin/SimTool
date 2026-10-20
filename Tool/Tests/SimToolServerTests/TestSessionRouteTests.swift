@@ -210,6 +210,40 @@ final class TestSessionRouteTests: XCTestCase {
         XCTAssertEqual(unknown, 404)
     }
 
+    // A reviewer reads a run's own network, logs and state after the server
+    // that recorded them is gone — and only the files the run listed.
+    func testEvidenceFilesTheSessionListsAreServed() async throws {
+        let store = TestSessionStore(root: root)
+        let session = TestSession(
+            id: "2026-06-12-1600-evidence",
+            title: "Seeded with evidence",
+            deviceUdid: "TEST-UDID",
+            deviceName: "iPhone",
+            startedAt: Date(timeIntervalSinceNow: -120),
+            endedAt: Date(timeIntervalSinceNow: -60),
+            status: .passed,
+            evidence: ["logs.jsonl"]
+        )
+        try store.write(session)
+        try Data(#"{"sequence":1,"message":"hello"}"#.utf8).write(to: store.directory(for: session.id).appendingPathComponent("logs.jsonl"))
+        try Data("not listed".utf8).write(to: store.directory(for: session.id).appendingPathComponent("notes.txt"))
+
+        let (server, baseURL) = try startServer()
+        defer { server.stop() }
+
+        let (data, response) = try await URLSession.shared.data(from: baseURL.appendingPathComponent("api/v1/tests/\(session.id)/evidence/logs.jsonl"))
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        XCTAssertEqual((response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Type"), "application/x-ndjson")
+        XCTAssertEqual(String(decoding: data, as: UTF8.self), #"{"sequence":1,"message":"hello"}"#)
+
+        let unlisted = try await statusCode(for: baseURL.appendingPathComponent("api/v1/tests/\(session.id)/evidence/notes.txt"))
+        XCTAssertEqual(unlisted, 404, "a file the run did not list is not evidence")
+        let escaping = try await statusCode(for: URL(string: baseURL.absoluteString + "/api/v1/tests/\(session.id)/evidence/..%2Fsession.json")!)
+        XCTAssertEqual(escaping, 404)
+        let unknown = try await statusCode(for: baseURL.appendingPathComponent("api/v1/tests/nope/evidence/logs.jsonl"))
+        XCTAssertEqual(unknown, 404)
+    }
+
     // MARK: - Helpers
 
     private func startServer() throws -> (StreamServer, URL) {

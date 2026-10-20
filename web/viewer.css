@@ -316,6 +316,7 @@ code { font: var(--fs-11)/1.4 var(--font-mono); }
 .guide b { color: var(--ink2); font-weight: 500; }
 .guide .live { color: var(--ok); }
 .guide .stale { color: var(--warn); }
+.guide .rec { color: var(--course); }
 .guide button { border: 0; background: none; padding: 0; color: var(--accent); cursor: pointer; font: inherit; }
 
 /* Lists: keyed rows, roving focus. */
@@ -538,6 +539,22 @@ mark { border-radius: 2px; background: var(--mark-bg); color: inherit; }
 .evidence { margin: 0; padding: 0; list-style: none; }
 .evidence li { display: flex; align-items: center; gap: 4px; min-height: 26px; }
 .evidence .mono { min-width: 0; overflow-wrap: anywhere; color: var(--ink2); }
+
+/* Session review: Network, Logs and State cut to the step under the playhead. */
+.review-bar {
+  display: flex; align-items: center; gap: var(--sp-2); min-width: 0; height: 34px; padding: 0 var(--sp-2) 0 var(--sp-3); flex: none;
+  border-bottom: 1px solid var(--line-thin); background: var(--course-bg); color: var(--ink2); white-space: nowrap;
+}
+.review-bar > span:first-child { display: inline-flex; color: var(--course); }
+.rb-text { display: flex; align-items: baseline; gap: var(--sp-2); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.rb-text b { color: var(--ink1); font-weight: 600; }
+.rb-text .mono { font-size: var(--fs-11); color: var(--ink2); }
+.rb-source { overflow: hidden; text-overflow: ellipsis; color: var(--ink3); font-size: var(--fs-11); }
+@container insp (max-width: 640px) { .rb-source { display: none; } }
+.step-ev { display: flex; flex-wrap: wrap; gap: 2px var(--sp-2); margin: -2px 0 4px 72px; }
+.ev-link { padding: 0; border: 0; background: none; color: var(--course); font: var(--fs-11)/1.6 var(--font-ui); cursor: pointer; }
+.ev-link:hover { text-decoration: underline; }
+.ev-link:disabled { color: var(--ink3); cursor: default; text-decoration: none; }
 
 /* Activity */
 .act-grid { grid-template-columns: 86px 54px minmax(140px, 1fr) 84px; }

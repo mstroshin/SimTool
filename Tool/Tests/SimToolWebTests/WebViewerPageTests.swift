@@ -68,6 +68,18 @@ final class WebViewerPageTests: XCTestCase {
         XCTAssertTrue(page[guardBody.upperBound...].prefix(900).contains("confirmDestructive("), "asking is a confirmation, not a toast")
     }
 
+    // A recording under review cuts Network, Logs and State to the step the
+    // playhead is in, from the run's own evidence, and each step opens what it caused.
+    func testReviewingARunFollowsThePlayheadIntoTheLists() throws {
+        XCTAssertTrue(page.contains(#"api("/api/v1/tests/" + encodeURIComponent(session.id) + "/evidence/""#), "the run's own evidence files")
+        let transport = try XCTUnwrap(page.range(of: "if (current !== replayCurrentIndex) {"))
+        XCTAssertTrue(page[transport.upperBound...].prefix(200).contains("refreshReview();"), "the window follows the playhead")
+        XCTAssertTrue(page.contains("return reviewActive() ? reviewRows(\"network\", network.events)"), "Network reads the reviewed run")
+        XCTAssertTrue(page.contains("return reviewActive() ? reviewRows(\"logs\", logs.entries)"), "Logs reads the reviewed run")
+        XCTAssertTrue(page.contains("return reviewStateView(stateView);"), "State reads the reviewed run")
+        XCTAssertTrue(page.contains(#"data-act="step-evidence""#), "a step opens what it caused")
+    }
+
     // The toolbar is drawn with the page's own icons, never emoji, which every
     // system renders differently and screen readers read out as pictures.
     func testTheChromeHasNoEmoji() throws {

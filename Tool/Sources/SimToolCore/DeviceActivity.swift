@@ -107,8 +107,8 @@ public struct DeviceActivity: Codable, Equatable, Sendable, Identifiable {
         kind = try container.decode(String.self, forKey: .kind)
         title = try container.decode(String.self, forKey: .title)
         detail = try container.decodeIfPresent(String.self, forKey: .detail)
-        at = try Self.instant(container.decode(String.self, forKey: .at), key: .at, in: container)
-        endedAt = try container.decodeIfPresent(String.self, forKey: .endedAt).map { try Self.instant($0, key: .endedAt, in: container) }
+        at = try PreciseTime.date(container.decode(String.self, forKey: .at), key: .at, in: container)
+        endedAt = try container.decodeIfPresent(String.self, forKey: .endedAt).map { try PreciseTime.date($0, key: .endedAt, in: container) }
         status = try container.decode(DeviceActivityStatus.self, forKey: .status)
         error = try container.decodeIfPresent(String.self, forKey: .error)
         gesture = try container.decodeIfPresent(DeviceActivityGesture.self, forKey: .gesture)
@@ -123,26 +123,11 @@ public struct DeviceActivity: Codable, Equatable, Sendable, Identifiable {
         try container.encode(kind, forKey: .kind)
         try container.encode(title, forKey: .title)
         try container.encodeIfPresent(detail, forKey: .detail)
-        try container.encode(Self.preciseFormatter.string(from: at), forKey: .at)
-        try container.encodeIfPresent(endedAt.map { Self.preciseFormatter.string(from: $0) }, forKey: .endedAt)
+        try container.encode(PreciseTime.string(at), forKey: .at)
+        try container.encodeIfPresent(endedAt.map(PreciseTime.string), forKey: .endedAt)
         try container.encode(status, forKey: .status)
         try container.encodeIfPresent(error, forKey: .error)
         try container.encodeIfPresent(gesture, forKey: .gesture)
-    }
-
-    private static let preciseFormatter: ISO8601DateFormatter = {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter
-    }()
-
-    private static let wholeSecondFormatter = ISO8601DateFormatter()
-
-    private static func instant(_ text: String, key: CodingKeys, in container: KeyedDecodingContainer<CodingKeys>) throws -> Date {
-        guard let date = preciseFormatter.date(from: text) ?? wholeSecondFormatter.date(from: text) else {
-            throw DecodingError.dataCorruptedError(forKey: key, in: container, debugDescription: "Not an ISO 8601 time: \(text)")
-        }
-        return date
     }
 }
 

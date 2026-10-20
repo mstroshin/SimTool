@@ -221,7 +221,16 @@ live progress and each test's last outcome in words (*Bug reproduced*,
 *Confirmed*, …), and keeps the recorded runs under **History**. A finished run's
 recording plays in the screen's place — Replay is a mode of the whole viewer,
 so the inspector stays usable — with each step marked on its scrubber, and
-clicking a step seeks the video to that moment.
+clicking a step seeks the video to that moment. While it plays, **Network**,
+**Logs** and **State** show that run — its own `network.jsonl`, `logs.jsonl`
+and `state.jsonl`, so a run reads the same long after its server is gone — cut
+to the step under the playhead: from the moment the step began acting to the
+moment the next one did, so a tap's window holds the requests and lines it
+caused while the next step waited for them; State shows the models as they
+stood at the end of that window and what changed inside it. A bar over each
+list names the step and its span and switches to the whole run. In the
+timeline every step says what it caused — *1 request · 277 log lines · 1 state
+update* — and each count opens that list, held at that step.
 
 ```bash
 swift run simtool test run .simtool/tests/my-test.yml
@@ -748,8 +757,13 @@ GET /api/v1/mocks
 GET /api/v1/mocks/ack
 GET /api/v1/activity?since=<revision>&limit=200
 POST /api/v1/activity
+GET /api/v1/tests/<session-id>/evidence/<file>
 GET /api/v1/screenshot?maxDim=800
 ```
+
+`tests/<session-id>/evidence/<file>` serves a recorded run's evidence — only
+the files its session lists (`network.jsonl`, `logs.jsonl`, `state.jsonl`,
+failure screenshots…). Step times in a session carry milliseconds.
 
 `activity` is what was done to the device and by whom — `agent` (the CLI, the
 HTTP API), `test` (a YAML run) or `viewer` (a person at a SimTool page): every

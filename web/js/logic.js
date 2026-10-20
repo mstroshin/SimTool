@@ -567,3 +567,76 @@ function activityCommand(entry) {
     default: return "";
   }
 }
+
+// ---- Session review: the part of a run one step covers ----
+
+// Milliseconds since the epoch from the times evidence carries: epoch seconds
+// (state), ISO 8601 (network, steps) and OSLog's "2026-10-20 18:40:11.226211-0300"
+// (logs), which not every browser parses. NaN when unreadable.
+function parseInstant(value) {
+  if (typeof value === "number") return value * 1000;
+  if (value == null || value === "") return NaN;
+  const text = String(value);
+  const oslog = /^(\d{4}-\d\d-\d\d)[ T](\d\d:\d\d:\d\d)(?:\.(\d+))?([+-]\d\d):?(\d\d)$/.exec(text);
+  if (oslog) return Date.parse(oslog[1] + "T" + oslog[2] + oslog[4] + ":" + oslog[5]) + (oslog[3] ? Number("0." + oslog[3]) * 1000 : 0);
+  return Date.parse(text);
+}
+
+// What each step of a session covers: from the moment it began acting (its
+// first input, or its end for a step that only waited) to the moment the next
+// step did; the last one to the end of the run. A tap's window therefore holds
+// the requests and lines it caused while the next step waited for them.
+// `index` is the step's position in session.entries.
+function stepWindows(session) {
+  const end = parseInstant(session.endedAt);
+  const steps = (session.entries || []).map((entry, index) => ({ entry, index })).filter(({ entry }) => entry.kind === "step");
+  return steps.map(({ entry, index }, position) => ({
+    index,
+    text: entry.text || "",
+    from: parseInstant(entry.at),
+    to: position + 1 < steps.length ? parseInstant(steps[position + 1].entry.at) : (isFinite(end) ? end : Infinity)
+  }));
+}
+
+// The window the playhead is in — the step at `entryIndex`, or what came
+// before the first step — or the whole run.
+function reviewWindow(session, entryIndex, scope) {
+  const start = parseInstant(session.startedAt), end = parseInstant(session.endedAt);
+  const run = { from: start, to: isFinite(end) ? end : Infinity, step: null, text: "" };
+  if (scope === "run") return run;
+  const windows = stepWindows(session);
+  const position = windows.findIndex((window) => window.index === entryIndex);
+  if (position < 0) return { from: start, to: windows.length ? windows[0].from : run.to, step: 0, text: "" };
+  return { from: windows[position].from, to: windows[position].to, step: position + 1, text: windows[position].text };
+}
+
+// When an item of evidence happened: a request when it started (the logger
+// stamps it when it finishes), a log line and a state change when they were written.
+function evidenceInstant(kind, item) {
+  if (kind === "network") return parseInstant(item.timestamp) - (item.durationMilliseconds || 0);
+  return parseInstant(item.timestamp);
+}
+
+function inWindow(kind, item, window) {
+  const at = evidenceInstant(kind, item);
+  return at >= window.from && at < window.to;
+}
+
+// The tracked models as they stood at the end of a window, and what changed
+// inside it — the State tab's latest/changes/lastChange for a moment of a run.
+function foldStateEvents(events, window) {
+  const latest = {}, changes = [], lastChange = {};
+  const ordered = events.slice().sort((a, b) => (a.timestamp - b.timestamp) || ((a.cursor || 0) - (b.cursor || 0)));
+  for (const event of ordered) {
+    const at = event.timestamp * 1000;
+    if (at >= window.to) break;
+    const previous = latest[event.modelId];
+    const diffs = diffStateValues(previous ? previous.snapshot : undefined, event.snapshot, "", []);
+    if (at >= window.from) {
+      if (previous || event.deallocated) changes.push({ event, diffs });
+      lastChange[event.modelId] = event.deallocated ? [] : diffs.map((diff) => diff.path);
+    }
+    latest[event.modelId] = event.deallocated && previous ? { ...event, snapshot: previous.snapshot } : event;
+  }
+  return { latest, changes, lastChange };
+}

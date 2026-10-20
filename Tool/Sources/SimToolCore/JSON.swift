@@ -34,6 +34,27 @@ public enum JSON {
     }
 }
 
+/// ISO 8601 with milliseconds for times that order events a few hundred
+/// milliseconds apart; reads whole seconds too, so older files still decode.
+enum PreciseTime {
+    private static let precise: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    private static let wholeSeconds = ISO8601DateFormatter()
+
+    static func string(_ date: Date) -> String { precise.string(from: date) }
+
+    static func date<Key: CodingKey>(_ text: String, key: Key, in container: KeyedDecodingContainer<Key>) throws -> Date {
+        guard let date = precise.date(from: text) ?? wholeSeconds.date(from: text) else {
+            throw DecodingError.dataCorruptedError(forKey: key, in: container, debugDescription: "Not an ISO 8601 time: \(text)")
+        }
+        return date
+    }
+}
+
 /// Pretty-prints for humans at a terminal; emits compact JSON when stdout is
 /// piped (agents and scripts), where indentation only inflates the payload.
 public func printJSON<T: Encodable>(_ value: T, pretty: Bool = isatty(STDOUT_FILENO) != 0) throws {

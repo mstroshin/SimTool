@@ -254,12 +254,16 @@ function renderSessionDetail() {
     "</div>" : "";
   const seekable = session.status !== "running" && !session.videoError;
   const current = tests.replay && tests.replay.id === session.id ? replayCurrentIndex : -1;
+  // What each step caused, once the run's evidence is in.
+  if (session.status !== "running") loadEvidence(session);
+  const counts = seekable ? stepEvidenceCounts(session) : null;
   const entries = (session.entries || []).map((entry, index) => {
     const offset = entryOffsetSeconds(session, entry);
     if (entry.kind === "step") {
       const step = parseStepText(entry.text);
       const parts = splitStep(step.text);
-      return stepHTML({ text: parts.head, detail: parts.tail, mark: step.mark, at: formatOffset(offset) }, seekable, index === current, offset.toFixed(2));
+      return stepHTML({ text: parts.head, detail: parts.tail, mark: step.mark, at: formatOffset(offset) }, seekable, index === current, offset.toFixed(2)) +
+        (counts && counts.get(index) ? stepEvidenceHTML(counts.get(index), offset.toFixed(2)) : "");
     }
     const lines = entry.logs || [];
     if (!lines.length) return "";
@@ -290,6 +294,7 @@ testsView.detail.addEventListener("click", (event) => {
     if (action.dataset.act === "play") { const session = tests.sessions.find((candidate) => candidate.id === tests.selectedSession); if (session) enterReplay(session); }
     if (action.dataset.act === "more") { const session = tests.sessions.find((candidate) => candidate.id === tests.selectedSession); if (session) openMenuAt(action, sessionMenu(session)); }
     if (action.dataset.act === "copy-path") copyText(action.dataset.path, "Path copied");
+    if (action.dataset.act === "step-evidence") openStepEvidence(action.dataset.tab, Number(action.dataset.offset));
     return;
   }
   const step = event.target.closest(".step.seekable");
@@ -352,6 +357,7 @@ function enterReplay(session) {
   if (tests.view !== "history") { tests.view = "history"; store("tests.view", "history"); }
   tests.selectedSession = session.id;
   if (inspector.tab === "tests") renderTests();
+  startReview(session);
   video.play().catch(() => {});
 }
 
@@ -368,13 +374,15 @@ function exitReplay() {
   updateAxMode();
   layoutWorkspace();
   if (inspector.tab === "tests") renderTestsDetail();
+  stopReview();
 }
 
-function seekToStep(offset) {
+// `hold` stops the recording at the step, for reading what it caused.
+function seekToStep(offset, { hold } = {}) {
   const session = tests.sessions.find((candidate) => candidate.id === tests.selectedSession);
   if (!session) return;
   if (!tests.replay || tests.replay.id !== session.id) enterReplay(session);
-  const seek = () => { video.currentTime = offset; video.play().catch(() => {}); };
+  const seek = () => { video.currentTime = offset; if (hold) video.pause(); else video.play().catch(() => {}); };
   if (video.readyState >= 1) seek(); else video.addEventListener("loadedmetadata", seek, { once: true });
 }
 
@@ -407,6 +415,8 @@ function updateTransport() {
   (session.entries || []).forEach((entry, index) => { if (entry.kind === "step" && entryOffsetSeconds(session, entry) <= position + 0.25) current = index; });
   if (current !== replayCurrentIndex) {
     replayCurrentIndex = current;
+    // Network, Logs and State follow the playhead into the step.
+    refreshReview();
     if (inspector.tab === "tests" && tests.view === "history" && tests.selectedSession === session.id) {
       testsView.detail.querySelectorAll(".step").forEach((row) => row.classList.remove("current"));
       const steps = [...testsView.detail.querySelectorAll(".step[data-offset]")];

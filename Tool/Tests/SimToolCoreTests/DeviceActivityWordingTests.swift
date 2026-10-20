@@ -62,3 +62,18 @@ final class DeviceActivityCodingTests: XCTestCase {
         XCTAssertEqual(decoded.endedAt!.timeIntervalSince(decoded.at), 0.25, accuracy: 0.001)
     }
 }
+
+final class TestSessionEntryTimeTests: XCTestCase {
+    // A step's window is cut at its edges; whole seconds would let two steps
+    // a few hundred milliseconds apart share them.
+    func testStepTimesKeepTheirMillisecondsAndOldSessionsStillRead() throws {
+        let at = Date(timeIntervalSince1970: 1_790_000_000.743)
+        let entry = TestSessionEntry(kind: .step, at: at, endedAt: at.addingTimeInterval(0.067), text: "✓ 2/9 Tap label \"General\"")
+        let json = String(decoding: try JSON.data(entry, pretty: false), as: UTF8.self)
+        XCTAssertTrue(json.contains(#""at":"2026-09-21T14:13:20.743Z""#), json)
+        let decoded = try JSON.decoder.decode(TestSessionEntry.self, from: Data(json.utf8))
+        XCTAssertEqual(decoded.endedAt!.timeIntervalSince(decoded.at), 0.067, accuracy: 0.001)
+        let old = try JSON.decoder.decode(TestSessionEntry.self, from: Data(#"{"kind":"step","at":"2026-06-12T16:00:00Z","text":"Tapped"}"#.utf8))
+        XCTAssertEqual(old.at.timeIntervalSince1970, 1_781_280_000)
+    }
+}

@@ -542,6 +542,20 @@ public final class StreamServer: @unchecked Sendable {
             }
         }
 
+        // A session's own network, logs and state, for reviewing it step by step
+        // long after the server that recorded it is gone.
+        server.GET["/api/v1/tests/:id/evidence/:name"] = { request in
+            guard let id = request.params[":id"], let name = request.params[":name"]?.removingPercentEncoding, !id.isEmpty, !name.isEmpty else {
+                return self.errorResponse(SimToolError("Missing session id or file name"), statusCode: 400, reason: "Bad Request")
+            }
+            do {
+                let file = try self.testSessions.evidenceFile(id: id, name: name)
+                return self.dataResponse(try Data(contentsOf: file), contentType: Self.evidenceContentType(file.pathExtension))
+            } catch {
+                return self.testSessionErrorResponse(error)
+            }
+        }
+
         server.GET["/api/v1/screenshot"] = { request in
             let maxDimension = request.queryInt("maxDim")
             if let maxDimension, maxDimension <= 0 {
@@ -720,6 +734,15 @@ public final class StreamServer: @unchecked Sendable {
             return
         }
         activity.record(actor: .viewer, via: "viewer", kind: "live-input", title: "Touched by hand during the run")
+    }
+
+    private static func evidenceContentType(_ pathExtension: String) -> String {
+        switch pathExtension.lowercased() {
+        case "jsonl": "application/x-ndjson"
+        case "json": "application/json"
+        case "png": "image/png"
+        default: "text/plain; charset=utf-8"
+        }
     }
 
     private static func mockAnswer(_ draft: MockRuleDraft) -> String {
@@ -1246,7 +1269,7 @@ public final class StreamServer: @unchecked Sendable {
         case TestSessionError.alreadyActive, TestSessionError.noActiveSession, TestSessionError.videoNotReady,
              TestSessionError.sessionRunning:
             return errorResponse(error, statusCode: 409, reason: "Conflict")
-        case TestSessionError.sessionNotFound, TestSessionError.videoMissing:
+        case TestSessionError.sessionNotFound, TestSessionError.videoMissing, TestSessionError.evidenceMissing:
             return errorResponse(error, statusCode: 404, reason: "Not Found")
         case TestSessionError.emptyEntry, TestSessionError.entryTooLarge, TestSessionError.badStatus,
              is DecodingError, is SimToolError:

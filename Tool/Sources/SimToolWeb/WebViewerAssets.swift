@@ -17,6 +17,7 @@ enum WebViewerAssets {
         "js/main.js": jsMainJs,
         "js/network.js": jsNetworkJs,
         "js/palette.js": jsPaletteJs,
+        "js/review.js": jsReviewJs,
         "js/state.js": jsStateJs,
         "js/stream.js": jsStreamJs,
         "js/tests.js": jsTestsJs,
@@ -1949,6 +1950,8 @@ enum WebViewerAssets {
         }
 
         function liveTag(word, paused) {
+          // A reviewed run does not move: its lists are a recording, not a capture.
+          if (typeof reviewActive === "function" && reviewActive()) return '<span class="rec">◼ recorded run</span>';
           if (screenState.connection === "reconnecting" || screenState.connection === "offline") return '<span class="stale">● server unreachable — showing the last data</span>';
           if (paused) return '<span class="stale">❚❚ paused</span>';
           return '<span class="live">● ' + word + "</span>";
@@ -2863,6 +2866,79 @@ enum WebViewerAssets {
             default: return "";
           }
         }
+
+        // ---- Session review: the part of a run one step covers ----
+
+        // Milliseconds since the epoch from the times evidence carries: epoch seconds
+        // (state), ISO 8601 (network, steps) and OSLog's "2026-10-20 18:40:11.226211-0300"
+        // (logs), which not every browser parses. NaN when unreadable.
+        function parseInstant(value) {
+          if (typeof value === "number") return value * 1000;
+          if (value == null || value === "") return NaN;
+          const text = String(value);
+          const oslog = /^(\d{4}-\d\d-\d\d)[ T](\d\d:\d\d:\d\d)(?:\.(\d+))?([+-]\d\d):?(\d\d)$/.exec(text);
+          if (oslog) return Date.parse(oslog[1] + "T" + oslog[2] + oslog[4] + ":" + oslog[5]) + (oslog[3] ? Number("0." + oslog[3]) * 1000 : 0);
+          return Date.parse(text);
+        }
+
+        // What each step of a session covers: from the moment it began acting (its
+        // first input, or its end for a step that only waited) to the moment the next
+        // step did; the last one to the end of the run. A tap's window therefore holds
+        // the requests and lines it caused while the next step waited for them.
+        // `index` is the step's position in session.entries.
+        function stepWindows(session) {
+          const end = parseInstant(session.endedAt);
+          const steps = (session.entries || []).map((entry, index) => ({ entry, index })).filter(({ entry }) => entry.kind === "step");
+          return steps.map(({ entry, index }, position) => ({
+            index,
+            text: entry.text || "",
+            from: parseInstant(entry.at),
+            to: position + 1 < steps.length ? parseInstant(steps[position + 1].entry.at) : (isFinite(end) ? end : Infinity)
+          }));
+        }
+
+        // The window the playhead is in — the step at `entryIndex`, or what came
+        // before the first step — or the whole run.
+        function reviewWindow(session, entryIndex, scope) {
+          const start = parseInstant(session.startedAt), end = parseInstant(session.endedAt);
+          const run = { from: start, to: isFinite(end) ? end : Infinity, step: null, text: "" };
+          if (scope === "run") return run;
+          const windows = stepWindows(session);
+          const position = windows.findIndex((window) => window.index === entryIndex);
+          if (position < 0) return { from: start, to: windows.length ? windows[0].from : run.to, step: 0, text: "" };
+          return { from: windows[position].from, to: windows[position].to, step: position + 1, text: windows[position].text };
+        }
+
+        // When an item of evidence happened: a request when it started (the logger
+        // stamps it when it finishes), a log line and a state change when they were written.
+        function evidenceInstant(kind, item) {
+          if (kind === "network") return parseInstant(item.timestamp) - (item.durationMilliseconds || 0);
+          return parseInstant(item.timestamp);
+        }
+
+        function inWindow(kind, item, window) {
+          const at = evidenceInstant(kind, item);
+          return at >= window.from && at < window.to;
+        }
+
+        // The tracked models as they stood at the end of a window, and what changed
+        // inside it — the State tab's latest/changes/lastChange for a moment of a run.
+        function foldStateEvents(events, window) {
+          const latest = {}, changes = [], lastChange = {};
+          const ordered = events.slice().sort((a, b) => (a.timestamp - b.timestamp) || ((a.cursor || 0) - (b.cursor || 0)));
+          for (const event of ordered) {
+            const at = event.timestamp * 1000;
+            if (at >= window.to) break;
+            const previous = latest[event.modelId];
+            const diffs = diffStateValues(previous ? previous.snapshot : undefined, event.snapshot, "", []);
+            if (at >= window.from) {
+              if (previous || event.deallocated) changes.push({ event, diffs });
+              lastChange[event.modelId] = event.deallocated ? [] : diffs.map((diff) => diff.path);
+            }
+            latest[event.modelId] = event.deallocated && previous ? { ...event, snapshot: previous.snapshot } : event;
+          }
+          return { latest, changes, lastChange };
+        }
         """#
 
     static let jsLogsJs = #"""
@@ -2905,13 +2981,13 @@ enum WebViewerAssets {
           header: el("div", { class: "thead log-grid", role: "row", html: '<span class="cell" role="columnheader">Time</span><span class="cell" role="columnheader">Level</span><span class="cell c-ss" role="columnheader">Subsystem</span><span class="cell" role="columnheader">Message</span>' }),
           key: (entry) => String(entry.sequence),
           version: (entry) => (logsFilter.text || "") + "|" + (entry.launchId === newestLaunchId() ? 1 : 0),
-          rowClass: (entry) => "log-grid" + (isLogError(entry) ? " lvl-err" : "") + (entry.launchId != null && entry.launchId !== newestLaunchId() ? " retired" : ""),
-          group: (entry) => entry.launchId != null ? String(entry.launchId) : null,
+          rowClass: (entry) => "log-grid" + (isLogError(entry) ? " lvl-err" : "") + (!reviewActive() && entry.launchId != null && entry.launchId !== newestLaunchId() ? " retired" : ""),
+          group: (entry) => !reviewActive() && entry.launchId != null ? String(entry.launchId) : null,
           renderGroup: (id, items, collapsed) => launchGroupHTML(id, items, collapsed, "line", [{ count: items.filter(isLogError).length, tone: "err", one: "error", many: "errors" }]),
           render: renderLogRow,
           empty: () => logsEmpty(),
           onSelect: (key, entry) => { logs.selected = entry; renderLogDetail(); },
-          exists: (key) => logs.entries.some((entry) => String(entry.sequence) === key && entry.sequence >= logs.cleared),
+          exists: (key) => logRows().some((entry) => String(entry.sequence) === key),
           onMenu: (key, entry, x, y, row) => openMenu(x, y, logRowMenu(entry, row), row),
           onGroupMenu: (id, x, y, button) => openMenu(x, y, launchGroupMenu("logs", id), button),
           follow: () => logs.follow
@@ -2936,6 +3012,7 @@ enum WebViewerAssets {
         }
 
         function logsEmpty() {
+          if (reviewActive()) return reviewEmpty("logs");
           if (!inspector.attachedApp && inspector.configKnown) return noAppPanel("logs");
           if (logs.entries.length && logs.entries.every((entry) => entry.sequence < logs.cleared)) return el("div", { class: "empty", html: "<b>Cleared</b>New lines appear here as the app logs them." });
           if (logs.entries.length) {
@@ -2968,8 +3045,7 @@ enum WebViewerAssets {
 
         function renderLevels() {
           const counts = {};
-          for (const entry of logs.entries) {
-            if (entry.sequence < logs.cleared) continue;
+          for (const entry of logRows()) {
             const level = logLevel(entry);
             counts[level] = (counts[level] || 0) + 1;
           }
@@ -2981,11 +3057,15 @@ enum WebViewerAssets {
           }
         }
 
+        // The lines the list is about: the live ones not cleared, or the reviewed run's in its window.
+        function logRows() {
+          return reviewActive() ? reviewRows("logs", logs.entries) : logs.entries.filter((entry) => entry.sequence >= logs.cleared);
+        }
+
         function logsVisible() {
           const parsed = parseFieldTerm(logsFilter.text, LOGS_FILTER_FIELDS);
           const chips = logsFilter.chips;
-          return logs.entries.filter((entry) => {
-            if (entry.sequence < logs.cleared) return false;
+          return logRows().filter((entry) => {
             if (logs.levels[logLevel(entry)] === false) return false;
             if (!parsed.term && !chips.length) return true;
             const fields = logFields(entry);
@@ -3004,14 +3084,15 @@ enum WebViewerAssets {
           rows.sort((a, b) => ((a.launchId ?? -1) - (b.launchId ?? -1)) || (a.sequence - b.sequence));
           logsList.update(rows);
           renderLevels();
-          const errors = logs.entries.filter((entry) => entry.sequence >= logs.cleared && isLogError(entry)).length;
-          setCount("logs", logs.entries.filter((entry) => entry.sequence >= logs.cleared).length, errors);
+          const all = logRows();
+          const errors = all.filter(isLogError).length;
+          setCount("logs", all.length, errors);
           const times = rows.length ? [rows[0].timestamp, rows[rows.length - 1].timestamp] : null;
           logsView.guide.innerHTML = guideHTML([
             times ? "<b>" + escapeHTML(formatClock(times[0], true)) + " → " + escapeHTML(formatClock(times[1], true)) + "</b>" : "",
             formatCount(rows.length) + " shown",
-            logs.entries.length >= LOGS_MAX ? "newest " + formatCount(LOGS_MAX) + " kept" : "",
-            logs.dropped ? '<span title="The capture fell behind and skipped lines">' + plural(logs.dropped, "line dropped by the capture", "lines dropped by the capture") + "</span>" : "",
+            !reviewActive() && logs.entries.length >= LOGS_MAX ? "newest " + formatCount(LOGS_MAX) + " kept" : "",
+            !reviewActive() && logs.dropped ? '<span title="The capture fell behind and skipped lines">' + plural(logs.dropped, "line dropped by the capture", "lines dropped by the capture") + "</span>" : "",
             inspector.attachedApp ? escapeHTML(inspector.attachedApp) : ""
           ], liveTag(logs.follow ? "following" : "capturing"));
         }
@@ -3334,14 +3415,15 @@ enum WebViewerAssets {
           header: createSortHeader("net-grid", NETWORK_COLUMNS, network.sort, () => renderNetwork()),
           key: (event) => event.id,
           version: (event) => [event.response ? 1 : 0, event.error ? 1 : 0, event.launchId, event.durationMilliseconds, event._wf, newestLaunchId() === event.launchId].join("|"),
-          rowClass: (event) => "net-grid" + (event.mocked ? " mocked" : "") + (event.launchId != null && event.launchId !== newestLaunchId() ? " retired" : ""),
-          group: (event) => event.launchId != null ? String(event.launchId) : null,
+          // A reviewed run is one launch's story: no launch groups, nothing reads as earlier.
+          rowClass: (event) => "net-grid" + (event.mocked ? " mocked" : "") + (!reviewActive() && event.launchId != null && event.launchId !== newestLaunchId() ? " retired" : ""),
+          group: (event) => !reviewActive() && event.launchId != null ? String(event.launchId) : null,
           collapsed: [],
           renderGroup: (id, items, collapsed) => launchGroupHTML(id, items, collapsed, "request", networkMarks(items)),
           render: renderNetworkRow,
           empty: () => networkEmpty(),
           onSelect: (key, event) => { network.selected = event; renderNetworkDetail(); },
-          exists: (key) => !network.cleared.has(key) && network.events.some((event) => event.id === key),
+          exists: (key) => networkRows().some((event) => event.id === key),
           onActivate: () => { const tab = networkView.detail.querySelector("[role=tab][aria-selected=true]"); if (tab) tab.focus(); },
           onMenu: (key, event, x, y, row) => openMenu(x, y, networkRowMenu(event), row),
           onGroupMenu: (id, x, y, button) => openMenu(x, y, launchGroupMenu("network", id), button),
@@ -3365,6 +3447,7 @@ enum WebViewerAssets {
         }
 
         function networkEmpty() {
+          if (reviewActive()) return reviewEmpty("network");
           if (!inspector.attachedApp && inspector.configKnown && !network.events.length) return noAppPanel("network");
           if (network.events.length && network.events.every((event) => network.cleared.has(event.id))) {
             return el("div", { class: "empty", html: "<b>Cleared</b>New requests appear here as the app makes them." });
@@ -3377,11 +3460,15 @@ enum WebViewerAssets {
           return el("div", { class: "empty", html: "<b>No requests yet</b>The app's network logger reports each call here as it finishes. Apps launched by <code>simtool run</code> or <code>simtool app launch</code> have it armed; apps that link <code>SimToolNetworkLogger</code> keep reporting after a relaunch." });
         }
 
+        // The requests the list is about: the live ones not cleared, or the reviewed run's in its window.
+        function networkRows() {
+          return reviewActive() ? reviewRows("network", network.events) : network.events.filter((event) => !network.cleared.has(event.id));
+        }
+
         function networkVisible() {
           const query = networkFilter.text;
           const chips = networkFilter.chips;
-          return network.events.filter((event) => {
-            if (network.cleared.has(event.id)) return false;
+          return networkRows().filter((event) => {
             if (network.protocol !== "all" && event.protocol !== network.protocol) return false;
             if (network.failedOnly && !isNetworkProblem(event)) return false;
             if (network.mockedOnly && !event.mocked) return false;
@@ -3424,7 +3511,8 @@ enum WebViewerAssets {
             event._wf = "left:" + left.toFixed(1) + "%;width:" + Math.min(width, 100 - left).toFixed(1) + "%";
           }
           networkList.update(rows);
-          const shown = rows.length, total = network.events.filter((event) => !network.cleared.has(event.id)).length;
+          const all = networkRows();
+          const shown = rows.length, total = all.length;
           const times = rows.map((event) => event.timestamp).filter(Boolean).sort();
           const hidden = total - shown;
           networkView.guide.innerHTML = guideHTML([
@@ -3433,7 +3521,7 @@ enum WebViewerAssets {
             hidden ? formatCount(hidden) + " hidden by filters" : "",
             network.paused && network.pausedNew ? plural(network.pausedNew, "new while paused", "new while paused") : ""
           ], liveTag("capturing", network.paused));
-          const [failed, problems] = networkMarks(network.events.filter((event) => !network.cleared.has(event.id)));
+          const [failed, problems] = networkMarks(all);
           setCount("network", total, failed.count, problems.count);
           if (network.selected) {
             const fresh = network.events.find((event) => event.id === network.selected.id);
@@ -3791,6 +3879,181 @@ enum WebViewerAssets {
         window.addEventListener("resize", () => { closeMenu(); closePopover(); });
         """#
 
+    static let jsReviewJs = #"""
+        // Session review: while a recording plays, Network, Logs and State show that
+        // run — its own evidence files, or this server's memory when it kept none —
+        // cut to the step the playhead is in, or to the whole run. The window follows
+        // the playhead; each step of the timeline says what it caused and opens it.
+
+        const REVIEW_FILES = { network: "network.jsonl", logs: "logs.jsonl", state: "state.jsonl" };
+        const review = {
+          scope: stored("review.scope", "step"),   // step | run
+          evidence: new Map(),                     // session id → { network, logs, state, loading, error }
+          window: null                             // the span the lists show: { from, to, step, text }
+        };
+
+        function reviewActive() {
+          return app.dataset.mode === "replay" && !!tests.replay;
+        }
+
+        // A session's evidence, fetched once. Kinds it kept no file for stay null and
+        // read from this server's memory instead.
+        function loadEvidence(session) {
+          const known = review.evidence.get(session.id);
+          if (known) return known.ready;
+          const record = { network: null, logs: null, state: null, loading: true, error: "" };
+          record.ready = Promise.all(Object.entries(REVIEW_FILES).map(async ([kind, name]) => {
+            if (!(session.evidence || []).includes(name)) return;
+            try {
+              const text = await (await api("/api/v1/tests/" + encodeURIComponent(session.id) + "/evidence/" + encodeURIComponent(name))).text();
+              record[kind] = text.split("\n").filter(Boolean).map((line) => { try { return JSON.parse(line); } catch (_) { return null; } }).filter(Boolean);
+            } catch (error) {
+              record.error = error.message;
+            }
+          })).then(() => {
+            record.loading = false;
+            if (reviewActive() && tests.replay.id === session.id) refreshReview();
+            if (tests.selectedSession === session.id && inspector.tab === "tests") renderTestsDetail();
+          });
+          review.evidence.set(session.id, record);
+          return record.ready;
+        }
+
+        function reviewRecord(session) {
+          return session ? review.evidence.get(session.id) || null : null;
+        }
+
+        // The whole run's items of one kind: its file, else what this server still holds.
+        function reviewSource(kind, live) {
+          const record = reviewRecord(tests.replay);
+          return record && record[kind] ? record[kind] : live;
+        }
+
+        function fromEvidenceFile(kind) {
+          const record = reviewRecord(tests.replay);
+          return !!(record && record[kind]);
+        }
+
+        // What a list shows: the live items, or the reviewed run's items in the window.
+        function reviewRows(kind, live) {
+          if (!reviewActive() || !review.window) return live;
+          return reviewSource(kind, live).filter((item) => inWindow(kind, item, review.window));
+        }
+
+        // The State tab's models at the end of the window and its changes inside it.
+        // Only from the run's state.jsonl: the live tab keeps folded models, not the
+        // events a past moment could be rebuilt from.
+        function reviewStateView(live) {
+          if (!reviewActive() || !review.window) return live;
+          const record = reviewRecord(tests.replay);
+          return foldStateEvents(record && record.state ? record.state : [], review.window);
+        }
+
+        // ---- The bar over Network, Logs and State while a run is reviewed ----
+
+        const reviewBars = ["network", "logs", "state"].map((tab) => {
+          const scope = segmented("Review span", [["step", "This step"], ["run", "Whole run"]], () => review.scope, (value) => {
+            review.scope = value;
+            store("review.scope", value);
+            refreshReview();
+          });
+          scope.classList.add("keep");
+          const text = el("span", { class: "rb-text" });
+          const bar = el("div", { class: "review-bar", role: "status", hidden: true }, el("span", { html: icon("film") }), text, el("span", { class: "ptool-spacer" }), scope);
+          $("panel-" + tab).prepend(bar);
+          return { tab, bar, text, scope };
+        });
+
+        function reviewBarHTML(kind) {
+          const window = review.window;
+          if (!window) return "";
+          const what = window.step == null ? "<b>Whole run</b>" : window.step === 0 ? "<b>Before the first step</b>" : "<b>Step " + window.step + "</b> " + escapeHTML(splitStep(parseStepText(window.text).text).head);
+          const span = '<span class="mono">' + escapeHTML(formatClock(new Date(window.from), true)) + " → " + (isFinite(window.to) ? escapeHTML(formatClock(new Date(window.to), true)) : "end") + "</span>";
+          const record = reviewRecord(tests.replay);
+          const source = record && record.loading ? "loading the run's evidence…" : fromEvidenceFile(kind) ? "from the run's " + REVIEW_FILES[kind]
+            : kind === "state" ? "the run kept no state.jsonl" : "from this server's memory — the run kept no " + REVIEW_FILES[kind];
+          return what + span + '<span class="rb-source">' + escapeHTML(source) + "</span>";
+        }
+
+        function renderReviewBars() {
+          for (const { tab, bar, text, scope } of reviewBars) {
+            bar.hidden = !reviewActive();
+            if (bar.hidden) continue;
+            text.innerHTML = reviewBarHTML(tab);
+            scope.sync();
+          }
+        }
+
+        // The window moved — a new step under the playhead, the scope switched, the evidence arrived.
+        function refreshReview() {
+          review.window = reviewActive() ? reviewWindow(tests.replay, replayCurrentIndex, review.scope) : null;
+          renderReviewBars();
+          networkList.invalidate();
+          logsList.invalidate();
+          renderNetwork();
+          renderLogs();
+          renderState();
+        }
+
+        function startReview(session) {
+          loadEvidence(session);
+          refreshReview();
+        }
+
+        function stopReview() {
+          review.window = null;
+          refreshReview();
+        }
+
+        // The note a list shows when the window holds nothing of its kind.
+        function reviewEmpty(kind) {
+          const record = reviewRecord(tests.replay);
+          if (record && record.loading) return el("div", { class: "empty", html: "<b>Loading the run's evidence</b>" });
+          const noun = { network: "requests", logs: "log lines", state: "state changes" }[kind];
+          const where = review.window && review.window.step != null ? "in this step" : "in this run";
+          const missing = kind === "state" ? "The run kept no state.jsonl." : "The run kept no " + REVIEW_FILES[kind] + ", and this server holds none from then.";
+          const node = el("div", { class: "empty", html: "<b>No " + noun + " " + where + "</b>" + (fromEvidenceFile(kind) ? "The run's evidence holds none between these times." : missing) });
+          if (review.scope === "step") node.append(el("button", { class: "btn btn-sm", type: "button", text: "Show the whole run", onclick: () => { review.scope = "run"; store("review.scope", "run"); refreshReview(); } }));
+          return node;
+        }
+
+        // ---- What each step of a timeline caused ----
+
+        // Counts of the requests, log lines and state changes in each step's window,
+        // once the session's evidence is in. Kinds the run kept no file for are left out.
+        function stepEvidenceCounts(session) {
+          const record = reviewRecord(session);
+          if (!record || record.loading) return null;
+          const counts = new Map();
+          for (const window of stepWindows(session)) {
+            counts.set(window.index, {
+              network: record.network ? record.network.filter((item) => inWindow("network", item, window)).length : null,
+              logs: record.logs ? record.logs.filter((item) => inWindow("logs", item, window)).length : null,
+              state: record.state ? record.state.filter((item) => inWindow("state", item, window)).length : null
+            });
+          }
+          return counts;
+        }
+
+        // The row under a step that opens what it caused, in the tab that shows it.
+        function stepEvidenceHTML(counts, offset) {
+          if (!counts) return "";
+          const links = [["network", "request", "requests"], ["logs", "log line", "log lines"], ["state", "state update", "state updates"]]
+            .filter(([kind]) => counts[kind] != null)
+            .map(([kind, one, many]) => '<button class="ev-link" type="button" data-act="step-evidence" data-tab="' + kind + '" data-offset="' + offset + '"' + (counts[kind] ? "" : " disabled") + ">" + plural(counts[kind], one, many) + "</button>");
+          return links.length ? '<li class="step-ev">' + links.join("") + "</li>" : "";
+        }
+
+        // Seek to the step and hold there, cut the lists to it, and show the one asked for.
+        function openStepEvidence(tab, offset) {
+          review.scope = "step";
+          store("review.scope", "step");
+          seekToStep(offset, { hold: true });
+          openTab(tab);
+          refreshReview();
+        }
+        """#
+
     static let jsStateJs = #"""
         // State: live snapshots of the app's @SimToolDebugState models — a list of
         // models, the selected one's snapshot, and what changed, as before → after.
@@ -3819,15 +4082,20 @@ enum WebViewerAssets {
         );
 
         stateCopy.addEventListener("click", () => {
-          const event = stateView.latest[stateView.selected];
+          const event = stateModelsView().latest[stateView.selected];
           if (event) copyText(JSON.stringify(event.snapshot, (key, value) => key === MODEL_ID_KEY ? undefined : value, 2), "Snapshot copied");
         });
 
-        function stateMatches(id) {
+        // The models the tab is about: live, or as a reviewed run held them at the end of its window.
+        function stateModelsView() {
+          return reviewStateView(stateView);
+        }
+
+        function stateMatches(id, view) {
           const query = stateFilter.text;
           const chips = stateFilter.chips;
           if (!query && !chips.length) return true;
-          const event = stateView.latest[id];
+          const event = view.latest[id];
           const hay = (id + " " + JSON.stringify(event ? event.snapshot : "")).toLowerCase();
           return matchesFilters(hay, chips, query);
         }
@@ -3850,19 +4118,22 @@ enum WebViewerAssets {
         }
 
         function renderState() {
-          const ids = Object.keys(stateView.latest).sort((a, b) => {
-            const left = stateView.latest[a], right = stateView.latest[b];
+          const view = stateModelsView();
+          const ids = Object.keys(view.latest).sort((a, b) => {
+            const left = view.latest[a], right = view.latest[b];
             return (left.deallocated ? 1 : 0) - (right.deallocated ? 1 : 0) || a.localeCompare(b);
-          }).filter(stateMatches);
-          if (stateView.selected && !stateView.latest[stateView.selected]) stateView.selected = null;
-          if (!stateView.selected && ids.length) stateView.selected = ids[0];
-          setCount("state", Object.keys(stateView.latest).length, 0);
+          }).filter((id) => stateMatches(id, view));
+          // A reviewed moment without the chosen model keeps the choice for when the playhead finds it again.
+          if (stateView.selected && !view.latest[stateView.selected] && view === stateView) stateView.selected = null;
+          const selected = stateView.selected && view.latest[stateView.selected] ? stateView.selected : ids[0] || null;
+          if (view === stateView) stateView.selected = selected;
+          setCount("state", Object.keys(view.latest).length, 0);
 
           const focusedId = document.activeElement && stateModels.contains(document.activeElement) ? document.activeElement.dataset.model : null;
           stateModels.innerHTML = "";
           for (const id of ids) {
-            const event = stateView.latest[id];
-            const button = el("button", { type: "button", class: "model" + (event.deallocated ? " dead" : ""), role: "option", "aria-selected": String(id === stateView.selected), tabindex: id === stateView.selected ? "0" : "-1", "data-model": id });
+            const event = view.latest[id];
+            const button = el("button", { type: "button", class: "model" + (event.deallocated ? " dead" : ""), role: "option", "aria-selected": String(id === selected), tabindex: id === selected ? "0" : "-1", "data-model": id });
             button.innerHTML = '<span class="dot ' + (event.deallocated ? "dot-idle" : "dot-ok") + '" title="' + (event.deallocated ? "deallocated" : "alive") + '"></span>' +
               '<span class="m-name" translate="no">' + escapeHTML(id) + '</span><span class="m-seq">#' + escapeHTML(event.seq) + "</span>" +
               '<span class="m-sub">' + (event.deallocated ? "deallocated " : "changed ") + escapeHTML(formatClock(event.timestamp)) + "</span>";
@@ -3873,33 +4144,35 @@ enum WebViewerAssets {
           if (!ids.length) {
             stateBody.innerHTML = "";
             stateBody.paneKey = null;
-            if (!inspector.attachedApp && inspector.configKnown && !Object.keys(stateView.latest).length) stateBody.append(noAppPanel("state"));
-            else if (Object.keys(stateView.latest).length) stateBody.append(el("div", { class: "empty", html: "<b>No model matches</b>Clear the filter to see all " + formatCount(Object.keys(stateView.latest).length) + "." }));
+            if (view !== stateView && !Object.keys(view.latest).length) stateBody.append(reviewEmpty("state"));
+            else if (!inspector.attachedApp && inspector.configKnown && !Object.keys(view.latest).length) stateBody.append(noAppPanel("state"));
+            else if (Object.keys(view.latest).length) stateBody.append(el("div", { class: "empty", html: "<b>No model matches</b>Clear the filter to see all " + formatCount(Object.keys(view.latest).length) + "." }));
             else stateBody.append(el("div", { class: "empty", html: "<b>No tracked models yet</b>Annotate an <code>@Observable</code> model with <code>@SimToolDebugState</code>, register it with <code>SimToolState.track(model)</code>, and launch the app through SimTool — its state streams here on every change." }));
             return;
           }
-          const event = stateView.latest[stateView.selected];
+          const event = view.latest[selected];
           // Every state event re-renders; patchPane keeps folds, focus, scroll and a text selection.
-          const paneKey = stateView.selected + "|" + stateView.mode;
+          const paneKey = selected + "|" + stateView.mode;
           if (stateView.mode === "snapshot") {
-            patchPane(stateBody, paneKey, '<div class="dhead flat"><span class="dtitle" translate="no">' + escapeHTML(stateView.selected) + '</span><span class="muted small">seq ' + escapeHTML(event.seq) + " · " + (event.deallocated ? "deallocated" : "alive") + "</span></div>" +
-              '<div class="tree-kv" translate="no">' + renderStateTree(event.snapshot, stateView.lastChange[stateView.selected] || [], "", stateView.selected) + "</div>");
+            patchPane(stateBody, paneKey, '<div class="dhead flat"><span class="dtitle" translate="no">' + escapeHTML(selected) + '</span><span class="muted small">seq ' + escapeHTML(event.seq) + " · " + (event.deallocated ? "deallocated" : "alive") + "</span></div>" +
+              '<div class="tree-kv" translate="no">' + renderStateTree(event.snapshot, view.lastChange[selected] || [], "", selected) + "</div>");
           } else {
-            const embedded = embeddedModelIds(stateView.latest);
+            const embedded = embeddedModelIds(view.latest);
             const blocks = [];
-            if (embedded[stateView.selected]) {
-              patchPane(stateBody, paneKey, '<div class="empty"><b>Changes show in ' + escapeHTML(embedded[stateView.selected]) + "</b>This model lives inside that one, so its changes appear there as nested paths.</div>");
+            if (embedded[selected]) {
+              patchPane(stateBody, paneKey, '<div class="empty"><b>Changes show in ' + escapeHTML(embedded[selected]) + "</b>This model lives inside that one, so its changes appear there as nested paths.</div>");
               return;
             }
-            for (let index = stateView.changes.length - 1; index >= 0; index--) {
-              const { event: change, diffs } = stateView.changes[index];
-              if (change.modelId !== stateView.selected) continue;
+            for (let index = view.changes.length - 1; index >= 0; index--) {
+              const { event: change, diffs } = view.changes[index];
+              if (change.modelId !== selected) continue;
               // The parent's history entry already shows this change as a nested diff.
               if (embedded[change.modelId]) continue;
               blocks.push('<div class="change"><div class="change-head"><b translate="no">' + escapeHTML(change.modelId) + "</b><span>seq " + escapeHTML(change.seq) + '</span><span class="mono">' + escapeHTML(formatClock(change.timestamp, true)) + "</span>" + (change.deallocated ? "<span>deallocated</span>" : "") + "</div>" +
                 diffs.map((diff) => '<div class="diffline" translate="no"><span class="path">' + escapeHTML(diff.path) + "</span><del>" + escapeHTML(stateValueText(diff.before)) + '</del><span class="arrow">→</span><ins>' + escapeHTML(stateValueText(diff.after)) + "</ins></div>").join("") + "</div>");
             }
-            patchPane(stateBody, paneKey, blocks.length ? blocks.join("") : '<div class="empty"><b>No changes yet</b>This model has not changed since it was first reported.</div>');
+            const none = view === stateView ? "<b>No changes yet</b>This model has not changed since it was first reported." : "<b>No changes here</b>This model did not change in the reviewed span.";
+            patchPane(stateBody, paneKey, blocks.length ? blocks.join("") : '<div class="empty">' + none + "</div>");
           }
         }
 
@@ -4484,12 +4757,16 @@ enum WebViewerAssets {
             "</div>" : "";
           const seekable = session.status !== "running" && !session.videoError;
           const current = tests.replay && tests.replay.id === session.id ? replayCurrentIndex : -1;
+          // What each step caused, once the run's evidence is in.
+          if (session.status !== "running") loadEvidence(session);
+          const counts = seekable ? stepEvidenceCounts(session) : null;
           const entries = (session.entries || []).map((entry, index) => {
             const offset = entryOffsetSeconds(session, entry);
             if (entry.kind === "step") {
               const step = parseStepText(entry.text);
               const parts = splitStep(step.text);
-              return stepHTML({ text: parts.head, detail: parts.tail, mark: step.mark, at: formatOffset(offset) }, seekable, index === current, offset.toFixed(2));
+              return stepHTML({ text: parts.head, detail: parts.tail, mark: step.mark, at: formatOffset(offset) }, seekable, index === current, offset.toFixed(2)) +
+                (counts && counts.get(index) ? stepEvidenceHTML(counts.get(index), offset.toFixed(2)) : "");
             }
             const lines = entry.logs || [];
             if (!lines.length) return "";
@@ -4520,6 +4797,7 @@ enum WebViewerAssets {
             if (action.dataset.act === "play") { const session = tests.sessions.find((candidate) => candidate.id === tests.selectedSession); if (session) enterReplay(session); }
             if (action.dataset.act === "more") { const session = tests.sessions.find((candidate) => candidate.id === tests.selectedSession); if (session) openMenuAt(action, sessionMenu(session)); }
             if (action.dataset.act === "copy-path") copyText(action.dataset.path, "Path copied");
+            if (action.dataset.act === "step-evidence") openStepEvidence(action.dataset.tab, Number(action.dataset.offset));
             return;
           }
           const step = event.target.closest(".step.seekable");
@@ -4582,6 +4860,7 @@ enum WebViewerAssets {
           if (tests.view !== "history") { tests.view = "history"; store("tests.view", "history"); }
           tests.selectedSession = session.id;
           if (inspector.tab === "tests") renderTests();
+          startReview(session);
           video.play().catch(() => {});
         }
 
@@ -4598,13 +4877,15 @@ enum WebViewerAssets {
           updateAxMode();
           layoutWorkspace();
           if (inspector.tab === "tests") renderTestsDetail();
+          stopReview();
         }
 
-        function seekToStep(offset) {
+        // `hold` stops the recording at the step, for reading what it caused.
+        function seekToStep(offset, { hold } = {}) {
           const session = tests.sessions.find((candidate) => candidate.id === tests.selectedSession);
           if (!session) return;
           if (!tests.replay || tests.replay.id !== session.id) enterReplay(session);
-          const seek = () => { video.currentTime = offset; video.play().catch(() => {}); };
+          const seek = () => { video.currentTime = offset; if (hold) video.pause(); else video.play().catch(() => {}); };
           if (video.readyState >= 1) seek(); else video.addEventListener("loadedmetadata", seek, { once: true });
         }
 
@@ -4637,6 +4918,8 @@ enum WebViewerAssets {
           (session.entries || []).forEach((entry, index) => { if (entry.kind === "step" && entryOffsetSeconds(session, entry) <= position + 0.25) current = index; });
           if (current !== replayCurrentIndex) {
             replayCurrentIndex = current;
+            // Network, Logs and State follow the playhead into the step.
+            refreshReview();
             if (inspector.tab === "tests" && tests.view === "history" && tests.selectedSession === session.id) {
               testsView.detail.querySelectorAll(".step").forEach((row) => row.classList.remove("current"));
               const steps = [...testsView.detail.querySelectorAll(".step[data-offset]")];
@@ -5113,6 +5396,7 @@ enum WebViewerAssets {
         .guide b { color: var(--ink2); font-weight: 500; }
         .guide .live { color: var(--ok); }
         .guide .stale { color: var(--warn); }
+        .guide .rec { color: var(--course); }
         .guide button { border: 0; background: none; padding: 0; color: var(--accent); cursor: pointer; font: inherit; }
 
         /* Lists: keyed rows, roving focus. */
@@ -5335,6 +5619,22 @@ enum WebViewerAssets {
         .evidence { margin: 0; padding: 0; list-style: none; }
         .evidence li { display: flex; align-items: center; gap: 4px; min-height: 26px; }
         .evidence .mono { min-width: 0; overflow-wrap: anywhere; color: var(--ink2); }
+
+        /* Session review: Network, Logs and State cut to the step under the playhead. */
+        .review-bar {
+          display: flex; align-items: center; gap: var(--sp-2); min-width: 0; height: 34px; padding: 0 var(--sp-2) 0 var(--sp-3); flex: none;
+          border-bottom: 1px solid var(--line-thin); background: var(--course-bg); color: var(--ink2); white-space: nowrap;
+        }
+        .review-bar > span:first-child { display: inline-flex; color: var(--course); }
+        .rb-text { display: flex; align-items: baseline; gap: var(--sp-2); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+        .rb-text b { color: var(--ink1); font-weight: 600; }
+        .rb-text .mono { font-size: var(--fs-11); color: var(--ink2); }
+        .rb-source { overflow: hidden; text-overflow: ellipsis; color: var(--ink3); font-size: var(--fs-11); }
+        @container insp (max-width: 640px) { .rb-source { display: none; } }
+        .step-ev { display: flex; flex-wrap: wrap; gap: 2px var(--sp-2); margin: -2px 0 4px 72px; }
+        .ev-link { padding: 0; border: 0; background: none; color: var(--course); font: var(--fs-11)/1.6 var(--font-ui); cursor: pointer; }
+        .ev-link:hover { text-decoration: underline; }
+        .ev-link:disabled { color: var(--ink3); cursor: default; text-decoration: none; }
 
         /* Activity */
         .act-grid { grid-template-columns: 86px 54px minmax(140px, 1fr) 84px; }
@@ -5601,6 +5901,7 @@ enum WebViewerAssets {
         {{js/state.js}}
         {{js/ax.js}}
         {{js/tests.js}}
+        {{js/review.js}}
         {{js/activity.js}}
         {{js/palette.js}}
         {{js/main.js}}</script>

@@ -269,3 +269,71 @@ final class WebViewerActivityLogicTests: XCTestCase {
         XCTAssertEqual(value(context, "[formatSince(400), formatSince(3200), formatSince(61000), formatSince(7300000)].join(' | ')"), "now | 3 s ago | 1 min ago | 2 h ago")
     }
 }
+
+// A recorded run reviewed step by step: which part of it a step covers.
+final class WebViewerReviewLogicTests: XCTestCase {
+    private func makeContext(file: StaticString = #filePath, line: UInt = #line) throws -> JSContext {
+        let context = try XCTUnwrap(JSContext())
+        context.exceptionHandler = { _, exception in
+            XCTFail("JS exception: \(exception?.toString() ?? "?")", file: file, line: line)
+        }
+        context.evaluateScript(WebViewer.asset("js/logic.js"))
+        context.evaluateScript("""
+        var session = { startedAt: '2026-10-20T21:40:30Z', endedAt: '2026-10-20T21:40:50.500Z', entries: [
+          { kind: 'step', at: '2026-10-20T21:40:31.300Z', text: 'Launched com.example.app' },
+          { kind: 'step', at: '2026-10-20T21:40:38.775Z', text: '✓ 1/3 Wait for label "General"' },
+          { kind: 'log', at: '2026-10-20T21:40:39.000Z', logs: ['On screen:'] },
+          { kind: 'step', at: '2026-10-20T21:40:39.743Z', text: '✓ 2/3 Tap label "General"' },
+          { kind: 'step', at: '2026-10-20T21:40:44.459Z', text: '✓ 3/3 Wait for label "About"' }
+        ] };
+        """)
+        return context
+    }
+
+    private func value(_ context: JSContext, _ expression: String) -> String {
+        context.evaluateScript(expression)?.toString() ?? ""
+    }
+
+    func testEveryTimeTheEvidenceCarriesIsRead() throws {
+        let context = try makeContext()
+        XCTAssertEqual(value(context, "Math.round(parseInstant('2026-10-20 18:40:11.226211-0300')) === Date.parse('2026-10-20T21:40:11.226Z')"), "true", "OSLog's local time with an offset")
+        XCTAssertEqual(value(context, "parseInstant(1792532411.5) === 1792532411500"), "true", "state's epoch seconds")
+        XCTAssertEqual(value(context, "parseInstant('2026-10-20T21:40:39.743Z') === Date.parse('2026-10-20T21:40:39.743Z')"), "true")
+        XCTAssertEqual(value(context, "isNaN(parseInstant('later'))"), "true")
+    }
+
+    func testAStepCoversFromItsActionToTheNextStepsAction() throws {
+        let context = try makeContext()
+        XCTAssertEqual(value(context, "stepWindows(session).map(w => w.index + ':' + (w.to - w.from)).join(' ')"), "0:7475 1:968 3:4716 4:6041",
+                       "a log entry is not a step; the last step runs to the end of the run")
+        XCTAssertEqual(value(context, "(w => w.step + ' ' + w.text)(reviewWindow(session, 3, 'step'))"), #"3 ✓ 2/3 Tap label "General""#)
+        XCTAssertEqual(value(context, "(w => w.step + ' ' + (w.to - w.from))(reviewWindow(session, -1, 'step'))"), "0 1300", "before the first step")
+        XCTAssertEqual(value(context, "(w => (w.to - w.from) + ' ' + w.step)(reviewWindow(session, 3, 'run'))"), "20500 null")
+    }
+
+    func testARequestBelongsToTheStepItStartedIn() throws {
+        let context = try makeContext()
+        context.evaluateScript("var tap = reviewWindow(session, 3, 'step');")
+        // Finished during the next step, started during the tap's.
+        XCTAssertEqual(value(context, "inWindow('network', { timestamp: '2026-10-20T21:40:44.600Z', durationMilliseconds: 4000 }, tap)"), "true")
+        XCTAssertEqual(value(context, "inWindow('network', { timestamp: '2026-10-20T21:40:39.800Z', durationMilliseconds: 900 }, tap)"), "false", "it started before the tap")
+        XCTAssertEqual(value(context, "inWindow('logs', { timestamp: '2026-10-20 18:40:40.000000-0300' }, tap)"), "true")
+        XCTAssertEqual(value(context, "inWindow('state', { timestamp: Date.parse('2026-10-20T21:40:44.600Z') / 1000 }, tap)"), "false", "the window ends where the next step begins")
+    }
+
+    func testStateIsWhatTheModelsHeldAtTheEndOfTheStep() throws {
+        let context = try makeContext()
+        context.evaluateScript("""
+        var t = (s) => Date.parse('2026-10-20T21:40:00Z') / 1000 + s;
+        var events = [
+          { modelId: 'Cart#1', seq: 1, timestamp: t(32), snapshot: { items: 0 } },
+          { modelId: 'Cart#1', seq: 2, timestamp: t(40), snapshot: { items: 1 } },
+          { modelId: 'Cart#1', seq: 3, timestamp: t(46), snapshot: { items: 2 } }
+        ];
+        var folded = foldStateEvents(events, reviewWindow(session, 3, 'step'));
+        """)
+        XCTAssertEqual(value(context, "folded.latest['Cart#1'].snapshot.items"), "1", "the change after the step is not yet there")
+        XCTAssertEqual(value(context, "folded.changes.map(c => c.diffs.map(d => d.path + ' ' + d.before + '→' + d.after).join()).join('|')"), "items 0→1")
+        XCTAssertEqual(value(context, "JSON.stringify(folded.lastChange)"), #"{"Cart#1":["items"]}"#)
+    }
+}

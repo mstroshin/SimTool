@@ -288,6 +288,8 @@ function guideHTML(parts, live) {
 }
 
 function liveTag(word, paused) {
+  // A reviewed run does not move: its lists are a recording, not a capture.
+  if (typeof reviewActive === "function" && reviewActive()) return '<span class="rec">◼ recorded run</span>';
   if (screenState.connection === "reconnecting" || screenState.connection === "offline") return '<span class="stale">● server unreachable — showing the last data</span>';
   if (paused) return '<span class="stale">❚❚ paused</span>';
   return '<span class="live">● ' + word + "</span>";
