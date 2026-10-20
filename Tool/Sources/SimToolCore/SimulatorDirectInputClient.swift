@@ -12,10 +12,14 @@ import Foundation
 /// finger that follows a pointer cannot wait for a reply per move, so the helper
 /// coalesces moves itself and never drops a down or an up; keys ride along in
 /// the same order.
+///
+/// An answered touch first makes sure iOS still takes the helper's touches on
+/// this boot (`SimulatorTouchScreen`), and fails instead of reporting a touch
+/// that went nowhere.
 public actor SimulatorDirectInputClient {
     public static let shared = SimulatorDirectInputClient()
 
-    private static let helperVersion = "4"
+    private static let helperVersion = "5"
     /// Part of the cached binary's name, so any change to the helper's source
     /// compiles a fresh one instead of reusing a stale build of the same version.
     private static let helperFingerprint = SHA256.hash(data: Data(SimulatorDirectInputHelperSource.source.utf8))
@@ -29,17 +33,23 @@ public actor SimulatorDirectInputClient {
     /// Answered commands share the helper's stdout, so one runs at a time.
     private var answering = false
     private var answerQueue: [CheckedContinuation<Void, Never>] = []
+    private let touchScreenCheck = TouchScreenCheck.live
+    /// The helper session whose touch screen has been checked, and the verdict:
+    /// a session touches one boot of one device.
+    private weak var touchScreenChecked: SimulatorDirectInputSession?
+    private var touchScreenCutOff = false
 
     public init() {}
 
     /// Starts the helper ahead of the first touch, so that touch lands without
-    /// the compile-and-launch delay.
+    /// the compile-and-launch delay. Starting it also claims the touch screen
+    /// (see the helper's `claimTouchScreen`).
     public func prepare(deviceUDID: String) async throws {
         _ = try await session(for: deviceUDID)
     }
 
     public func tap(xRatio: Double, yRatio: Double, deviceUDID: String) async throws {
-        try await answered(
+        try await touch(
             SimulatorDirectInputCommand.tap(x: xRatio, y: yRatio).line,
             deviceUDID: deviceUDID,
             timeoutSeconds: 2
@@ -48,7 +58,7 @@ public actor SimulatorDirectInputClient {
 
     /// Plays a timed path and returns once the finger has lifted.
     public func perform(_ path: TouchPath, deviceUDID: String) async throws {
-        try await answered(path.helperLine, deviceUDID: deviceUDID, timeoutSeconds: path.duration + 3)
+        try await touch(path.helperLine, deviceUDID: deviceUDID, timeoutSeconds: path.duration + 3)
     }
 
     /// Plays a stroke given in screen points.
@@ -86,6 +96,33 @@ public actor SimulatorDirectInputClient {
     /// Room for the helper's first key to connect to the guest's keyboard
     /// daemon, which may have to start first.
     private static let keyboardTimeout: TimeInterval = 7
+
+    /// An answered touch, refused up front on a boot whose touch screen iOS has
+    /// dropped. Live touches are not checked: they cannot wait the second or two
+    /// a first check takes, nor report what it finds.
+    private func touch(_ line: String, deviceUDID: String, timeoutSeconds: TimeInterval) async throws {
+        if try await touchScreenIsCutOff(deviceUDID: deviceUDID) {
+            throw SimToolError(SimulatorTouchScreen.cutOffMessage(deviceUDID: deviceUDID))
+        }
+        try await answered(line, deviceUDID: deviceUDID, timeoutSeconds: timeoutSeconds)
+    }
+
+    /// Once per helper session: the helper has claimed the screen by then, so
+    /// the verdict holds for as long as the session lives. A toolchain whose
+    /// CoreSimulator cannot say when the device booted is not checked.
+    private func touchScreenIsCutOff(deviceUDID: String) async throws -> Bool {
+        let current = try await session(for: deviceUDID)
+        if touchScreenChecked === current { return touchScreenCutOff }
+        var cutOff = false
+        if let answer = try? await answered(SimulatorDirectInputCommand.boot.line, deviceUDID: deviceUDID, timeoutSeconds: 2),
+           let bootedAt = SimulatorDirectInputCommand.bootedAt(fromAnswer: answer) {
+            cutOff = await touchScreenCheck.isCutOff(deviceUDID: deviceUDID, bootedAt: bootedAt)
+            DirectInputLog.write("touch screen udid=\(deviceUDID) bootedAt=\(bootedAt) cutOff=\(cutOff)")
+        }
+        touchScreenChecked = current
+        touchScreenCutOff = cutOff
+        return cutOff
+    }
 
     private func stream(line: String, deviceUDID: String) async {
         do {
@@ -296,6 +333,16 @@ struct SimulatorDirectInputCommand: Equatable {
         Self(line: "hwkeyboard \(connected ? 1 : 0)")
     }
 
+    static let boot = Self(line: "boot")
+
+    /// Reads `ok SECONDS`, the helper's answer to `boot`: when the device last
+    /// booted, in seconds since 1970.
+    static func bootedAt(fromAnswer answer: String) -> Date? {
+        let parts = answer.split(separator: " ")
+        guard parts.count == 2, parts[0] == "ok", let seconds = Double(parts[1]), seconds > 0 else { return nil }
+        return Date(timeIntervalSince1970: seconds)
+    }
+
     /// Reads `ok W H SCALE`, the helper's answer to `size`.
     static func screenSize(fromAnswer answer: String) -> SimulatorScreenSize? {
         let parts = answer.split(separator: " ").dropFirst().compactMap { Double($0) }
@@ -493,6 +540,7 @@ enum SimulatorDirectInputHelperSource {
     //   path P,MS,X,Y …         timed touch path: P is d, m or u, MS the offset
     //                           from the start; the finger is lifted even on error
     //   size                    "ok W H SCALE" — the screen in points
+    //   boot                    "ok SECONDS" — when the device last booted (since 1970)
     //   press K [M …]           key K with up to three modifier keys M held
     //   button PAGE USAGE       presses one HID usage of another page; 12 184
     //                           (Eject) toggles the software keyboard
@@ -602,6 +650,19 @@ enum SimulatorDirectInputHelperSource {
     static void *(*buildUsage)(unsigned int target, unsigned int page, unsigned int usage, unsigned int op);
     static BOOL keysOverDTUHID = NO;
 
+    // iOS 26.4 and 27 (CoreSimulator 1171.7) stand down a touch screen nothing
+    // has used yet in the boot when the simulator's HID daemon, dtuhidd, starts,
+    // and never take it back: every Indigo touch after that is dropped without
+    // a trace. Any Indigo event the screen receives counts as use, so the helper
+    // sends one as it starts, before its own keys or anything later can start
+    // dtuhidd: an unassigned Consumer usage addressed to the digitizer, which
+    // nothing in iOS acts on. (A lone touch-up also works on 26.4, but on 27 it
+    // never reaches the screen.)
+    static void claimTouchScreen(void) {
+      void *msg = buildUsage ? buildUsage(0x32, 12, 0, 2) : NULL;
+      if (msg) { sendMessage(client, sendSelector, msg, YES, nil, nil); }
+    }
+
     static BOOL openClient(NSString *udid) {
       NSError *err = nil;
       device = bootedDevice(udid, &err);
@@ -624,6 +685,7 @@ enum SimulatorDirectInputHelperSource {
       buildUsage = (void *)dlsym(RTLD_DEFAULT, "IndigoHIDMessageForHIDArbitrary");
       NSString *coreSimulator = [NSBundle bundleForClass:[device class]].infoDictionary[@"CFBundleVersion"];
       keysOverDTUHID = coreSimulator && [coreSimulator compare:@"1155.4" options:NSNumericSearch] != NSOrderedAscending;
+      claimTouchScreen();
       return YES;
     }
 
@@ -856,7 +918,7 @@ enum SimulatorDirectInputHelperSource {
 
     // MARK: - commands
 
-    typedef enum { CmdDown, CmdMove, CmdUp, CmdTap, CmdSwipe, CmdPath, CmdSize, CmdKey, CmdPress, CmdButton, CmdHardwareKeyboard, CmdQuit } Kind;
+    typedef enum { CmdDown, CmdMove, CmdUp, CmdTap, CmdSwipe, CmdPath, CmdSize, CmdBoot, CmdKey, CmdPress, CmdButton, CmdHardwareKeyboard, CmdQuit } Kind;
     typedef struct {
       Kind kind; int count; Spot spot; double x2, y2; int ms; char *text;
       unsigned usage, page, mods[3]; int modCount; BOOL on;   // keyboard commands
@@ -949,6 +1011,14 @@ enum SimulatorDirectInputHelperSource {
           float scale = ((float (*)(id, SEL))objc_msgSend)(type, sel_registerName("mainScreenScale"));
           if (size.width <= 0 || size.height <= 0 || scale <= 0) { printf("err\n"); }
           else { printf("ok %.3f %.3f %.3f\n", size.width / scale, size.height / scale, scale); }
+          fflush(stdout);
+          return YES;
+        }
+        case CmdBoot: {
+          SEL selector = sel_registerName("lastBootedAt");
+          id booted = [device respondsToSelector:selector] ? ((id (*)(id, SEL))objc_msgSend)(device, selector) : nil;
+          if ([booted isKindOfClass:[NSDate class]]) { printf("ok %.3f\n", [booted timeIntervalSince1970]); }
+          else { printf("err\n"); }
           fflush(stdout);
           return YES;
         }
@@ -1045,6 +1115,7 @@ enum SimulatorDirectInputHelperSource {
       int n = sscanf(rest, "%lf %lf %lf %lf %d", &v[0], &v[1], &v[2], &v[3], &ms);
       if (!strcmp(name, "path")) { c->kind = CmdPath; c->text = strdup(rest); return YES; }
       if (!strcmp(name, "size")) { c->kind = CmdSize; return YES; }
+      if (!strcmp(name, "boot")) { c->kind = CmdBoot; return YES; }
       if (!strcmp(name, "q") || !strcmp(name, "quit")) { c->kind = CmdQuit; return YES; }
       if (!strcmp(name, "tap") && n >= 2) {
         c->kind = CmdTap; c->spot.x = v[0]; c->spot.y = v[1]; c->ms = n >= 3 ? (int)v[2] : 60; return YES;
