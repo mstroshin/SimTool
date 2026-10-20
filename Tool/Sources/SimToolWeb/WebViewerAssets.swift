@@ -5264,8 +5264,8 @@ enum WebViewerAssets {
           <meta name="viewport" content="width=device-width, initial-scale=1">
           <meta name="theme-color">
           <title>{{title}}</title>
-          <style>{{viewer.css}}</style>
-          <script>{{js/theme.js}}</script>
+          {{viewer.css}}
+          {{js/theme.js}}
         </head>
         <body>
           <svg width="0" height="0" style="position:absolute" aria-hidden="true">
@@ -5433,7 +5433,7 @@ enum WebViewerAssets {
           <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
           <input id="photosFile" type="file" accept="image/*,video/*" multiple hidden>
 
-          <script>{{js/touch.js}}
+          {{js/touch.js}}
         {{js/keyboard.js}}
         {{js/logic.js}}
         {{js/core.js}}
@@ -5448,7 +5448,7 @@ enum WebViewerAssets {
         {{js/tests.js}}
         {{js/palette.js}}
         {{js/events.js}}
-        {{js/main.js}}</script>
+        {{js/main.js}}
         </body>
         </html>
         """#

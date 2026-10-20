@@ -57,7 +57,8 @@ public struct StreamServerConfig: Sendable {
 public final class StreamServer: @unchecked Sendable {
     public let config: StreamServerConfig
 
-    private let server = HttpServer()
+    /// Every route answers through `SameOriginPolicy`.
+    private let server: HttpServer
     /// Network, logs, state, tests and launches, pushed to viewers as they
     /// change. Its instance id also tells clients that poll by cursor which run
     /// of the server numbered what they hold.
@@ -107,6 +108,7 @@ public final class StreamServer: @unchecked Sendable {
 
     public init(config: StreamServerConfig) {
         self.config = config
+        self.server = SameOriginHttpServer(policy: SameOriginPolicy(serverHost: config.host))
         self.testSessions = TestSessionController(
             store: TestSessionStore(root: config.testSessionsRoot),
             device: config.device,
@@ -127,6 +129,7 @@ public final class StreamServer: @unchecked Sendable {
         installRoutes()
         wireEncoders()
         wireInspectorEvents()
+        server.listenAddressIPv4 = Self.listenAddress(forHost: config.host)
         try server.start(config.port, forceIPv4: true, priority: .userInteractive)
         if config.captureEnabled {
             try frameCapture.start(deviceUDID: config.device.udid, onFrame: frameHandler)
@@ -150,14 +153,29 @@ public final class StreamServer: @unchecked Sendable {
     public var baseURL: String { "http://\(config.host):\(config.port)" }
     public var apiURL: String { "\(baseURL)/api/v1" }
 
-    private func installRoutes() {
-        server.middleware.append { request in
-            guard request.method == "OPTIONS" else { return nil }
-            return self.emptyResponse(statusCode: 204, reason: "No Content")
-        }
+    /// The address the socket binds: the configured host, so a server started
+    /// on 127.0.0.1 is not reachable from the network. `0.0.0.0`, an empty
+    /// host or a name other than localhost listen on every interface.
+    static func listenAddress(forHost host: String) -> String? {
+        let host = host.lowercased()
+        if host == "localhost" { return "127.0.0.1" }
+        var address = in_addr()
+        guard host != "0.0.0.0", inet_pton(AF_INET, host, &address) == 1 else { return nil }
+        return host
+    }
 
+    private func installRoutes() {
         server["/"] = { _ in
             .ok(.html(WebViewer.html()))
+        }
+
+        // The viewer's stylesheets and scripts, as separate files.
+        for path in WebViewer.assetPaths {
+            guard let asset = WebViewer.servedAsset(path) else { continue }
+            let data = Data(asset.contents.utf8)
+            server.GET[WebViewer.assetsPath + path] = { _ in
+                self.dataResponse(data, contentType: asset.contentType)
+            }
         }
 
         server["/health"] = { _ in
@@ -560,7 +578,6 @@ public final class StreamServer: @unchecked Sendable {
                 "Content-Type": "application/octet-stream",
                 "Cache-Control": "no-cache, no-store",
                 "Connection": "keep-alive",
-                "Access-Control-Allow-Origin": "*",
             ]) { writer in
                 let semaphore = DispatchSemaphore(value: 0)
                 client.setWriter { data in
@@ -1289,9 +1306,6 @@ public final class StreamServer: @unchecked Sendable {
             "Content-Type": "video/mp4",
             "Accept-Ranges": "bytes",
             "Cache-Control": "no-cache, no-store",
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "Content-Type",
-            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
         ]
         switch HTTPRange.parse(header: rangeHeader, fileSize: size) {
         case .unsatisfiable:
@@ -1341,22 +1355,10 @@ public final class StreamServer: @unchecked Sendable {
         return .raw(statusCode, reason, [
             "Content-Type": contentType,
             "Cache-Control": "no-cache, no-store",
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "Content-Type",
-            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
             "Content-Length": "\(data.count)",
         ]) { writer in
             try? writer.write(data)
         }
-    }
-
-    private func emptyResponse(statusCode: Int, reason: String) -> HttpResponse {
-        .raw(statusCode, reason, [
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "Content-Type",
-            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-            "Content-Length": "0",
-        ], nil)
     }
 }
 

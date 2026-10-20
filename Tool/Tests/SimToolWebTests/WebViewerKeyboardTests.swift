@@ -4,7 +4,7 @@ import XCTest
 
 final class WebViewerKeyboardTests: XCTestCase {
     func testToolbarHasTheSoftwareKeyboardButtonAndTheKeyboardToggle() throws {
-        let html = WebViewer.html()
+        let html = WebViewer.pageWithAssets
         XCTAssertTrue(html.contains(#"id="softKeyboardButton" aria-label="Show or hide the software keyboard""#), "missing the software keyboard button")
         XCTAssertTrue(html.contains("action: \"software-keyboard\""), "the button must toggle the software keyboard")
         XCTAssertTrue(html.contains(#"id="keyboardToggle" aria-pressed="false""#), "the keyboard toggle must say whether it is on")
@@ -13,7 +13,7 @@ final class WebViewerKeyboardTests: XCTestCase {
     }
 
     func testTheScreenShowsWhereTheKeysGo() {
-        let html = WebViewer.html()
+        let html = WebViewer.pageWithAssets
         XCTAssertTrue(html.contains(".app.keys-on .screen {"), "missing the ring around the screen")
         XCTAssertTrue(html.contains(".app.keys-on.keys-paused .screen {"), "missing the paused ring")
         XCTAssertTrue(html.contains("id=\"sbKeys\""), "missing the status bar cell")
@@ -21,7 +21,7 @@ final class WebViewerKeyboardTests: XCTestCase {
     }
 
     func testThePageKeepsItsOwnKeysAndTheModeChord() throws {
-        let html = WebViewer.html()
+        let html = WebViewer.pageWithAssets
         let handler = try XCTUnwrap(html.range(of: "window.addEventListener(\"keydown\""))
         let body = String(html[handler.upperBound...].prefix(900))
         // ⇧⌘K first, before any field or menu can take it: it is how the mode is left.

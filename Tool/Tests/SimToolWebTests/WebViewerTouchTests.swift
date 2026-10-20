@@ -3,12 +3,18 @@ import JavaScriptCore
 import XCTest
 
 final class WebViewerTouchTests: XCTestCase {
-    func testTheWholePageScriptParses() throws {
-        let html = WebViewer.html()
-        let open = try XCTUnwrap(html.range(of: "<script>"))
-        let close = try XCTUnwrap(html.range(of: "</script>", range: open.upperBound..<html.endIndex))
-        let script = String(html[open.upperBound..<close.lowerBound])
+    // Each script on its own, and all of them as one text: they share one
+    // global scope, so a name declared in two files breaks the later one.
+    func testThePageScriptsParse() throws {
+        let scripts = WebViewer.pageScripts
+        XCTAssertFalse(scripts.isEmpty)
+        for path in scripts {
+            try assertParses(WebViewer.asset(path), "web/\(path)")
+        }
+        try assertParses(scripts.map(WebViewer.asset).joined(separator: "\n"), "the page's scripts together")
+    }
 
+    private func assertParses(_ script: String, _ what: String) throws {
         let context = try XCTUnwrap(JSGlobalContextCreate(nil))
         defer { JSGlobalContextRelease(context) }
         let source = JSStringCreateWithUTF8CString(script)
@@ -19,11 +25,11 @@ final class WebViewerTouchTests: XCTestCase {
             defer { JSStringRelease(text) }
             return JSStringCopyCFString(nil, text) as String
         }
-        XCTAssertTrue(valid, message ?? "syntax error")
+        XCTAssertTrue(valid, "\(what): \(message ?? "syntax error")")
     }
 
     func testCanvasStreamsTheFingerInsteadOfPostingTapsAndSwipes() {
-        let html = WebViewer.html()
+        let html = WebViewer.pageWithAssets
         XCTAssertTrue(html.contains("/api/v1/input/stream"), "the canvas must stream over the live-touch socket")
         XCTAssertTrue(html.contains("id=\"touchLayer\""), "missing touch indicator layer")
         XCTAssertTrue(html.contains("\"wheel\""), "wheel/trackpad scrolling must drive a finger")

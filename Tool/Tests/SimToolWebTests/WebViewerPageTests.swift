@@ -4,7 +4,7 @@ import XCTest
 // Contracts of the assembled page: what it talks to, how it is put together,
 // and the promises the redesign made — the structure, not the styling.
 final class WebViewerPageTests: XCTestCase {
-    private let page = WebViewer.html()
+    private let page = WebViewer.pageWithAssets
 
     func testTheInspectorIsATablistWithAPanelPerTab() throws {
         for tab in ["network", "logs", "state", "ax", "tests"] {
@@ -127,10 +127,13 @@ final class WebViewerPageTests: XCTestCase {
     // A pinned theme is on <html> before the body is parsed, so the page never
     // paints in the other theme first; the button names what it switches to.
     func testAPinnedThemeIsAppliedBeforeTheBody() throws {
-        let body = try XCTUnwrap(page.range(of: "<body>"))
-        let head = page[..<body.lowerBound]
-        XCTAssertTrue(head.contains(#"localStorage.getItem(THEME_KEY)"#))
-        XCTAssertTrue(head.contains("\napplyTheme();\n"), "the stored theme is applied while the head is parsed")
+        let html = WebViewer.html()
+        let body = try XCTUnwrap(html.range(of: "<body>"))
+        let head = html[..<body.lowerBound]
+        XCTAssertTrue(head.contains(#"<script src="/assets/js/theme.js"></script>"#), "theme.js runs while the head is parsed: in <head>, neither defer nor async")
+        let theme = WebViewer.asset("js/theme.js")
+        XCTAssertTrue(theme.contains(#"localStorage.getItem(THEME_KEY)"#))
+        XCTAssertTrue(theme.contains("\napplyTheme();\n"), "the stored theme is applied while the head is parsed")
         XCTAssertTrue(page.contains(#"id="themeButton" aria-label="Switch to the light theme""#))
         XCTAssertTrue(page.contains(#"$("themeButton").addEventListener("click", toggleTheme);"#))
     }

@@ -33,6 +33,52 @@ final class WebViewerAssetsTests: XCTestCase {
         XCTAssertFalse(page.contains("{{"), "a {{marker}} in web/viewer.html names no file under web/")
     }
 
+    // Nothing the page runs or styles itself with is inline, so it works
+    // under a policy that allows only the server's own files.
+    func testThePageLoadsItsStylesAndScriptsAsFiles() throws {
+        let page = WebViewer.html()
+        XCTAssertTrue(page.contains(#"<link rel="stylesheet" href="/assets/viewer.css">"#))
+        XCTAssertEqual(WebViewer.pageScripts.last, "js/main.js", "main.js starts the viewer, after everything it calls")
+        let inline = try NSRegularExpression(pattern: #"<script(?![^>]*\bsrc=)[^>]*>|<style\b"#)
+        XCTAssertEqual(inline.numberOfMatches(in: page, range: NSRange(page.startIndex..., in: page)), 0, "an inline <script> or <style> in the page")
+        for path in WebViewer.pageAssets {
+            XCTAssertNotNil(WebViewer.servedAsset(path), "the page loads /assets/\(path), which is not served")
+        }
+    }
+
+    // Handlers in markup — onclick="…", javascript: links — are inline script too.
+    func testNoMarkupCarriesScript() throws {
+        let handler = try NSRegularExpression(pattern: #"\son[a-z]+\s*=\s*["']|javascript:"#, options: .caseInsensitive)
+        for (path, contents) in WebViewerAssets.files where path.hasSuffix(".html") || path.hasSuffix(".js") {
+            let matches = handler.matches(in: contents, range: NSRange(contents.startIndex..., in: contents))
+                .map { String(contents[Range($0.range, in: contents)!]) }
+            XCTAssertEqual(matches, [], "web/\(path)")
+        }
+    }
+
+    // The server's CSP allows the page its own files and nothing else: code
+    // made from strings, workers and outside stylesheets would fail in the
+    // browser while every test here passes.
+    func testTheViewerNeedsNothingItsContentSecurityPolicyForbids() throws {
+        let script = try NSRegularExpression(pattern: #"\beval\s*\(|new\s+Function\s*\(|set(?:Timeout|Interval)\s*\(\s*["'`]|new\s+(?:Shared)?Worker\s*\(|importScripts\s*\("#)
+        let style = try NSRegularExpression(pattern: #"@import|url\(\s*["']?(?:https?:)?//"#, options: .caseInsensitive)
+        for (path, contents) in WebViewerAssets.files {
+            let pattern = path.hasSuffix(".css") ? style : script
+            let matches = pattern.matches(in: contents, range: NSRange(contents.startIndex..., in: contents))
+                .map { String(contents[Range($0.range, in: contents)!]) }
+            XCTAssertEqual(matches, [], "web/\(path)")
+        }
+    }
+
+    func testTheServerServesStylesAndScriptsButNotTheTemplate() throws {
+        XCTAssertEqual(WebViewer.servedAsset("viewer.css")?.contentType, "text/css; charset=utf-8")
+        XCTAssertEqual(WebViewer.servedAsset("js/main.js")?.contentType, "text/javascript; charset=utf-8")
+        XCTAssertEqual(WebViewer.servedAsset("js/main.js")?.contents, WebViewerAssets.files["js/main.js"])
+        XCTAssertNil(WebViewer.servedAsset("viewer.html"), "the template is served only filled in, at /")
+        XCTAssertNil(WebViewer.servedAsset("js/missing.js"))
+        XCTAssertEqual(Set(WebViewer.assetPaths), Set(WebViewerAssets.files.keys.filter { $0 != "viewer.html" }))
+    }
+
     func testTheTitleIsEscaped() {
         XCTAssertTrue(WebViewer.html(title: "<b>&\"").contains("<title>&lt;b&gt;&amp;&quot;</title>"))
     }
