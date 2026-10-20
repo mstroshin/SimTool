@@ -592,7 +592,7 @@ build:
   # settings:                       # optional xcodebuild build settings for every build
   #   MACOSX_DEPLOYMENT_TARGET: "15.0"
 server:                             # optional viewer settings
-  host: 127.0.0.1
+  host: 127.0.0.1                   # the address it listens on; 0.0.0.0 opens it to the network
   port: 3200
 deeplinks:
   - name: Details

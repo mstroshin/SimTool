@@ -123,6 +123,7 @@ public final class StreamServer: @unchecked Sendable {
         started = true
         installRoutes()
         wireEncoders()
+        server.listenAddressIPv4 = Self.listenAddress(forHost: config.host)
         try server.start(config.port, forceIPv4: true, priority: .userInteractive)
         if config.captureEnabled {
             try frameCapture.start(deviceUDID: config.device.udid, onFrame: frameHandler)
@@ -142,6 +143,17 @@ public final class StreamServer: @unchecked Sendable {
 
     public var baseURL: String { "http://\(config.host):\(config.port)" }
     public var apiURL: String { "\(baseURL)/api/v1" }
+
+    /// The address the socket binds: the configured host, so a server started
+    /// on 127.0.0.1 is not reachable from the network. `0.0.0.0`, an empty
+    /// host or a name other than localhost listen on every interface.
+    static func listenAddress(forHost host: String) -> String? {
+        let host = host.lowercased()
+        if host == "localhost" { return "127.0.0.1" }
+        var address = in_addr()
+        guard host != "0.0.0.0", inet_pton(AF_INET, host, &address) == 1 else { return nil }
+        return host
+    }
 
     private func installRoutes() {
         server.middleware.append { request in
