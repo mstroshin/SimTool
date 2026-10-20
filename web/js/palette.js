@@ -35,6 +35,9 @@ function paletteCommands() {
     if (!test.parseError) commands.push(["Tests", "play", "Run “" + (test.name || test.file) + "”", "", () => { openTab("tests"); tests.view = "tests"; tests.selectedFile = test.file; renderTests(); runTest(test.file); }]);
   }
   if (app.dataset.mode === "replay") commands.push(["Tests", "film", "Back to the live screen", "Esc", exitReplay]);
+  const otherTheme = shownTheme() === "dark" ? "light" : "dark";
+  commands.push(["View", otherTheme === "light" ? "sun" : "moon", "Use the " + otherTheme + " theme", "", toggleTheme]);
+  if (theme.pinned) commands.push(["View", systemTheme() === "light" ? "sun" : "moon", "Follow the system theme (" + systemTheme() + ")", "", () => setTheme(null)]);
   commands.push(["Help", "help", "Keyboard shortcuts", "", showShortcuts]);
   return commands.map(([group, glyph, label, kbd, run]) => ({ group, glyph, label, kbd, run }));
 }

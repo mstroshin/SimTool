@@ -93,6 +93,8 @@ onConnection((state) => {
   if (inspector.tab === "logs") renderLogs();
 });
 
+$("themeButton").addEventListener("click", toggleTheme);
+renderTheme();
 setInspectorOpen(inspector.open);
 setTab(inspector.tab);
 updateKeyboardIndicator();

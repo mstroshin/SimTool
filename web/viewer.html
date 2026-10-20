@@ -3,9 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#1d2024">
+  <meta name="theme-color">
   <title>{{title}}</title>
   <style>{{viewer.css}}</style>
+  <script>{{js/theme.js}}</script>
 </head>
 <body>
   <svg width="0" height="0" style="position:absolute" aria-hidden="true">
@@ -40,6 +41,8 @@
       <symbol id="i-mock" viewBox="0 0 16 16"><path d="M3 3.5h10v3.8a5 5 0 0 1-10 0Z"/><path d="M5.8 7h.01M10.2 7h.01M6 9.6c1.2.9 2.8.9 4 0"/></symbol>
       <symbol id="i-terminal" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="1.2"/><path d="m4.5 6 2.5 2-2.5 2M8.5 10.5h3"/></symbol>
       <symbol id="i-help" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M6.3 6.3a1.8 1.8 0 1 1 2.4 1.7c-.5.2-.7.6-.7 1.1v.3M8 11.4h.01"/></symbol>
+      <symbol id="i-sun" viewBox="0 0 16 16"><circle cx="8" cy="8" r="3"/><path d="M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1"/></symbol>
+      <symbol id="i-moon" viewBox="0 0 16 16"><path d="M13 9.6A5.5 5.5 0 0 1 6.4 3a5.5 5.5 0 1 0 6.6 6.6Z"/></symbol>
       <symbol id="i-filter" viewBox="0 0 16 16"><path d="M2.5 3.5h11l-4.2 5v4l-2.6 1v-5Z"/></symbol>
     </defs>
   </svg>
@@ -70,6 +73,7 @@
         <button class="cmdk" type="button" id="paletteButton" aria-haspopup="dialog" aria-label="Commands" aria-keyshortcuts="Shift+Meta+P">
           <svg class="ic" aria-hidden="true"><use href="#i-search"/></svg><span class="cmdk-label">Commands</span><kbd>⇧⌘P</kbd>
         </button>
+        <button class="tb-btn" type="button" id="themeButton" aria-label="Switch to the light theme" data-tip="Switch to the light theme"><svg class="ic" aria-hidden="true"><use href="#i-sun"/></svg></button>
         <button class="tb-btn" type="button" id="inspectorToggle" aria-pressed="true" aria-controls="inspector" aria-label="Inspector" data-tip="Show or hide the inspector" data-key="⌥⌘0" aria-keyshortcuts="Alt+Meta+0"><svg class="ic" aria-hidden="true"><use href="#i-panel"/></svg></button>
       </div>
     </header>

@@ -231,4 +231,16 @@ final class WebViewerLogicTests: XCTestCase {
         XCTAssertEqual(value(context, "plural(1, 'step', 'steps') + ' / ' + plural(2, 'step', 'steps')"), "1 step / 2 steps")
         XCTAssertEqual(value(context, "runtimeName('com.apple.CoreSimulator.SimRuntime.iOS-26-4')"), "iOS 26.4")
     }
+
+    // MARK: - Theme
+
+    // The theme button pins the other theme, and forgets the pin once the other
+    // theme is the system's: two clicks always lead back to following the system.
+    func testTheThemeButtonPinsTheOtherThemeUnlessTheSystemShowsIt() throws {
+        let context = try makeContext()
+        XCTAssertEqual(value(context, "themeAfterToggle('dark', 'dark')"), "light")
+        XCTAssertEqual(value(context, "themeAfterToggle('light', 'dark')"), "null", "back to the system's dark")
+        XCTAssertEqual(value(context, "themeAfterToggle('light', 'light')"), "dark")
+        XCTAssertEqual(value(context, "themeAfterToggle('dark', 'light')"), "null", "back to the system's light")
+    }
 }

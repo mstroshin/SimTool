@@ -522,3 +522,12 @@ function axScreenFrame(tree) {
   }
   return best;
 }
+
+// ---- Theme ----
+
+// The theme a click on the theme button pins: the other one — or none, so the page
+// follows the system again, when the other one is what the system shows anyway.
+function themeAfterToggle(shown, system) {
+  const next = shown === "dark" ? "light" : "dark";
+  return next === system ? null : next;
+}

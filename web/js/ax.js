@@ -332,7 +332,7 @@ function drawRedlines() {
     if (node.frame.width > screen.width * 1.05 || node.frame.height > screen.height * 1.05) continue;
     shapes += rect(node, "ghost");
   }
-  if (hover && axHasFrame(hover)) shapes += rect(hover, "hover");
+  if (hover && axHasFrame(hover)) shapes += rect(hover, "hover-halo") + rect(hover, "hover");
   const place = (x, y, value, cls) => {
     text += '<span class="rl' + (cls ? " " + cls : "") + '" style="left:' + ((x - screen.x) / screen.width * 100) + "%;top:" + ((y - screen.y) / screen.height * 100) + '%">' + escapeHTML(value) + "</span>";
   };

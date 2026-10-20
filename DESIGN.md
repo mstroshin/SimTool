@@ -93,16 +93,17 @@ explains them.
 
 ## Colors
 
-A graphite ground in four steps, three ink levels, and four inks that each mean
-exactly one thing.
+A ground in four steps, three ink levels, and four inks that each mean exactly
+one thing — in two themes: **graphite sheet** (dark) and **drafting film**
+(light). The values below are graphite's; film's are in the table under Themes.
 
 ### Neutral
 - **g0 stage** `#0e0f11` — behind the device; the darkest plane.
 - **g1 panel** `#17191c` — the inspector and detail panes.
 - **g2 chrome** `#1d2024` — toolbar, tabs, headers, menus, status bar.
 - **g3 hover / g4 pressed** — interaction states only.
-- **ink1** (14.6:1 on g1) for content, **ink2** (7.9:1) for secondary text,
-  **ink3** (5.2:1) for meta — every text pair passes WCAG AA.
+- **ink1** for content, **ink2** for secondary text, **ink3** for meta — every
+  text pair passes WCAG AA in both themes.
 
 ### Primary — accent `#6aa4ff`
 Selection, focus, the primary action, redlines. Nothing decorative.
@@ -122,9 +123,37 @@ app's own data never uses it.
   verdict, mock, selection. Words in a message never colour a line.
 - **Earlier launches read quieter.** Rows from a previous app launch use ink2;
   their failures keep their colour.
-- **Every colour is a token.** Literal colours live only on `:root`, so a theme
-  restates tokens and nothing else (a light "drafting film" theme is specified
-  but not shipped).
+- **Every colour is a token.** Literal colours live only on `:root`, each as
+  `light-dark(<film>, <graphite>)`; rules only name tokens. The device's screen
+  is the app's, so `--screen-black` and `--screen-ink` (words on the screen) are
+  the same in both themes.
+- **Meta steps up on a tint.** On a selected row, ink3 reads as ink2; a
+  destructive menu item lights up in err-bg, not the accent tint; the Error badge
+  on an error row is outlined, not filled — tints on tints fall under 4.5:1.
+
+### Themes
+The viewer follows the system's appearance (`color-scheme: light dark`). The
+sun / moon button in the toolbar (and "Use the light / dark theme" in the
+palette) pins the other theme for this browser; a pin that matches the system
+is dropped, so two clicks always lead back to following it. A pin is applied in
+`<head>`, before anything is drawn.
+
+| Token | Drafting film (light) | Graphite (dark) | Text contrast, min over g0–g3 (film / graphite) |
+|---|---|---|---|
+| g0 / g1 / g2 / g3 / g4 | `#e6e8eb` / `#f7f8f9` / `#ffffff` / `#eceef1` / `#e1e4e8` | `#0e0f11` / `#17191c` / `#1d2024` / `#25292e` / `#2e3339` | — |
+| line hair / thin / thick | ink `rgb(16 20 26)` at 7 / 13 / 28 % | white at 6 / 11 / 22 % | — |
+| ink1 / ink2 / ink3 | `#15171a` / `#4a5059` / `#5f6670` | `#e8eaed` / `#a9aeb5` / `#8d939b` | 14.6 / 6.6 / 4.7 — 12.1 / 6.6 / 4.7 |
+| accent, on-accent | `#1f5fd6`, `#ffffff` (5.7:1) | `#6aa4ff`, `#08142a` (7.3:1) | 4.7 — 5.8 |
+| course | `#7442d6` | `#b48fff` | 4.9 — 5.8 |
+| ok / warn / err | `#18744b` / `#925600` / `#b82833` | `#45c08a` / `#e7a93f` / `#f26b76` | 4.7 / 4.8 / 5.0 — 6.4 / 7.1 / 5.0 |
+| JSON string / number / literal | `#2b7236` / `#8a5a00` / `#1f5fd6` | `#9fd49b` / `#e7c27a` / `#8fb8ff` | 4.8 / 4.8 / 4.7 — 8.6 / 8.6 / 7.3 |
+| overlay shadow | `rgba(16,20,26,.18)` | `rgba(0,0,0,.55)` | — |
+
+Film keeps the redesign's proposal except two inks darkened to hold AA where
+they really sit: **err** `#c42d39` → `#b82833` (the exclude chip on the filter
+field and the Error badge on an error row were 4.2–4.4:1) and **JSON string**
+`#2f7a3a` → `#2b7236` (4.3:1 on the code block's g0). `WebViewerPageTests`
+checks every ink on g0–g3 in both themes.
 
 ## Typography
 
@@ -153,7 +182,8 @@ tabular figures for data, times, paths and numbers.
 
 Flat by default. Depth is drawn with hairline (6 %), thin (11 %) and thick (22 %)
 lines. Only overlays that float over content — menus, the command palette,
-dialogs, toasts, the offline card — carry one shadow: `0 16px 40px rgba(0,0,0,.55)`.
+dialogs, toasts, the offline card — carry one shadow: `0 16px 40px rgba(0,0,0,.55)`
+(film: ink at 18 %).
 
 ## Shapes
 
@@ -188,8 +218,10 @@ headers that sort; app launches as collapsible groups.
 
 ### Redlines (signature)
 Faint outlines on every element a test can name; a dashed outline on the
-element under the pointer; the picked element filled in accent with dimension
-lines and labels in points; rulers every 50 pt, labelled every 100 pt.
+element under the pointer — dark dashes on a light line, because it sits on the
+app, which is light or dark whatever the viewer's theme; the picked element
+filled in accent with dimension lines and labels in points; rulers every 50 pt,
+labelled every 100 pt.
 
 ## Do's and Don'ts
 
