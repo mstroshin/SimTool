@@ -58,6 +58,8 @@ public final class StreamServer: @unchecked Sendable {
     public let config: StreamServerConfig
 
     private let server = HttpServer()
+    /// Identifies this run of the server to clients that poll by cursor.
+    private let instanceId = UUID().uuidString
     private let clientManager = ClientManager()
     private let frameCapture = FrameCapture()
     private let h264Encoder = H264Encoder(fps: 60)
@@ -584,7 +586,10 @@ public final class StreamServer: @unchecked Sendable {
             stream: StreamPaths(),
             metrics: metricsPayload(),
             logApp: config.defaultLogApp,
-            testSessionsPath: config.testSessionsRoot.path
+            testSessionsPath: config.testSessionsRoot.path,
+            instanceId: instanceId,
+            runtime: config.device.runtime,
+            version: SimToolVersion.current
         )
     }
 

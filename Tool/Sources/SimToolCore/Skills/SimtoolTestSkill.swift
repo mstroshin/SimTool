@@ -436,10 +436,12 @@ extension AgentSkill {
         sessions are that project's history, and reading them here would answer "did my
         test pass?" with somebody else's run.
 
-        The viewer (`simtool serve --web`) has a **Tests** tab with two subtabs: *Tests*
-        lists the YAML tests with Run buttons and live progress, *History* lists the
-        recorded sessions with the timeline synced to the video — clicking a step seeks
-        the recording to that moment. One test runs at a time.
+        The viewer (`simtool serve --web`) has a **Tests** tab with two views: *Tests*
+        lists the YAML tests with Run buttons, live progress and each test's last
+        outcome in words, *History* lists the recorded sessions. A recording plays in the
+        screen's place with its steps marked on the scrubber, the timeline synced to the
+        video — clicking a step seeks the recording to that moment. One test runs at a
+        time.
 
         ## Handing it on
 

@@ -62,6 +62,20 @@ swift run simtool serve --device <udid-or-name> --port 3200
 Open `http://127.0.0.1:3200` after starting `serve` (the URL is printed on start),
 or pass `--web` to open the browser viewer automatically.
 
+The viewer is one window: the device on the left, the inspector on the right
+(**Network**, **Logs**, **State**, **Accessibility**, **Tests**), with a splitter
+between them that remembers where you leave it; in a narrow pane the inspector
+moves under the device instead of covering it. Under the device are its size in
+points, the frame rate and the pointer's position in points; the status bar at
+the bottom holds the session's facts — connection, device and runtime, UDID
+(click to copy), server, attached app, where the keys go, the simtool version.
+⇧⌘P opens a command palette with every action and test; the shortcuts follow
+Simulator.app and Xcode — ⇧⌘H Home, ⌘S screenshot, ⌃⌘Z shake, ⌥⌘0 show or hide
+the inspector — and ⌥1–5 switch inspector tabs, `/` filters the current list,
+↑/↓ move through it and Shift-F10 opens a row's menu. When the server goes away
+the viewer greys the last frame, says so, stops sending touches and reconnects
+by itself; a restarted server is noticed and its lists are reloaded.
+
 On the viewer's screen the mouse is a finger: it goes down on press, follows the
 pointer and lifts on release, so holding is a long press, holding and moving
 drags (icons, list reordering), and the release decides between a scroll that
@@ -71,16 +85,16 @@ The wheel or trackpad scrolls by dragging a finger too. Hold Option to add a
 second finger mirrored through the screen center — spreading or circling the
 pointer pinches or rotates — and Option-Shift to move both fingers together.
 
-The keyboard works as in Simulator.app. **⌨️** toggles the software keyboard
-(Toggle Software Keyboard). The **Keyboard** toggle, or ⇧⌘K, types into the
-simulator with the Mac keyboard and connects its hardware keyboard (Connect
-Hardware Keyboard), so iOS keeps the software keyboard out of the way until ⌨️
-or ⌘K brings it back. Keys travel as physical keys — the simulator's own layout
+The keyboard works as in Simulator.app. The software keyboard button toggles the
+software keyboard (Toggle Software Keyboard). The **Mac keyboard** toggle, or
+⇧⌘K, types into the simulator with the Mac keyboard and connects its hardware
+keyboard (Connect Hardware Keyboard), so iOS keeps the software keyboard out of
+the way until the button or ⌘K brings it back. Keys travel as physical keys — the simulator's own layout
 decides the character — with modifiers, arrows, ⌫, ⏎, Tab and Esc, which iOS
 uses; ⇧⌘K leaves the mode, and ⌘V pastes the Mac clipboard as text. A ring
-around the screen shows the keys go to the device; it turns dashed while they
-go elsewhere — to a SimTool field such as the inspector filter, which keeps
-its keys, or to another window. Off, the keyboard belongs to the page and the
+around the screen shows the keys go to the device, and the status bar says so;
+the ring turns dashed while they go elsewhere — to a SimTool field such as the
+inspector filter, which keeps its keys, or to another window. Off, the keyboard belongs to the page and the
 browser. Keys reach the simulator in a few milliseconds over the same helper as
 the finger; ⌘W, ⌘T and ⌘Q stay with the browser. Agents show and hide the
 software keyboard with `simtool input keyboard show|hide` and YAML tests with a
@@ -170,10 +184,17 @@ back to `simctl pbcopy` (text only) on older Xcode.
 In the browser viewer, ⌘V anywhere on the page outside its own fields pastes
 the Mac clipboard — text, or an image when it holds no text — into the
 simulator. Right-clicking the device screen opens a menu with the same
-**Paste** (it asks the browser for clipboard access), **Add Clipboard Image to
-Photos** and **Add Files to Photos…** (images and videos): both put the media
+**Paste** (it asks the browser for clipboard access), **Add clipboard image to
+Photos** and **Add files to Photos…** (images and videos) — both put the media
 in the simulator's Photos library (`simctl addmedia`), where a photo picker
-offers it. In the AX inspector the right-click keeps its element Copy menu.
+offers it — and **Save** or **Copy screenshot**. While the Accessibility tab
+picks elements, a right-click opens the element's menu instead.
+
+The **Accessibility** tab shows the served accessibility tree, with anonymous
+containers folded away, and picks elements on the screen: the picked element is
+drawn with its distances to the screen edges and to the element under the
+pointer, in points, next to rulers along the screen. Its details offer it as a
+YAML step (`- tap: { id: About }`) and as a `simtool input tap` command.
 
 ### Tests and sessions
 
@@ -181,9 +202,12 @@ Declarative YAML tests in `<project>/.simtool/tests/` drive the simulator
 through the served accessibility tree: every step polls until its target
 appears, so tests need no sleeps. Each run is recorded as a reviewable test
 session — timestamped steps, a screen recording and the run's evidence — shown
-in the web viewer's **Tests** tab, which also lists the tests with Run buttons
-and live progress. Finished sessions play their recording in place of the live
-stream, and clicking a step seeks the video to that moment.
+in the web viewer's **Tests** tab, which also lists the tests with Run buttons,
+live progress and each test's last outcome in words (*Bug reproduced*,
+*Confirmed*, …), and keeps the recorded runs under **History**. A finished run's
+recording plays in the screen's place — Replay is a mode of the whole viewer,
+so the inspector stays usable — with each step marked on its scrubber, and
+clicking a step seeks the video to that moment.
 
 ```bash
 swift run simtool test run .simtool/tests/my-test.yml
@@ -400,13 +424,19 @@ calling the framework-agnostic API — `resolved()`/`makeFromEnvironment()` then
 `recordGRPC`/`startGRPCCall` — passing bounded message previews that surface as
 request/response bodies.
 
-Both viewers include a `Network` toggle that opens a Proxyman-style inspector
-beside the live stream: a request list plus a request/response detail pane
-(metadata/headers, body previews, status, timing, errors), updated live from the
-events endpoint.
+The viewer's **Network** tab is a Proxyman-style inspector beside the live
+stream: requests with sortable columns, quick filters (HTTP or gRPC, problems —
+failed calls in red, 4xx and client-side gRPC codes in amber — and mocked
+calls), pause and clear, and a detail pane under the list with headers or
+metadata, request and response bodies, status (gRPC codes by name) and errors —
+plus **Copy as cURL** / **grpcurl** and **Copy as YAML mock**, a `mocks:` entry
+that answers the call the same way in a test. It updates live from the events
+endpoint.
 
-Both viewers also include a `Logs` toggle that opens a live log inspector,
-filterable by source (`oslog`/`stdout`) and free text. When scoped to an app it
+The **Logs** tab is a live log inspector with level toggles, free text and
+field filters (`subsystem:`, `category:`, `process:`), follow mode — scrolling
+up to read turns it off, scrolling back to the end turns it on — and clear; a
+line is red only when its level is Error or Fault. When scoped to an app it
 captures both the app's OSLog and its `print`/stdout output (via
 `--console-pty`), polling the capture endpoint incrementally by cursor; no app
 instrumentation is required.
@@ -424,8 +454,8 @@ remains for that source.
 
 Start the server with `--app <bundle-id>` to scope log capture to one app. The
 server then captures that app's OSLog **and** `print`/stdout (instead of
-flooding with system-wide OSLog), advertises the app via `/config`, and both
-viewers auto-open the `Logs` panel scoped to it. Capturing relaunches the app
+flooding with system-wide OSLog), advertises the app via `/config`, and the
+viewer's Logs tab captures it from the start. Capturing relaunches the app
 once (to attach its console); after that, opening or closing the panel does
 **not** restart it — the server-owned capture stays alive and reopening reuses
 it:
