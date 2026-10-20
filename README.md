@@ -69,6 +69,8 @@ moves under the device instead of covering it. Under the device are its size in
 points, the frame rate and the pointer's position in points; the status bar at
 the bottom holds the session's facts — connection, device and runtime, UDID
 (click to copy), server, attached app, where the keys go, the simtool version.
+The viewer follows the system's light or dark appearance; the sun / moon button
+in the toolbar pins the other theme for this browser.
 ⇧⌘P opens a command palette with every action and test; the shortcuts follow
 Simulator.app and Xcode — ⇧⌘H Home, ⌘S screenshot, ⌃⌘Z shake, ⌥⌘0 show or hide
 the inspector — and ⌥1–5 switch inspector tabs, `/` filters the current list,

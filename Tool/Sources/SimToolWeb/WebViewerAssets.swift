@@ -19,6 +19,7 @@ enum WebViewerAssets {
         "js/state.js": jsStateJs,
         "js/stream.js": jsStreamJs,
         "js/tests.js": jsTestsJs,
+        "js/theme.js": jsThemeJs,
         "js/touch.js": jsTouchJs,
         "viewer.css": viewerCss,
         "viewer.html": viewerHtml,
@@ -357,7 +358,7 @@ enum WebViewerAssets {
             if (node.frame.width > screen.width * 1.05 || node.frame.height > screen.height * 1.05) continue;
             shapes += rect(node, "ghost");
           }
-          if (hover && axHasFrame(hover)) shapes += rect(hover, "hover");
+          if (hover && axHasFrame(hover)) shapes += rect(hover, "hover-halo") + rect(hover, "hover");
           const place = (x, y, value, cls) => {
             text += '<span class="rl' + (cls ? " " + cls : "") + '" style="left:' + ((x - screen.x) / screen.width * 100) + "%;top:" + ((y - screen.y) / screen.height * 100) + '%">' + escapeHTML(value) + "</span>";
           };
@@ -2440,6 +2441,15 @@ enum WebViewerAssets {
           }
           return best;
         }
+
+        // ---- Theme ----
+
+        // The theme a click on the theme button pins: the other one — or none, so the page
+        // follows the system again, when the other one is what the system shows anyway.
+        function themeAfterToggle(shown, system) {
+          const next = shown === "dark" ? "light" : "dark";
+          return next === system ? null : next;
+        }
         """#
 
     static let jsLogsJs = #"""
@@ -2803,6 +2813,8 @@ enum WebViewerAssets {
           if (inspector.tab === "logs") renderLogs();
         });
 
+        $("themeButton").addEventListener("click", toggleTheme);
+        renderTheme();
         setInspectorOpen(inspector.open);
         setTab(inspector.tab);
         updateKeyboardIndicator();
@@ -3215,6 +3227,9 @@ enum WebViewerAssets {
             if (!test.parseError) commands.push(["Tests", "play", "Run “" + (test.name || test.file) + "”", "", () => { openTab("tests"); tests.view = "tests"; tests.selectedFile = test.file; renderTests(); runTest(test.file); }]);
           }
           if (app.dataset.mode === "replay") commands.push(["Tests", "film", "Back to the live screen", "Esc", exitReplay]);
+          const otherTheme = shownTheme() === "dark" ? "light" : "dark";
+          commands.push(["View", otherTheme === "light" ? "sun" : "moon", "Use the " + otherTheme + " theme", "", toggleTheme]);
+          if (theme.pinned) commands.push(["View", systemTheme() === "light" ? "sun" : "moon", "Follow the system theme (" + systemTheme() + ")", "", () => setTheme(null)]);
           commands.push(["Help", "help", "Keyboard shortcuts", "", showShortcuts]);
           return commands.map(([group, glyph, label, kbd, run]) => ({ group, glyph, label, kbd, run }));
         }
@@ -4284,6 +4299,71 @@ enum WebViewerAssets {
         tabHandlers.tests = { show() { renderTests(); poller.poke("tests"); } };
         """#
 
+    static let jsThemeJs = #"""
+        // Theme: drafting film (light) or graphite sheet (dark). The page follows the
+        // system's appearance until a theme is picked here; the pick is kept per
+        // browser. This file runs in <head>, so a pinned theme is set before anything
+        // is drawn and the page never flashes the other one.
+
+        const THEME_KEY = "simtool.theme";  // the key store("theme", …) writes
+
+        // "light" | "dark" from a stored value; anything else means "follow the system".
+        function pinnedTheme(raw) {
+          try {
+            const value = JSON.parse(raw);
+            return value === "light" || value === "dark" ? value : null;
+          } catch (_) { return null; }
+        }
+
+        const theme = {
+          pinned: (() => { try { return pinnedTheme(localStorage.getItem(THEME_KEY)); } catch (_) { return null; } })(),
+          systemDark: matchMedia("(prefers-color-scheme: dark)")
+        };
+
+        const systemTheme = () => (theme.systemDark.matches ? "dark" : "light");
+        const shownTheme = () => theme.pinned || systemTheme();
+
+        function applyTheme() {
+          if (theme.pinned) document.documentElement.dataset.theme = theme.pinned;
+          else delete document.documentElement.dataset.theme;
+        }
+        applyTheme();
+
+        // Everything below runs once the page is up: it uses the toolbar and core.js.
+
+        function setTheme(pinned) {
+          theme.pinned = pinned;
+          if (pinned) store("theme", pinned);
+          else try { localStorage.removeItem(THEME_KEY); } catch (_) {}
+          applyTheme();
+          renderTheme();
+        }
+
+        function toggleTheme() {
+          setTheme(themeAfterToggle(shownTheme(), systemTheme()));
+        }
+
+        function renderTheme() {
+          const next = shownTheme() === "dark" ? "light" : "dark";
+          const button = $("themeButton");
+          button.setAttribute("aria-label", "Switch to the " + next + " theme");
+          button.dataset.tip = "Switch to the " + next + " theme";
+          button.querySelector("use").setAttribute("href", next === "light" ? "#i-sun" : "#i-moon");
+          // The browser's own chrome takes the toolbar's colour.
+          document.querySelector('meta[name="theme-color"]').content = getComputedStyle(document.querySelector(".toolbar")).backgroundColor;
+        }
+
+        // A system that changes its appearance moves an unpinned page by itself (CSS);
+        // the button follows. A pick made in another tab of this viewer applies here too.
+        theme.systemDark.addEventListener("change", () => { if (document.body) renderTheme(); });
+        window.addEventListener("storage", (event) => {
+          if (event.key !== THEME_KEY) return;
+          theme.pinned = pinnedTheme(event.newValue);
+          applyTheme();
+          renderTheme();
+        });
+        """#
+
     static let jsTouchJs = #"""
         // Live touch: one WebSocket carries the viewer's finger — and its keys —
         // to the device. Moves coalesce to one per animation frame; downs, ups and
@@ -4370,10 +4450,14 @@ enum WebViewerAssets {
     static let viewerCss = #"""
         /* SimTool viewer — "Drafting sheet".
            One line-weight system instead of glow and glass; colour only where it carries
-           a state. Every colour, size and radius below comes from the tokens on :root. */
+           a state. Every colour, size and radius below comes from the tokens on :root.
+
+           Two themes from one token layer: each colour is light-dark(<drafting film>, <graphite>).
+           The page follows the system's appearance; a theme picked in the viewer pins one
+           with data-theme on <html> (js/theme.js). */
 
         :root {
-          color-scheme: dark;
+          color-scheme: light dark;
           --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
           --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
           --fs-11: 11px; --fs-12: 12px; --fs-13: 13px; --fs-15: 15px;
@@ -4382,35 +4466,42 @@ enum WebViewerAssets {
           --h-toolbar: 44px; --h-tabs: 36px; --h-ptool: 38px; --h-row: 26px; --h-status: 26px;
           --dur: 140ms; --ease: cubic-bezier(.2, .7, .2, 1);
 
-          /* Graphite sheet */
-          --g0: #0e0f11;  /* stage behind the device */
-          --g1: #17191c;  /* panels */
-          --g2: #1d2024;  /* toolbars, headers, popovers */
-          --g3: #25292e;  /* hover */
-          --g4: #2e3339;  /* pressed */
-          --line-hair: rgba(255, 255, 255, .06);
-          --line-thin: rgba(255, 255, 255, .11);
-          --line-thick: rgba(255, 255, 255, .22);
-          --ink1: #e8eaed; --ink2: #a9aeb5; --ink3: #8d939b;
+          /* Drafting film (light) | graphite sheet (dark) */
+          --g0: light-dark(#e6e8eb, #0e0f11);  /* stage behind the device */
+          --g1: light-dark(#f7f8f9, #17191c);  /* panels */
+          --g2: light-dark(#ffffff, #1d2024);  /* toolbars, headers, popovers */
+          --g3: light-dark(#eceef1, #25292e);  /* hover */
+          --g4: light-dark(#e1e4e8, #2e3339);  /* pressed */
+          --line-hair: light-dark(rgba(16, 20, 26, .07), rgba(255, 255, 255, .06));
+          --line-thin: light-dark(rgba(16, 20, 26, .13), rgba(255, 255, 255, .11));
+          --line-thick: light-dark(rgba(16, 20, 26, .28), rgba(255, 255, 255, .22));
+          --ink1: light-dark(#15171a, #e8eaed); --ink2: light-dark(#4a5059, #a9aeb5); --ink3: light-dark(#5f6670, #8d939b);
           /* Selection, focus, primary actions and redlines — nothing else. */
-          --accent: #6aa4ff; --accent-bg: rgba(106, 164, 255, .15); --accent-line: rgba(106, 164, 255, .55); --on-accent: #08142a;
+          --accent: light-dark(#1f5fd6, #6aa4ff); --on-accent: light-dark(#ffffff, #08142a);
+          --accent-bg: light-dark(rgba(31, 95, 214, .1), rgba(106, 164, 255, .15)); --accent-line: light-dark(rgba(31, 95, 214, .5), rgba(106, 164, 255, .55));
           /* Course ink: what SimTool did to the app — the finger, test steps, mocks, keys sent to the device. */
-          --course: #b48fff; --course-bg: rgba(180, 143, 255, .13);
+          --course: light-dark(#7442d6, #b48fff); --course-bg: light-dark(rgba(116, 66, 214, .1), rgba(180, 143, 255, .13));
           /* States, only where the data says so. */
-          --ok: #45c08a; --warn: #e7a93f; --err: #f26b76;
-          --err-bg: rgba(242, 107, 118, .09); --warn-bg: rgba(231, 169, 63, .09);
-          --json-str: #9fd49b; --json-num: #e7c27a; --json-lit: #8fb8ff;
-          --pop-shadow: 0 16px 40px rgba(0, 0, 0, .55);
-          --device-line: rgba(255, 255, 255, .18);
+          --ok: light-dark(#18744b, #45c08a); --warn: light-dark(#925600, #e7a93f); --err: light-dark(#b82833, #f26b76);
+          --err-bg: light-dark(rgba(184, 40, 51, .06), rgba(242, 107, 118, .09)); --warn-bg: light-dark(rgba(146, 86, 0, .07), rgba(231, 169, 63, .09));
+          --json-str: light-dark(#2b7236, #9fd49b); --json-num: light-dark(#8a5a00, #e7c27a); --json-lit: light-dark(#1f5fd6, #8fb8ff);
+          --pop-shadow: 0 16px 40px light-dark(rgba(16, 20, 26, .18), rgba(0, 0, 0, .55));
+          --device-line: light-dark(rgba(16, 20, 26, .25), rgba(255, 255, 255, .18));
           /* Derived tints, so a theme only has to restate tokens. */
-          --screen-black: #000;
-          --accent-hover: #82b3ff; --accent-fill: rgba(106, 164, 255, .14); --accent-bg-strong: rgba(106, 164, 255, .22);
-          --course-fill: rgba(180, 143, 255, .25); --course-preview: rgba(180, 143, 255, .55); --course-line: rgba(180, 143, 255, .45); --course-track: rgba(180, 143, 255, .3);
-          --ok-line: rgba(69, 192, 138, .35); --ok-bar: rgba(69, 192, 138, .7);
-          --err-line: rgba(242, 107, 118, .35); --err-bg-strong: rgba(242, 107, 118, .14);
-          --mark-bg: rgba(231, 169, 63, .35); --changed-bg: rgba(231, 169, 63, .16);
-          --veil: rgba(14, 15, 17, .7); --scrim: rgba(14, 15, 17, .5); --on-toast-button: rgba(0, 0, 0, .12);
+          --accent-hover: light-dark(#1b56c4, #82b3ff); --accent-fill: light-dark(rgba(31, 95, 214, .12), rgba(106, 164, 255, .14));
+          --course-fill: light-dark(rgba(116, 66, 214, .2), rgba(180, 143, 255, .25)); --course-preview: light-dark(rgba(116, 66, 214, .55), rgba(180, 143, 255, .55));
+          --course-line: light-dark(rgba(116, 66, 214, .45), rgba(180, 143, 255, .45)); --course-track: light-dark(rgba(116, 66, 214, .25), rgba(180, 143, 255, .3));
+          --ok-line: light-dark(rgba(24, 116, 75, .35), rgba(69, 192, 138, .35)); --ok-bar: light-dark(rgba(24, 116, 75, .7), rgba(69, 192, 138, .7));
+          --err-line: light-dark(rgba(184, 40, 51, .35), rgba(242, 107, 118, .35)); --err-bg-strong: light-dark(rgba(184, 40, 51, .08), rgba(242, 107, 118, .14));
+          --mark-bg: light-dark(rgba(231, 169, 63, .3), rgba(231, 169, 63, .35)); --changed-bg: light-dark(rgba(231, 169, 63, .2), rgba(231, 169, 63, .16));
+          --veil: light-dark(rgba(230, 232, 235, .7), rgba(14, 15, 17, .7)); --scrim: light-dark(rgba(16, 20, 26, .22), rgba(14, 15, 17, .5));
+          --on-toast-button: light-dark(rgba(255, 255, 255, .16), rgba(0, 0, 0, .12));
+          /* The device's screen belongs to the app, not to the theme: it stays the same in both themes,
+             and so do the words SimTool writes on it and the outline under the pointer. */
+          --screen-black: #000; --screen-ink: #a9aeb5;
         }
+        :root[data-theme="light"] { color-scheme: light; }
+        :root[data-theme="dark"] { color-scheme: dark; }
 
         * { box-sizing: border-box; }
         html, body { height: 100%; }
@@ -4540,7 +4631,7 @@ enum WebViewerAssets {
         .app.ax-pick .screen canvas { cursor: default; }
         .app.keys-on .screen { box-shadow: 0 0 0 1px var(--device-line), 0 0 0 4px var(--g0), 0 0 0 6px var(--course); }
         .app.keys-on.keys-paused .screen { box-shadow: 0 0 0 1px var(--device-line), 0 0 0 5px var(--g0), 0 0 0 6px var(--line-thin); outline: 2px dashed var(--course); outline-offset: 5px; }
-        .placeholder { position: absolute; inset: 0; display: grid; place-items: center; padding: var(--sp-4); text-align: center; color: var(--ink2); pointer-events: none; }
+        .placeholder { position: absolute; inset: 0; display: grid; place-items: center; padding: var(--sp-4); text-align: center; color: var(--screen-ink); pointer-events: none; }
 
         /* Where the finger is, drawn at once, ahead of the video — in course ink. */
         .touch-layer { position: absolute; inset: 0; z-index: 3; overflow: hidden; pointer-events: none; }
@@ -4560,7 +4651,9 @@ enum WebViewerAssets {
         .ruler-y span { right: 7px; transform: translateY(-50%); }
         .redlines { position: absolute; inset: 0; z-index: 2; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
         .redlines .ghost { fill: none; stroke: var(--accent); stroke-opacity: .3; stroke-width: 1; vector-effect: non-scaling-stroke; }
-        .redlines .hover { fill: none; stroke: var(--ink1); stroke-width: 1; stroke-dasharray: 3 3; vector-effect: non-scaling-stroke; }
+        /* The element under the pointer sits on the app, light or dark in either theme: dark dashes on a light line show on both. */
+        .redlines .hover-halo { fill: none; stroke: var(--screen-ink); stroke-width: 1; vector-effect: non-scaling-stroke; }
+        .redlines .hover { fill: none; stroke: var(--screen-black); stroke-width: 1; stroke-dasharray: 3 3; vector-effect: non-scaling-stroke; }
         .redlines .box { fill: var(--accent-fill); stroke: var(--accent); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
         .redlines .dim { stroke: var(--accent); stroke-width: 1; vector-effect: non-scaling-stroke; }
         .redline-labels { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
@@ -4579,7 +4672,7 @@ enum WebViewerAssets {
         /* Replay: the recording takes the screen's place, with a transport under it. */
         .replay-video { position: absolute; inset: 0; z-index: 4; display: none; width: 100%; height: 100%; border-radius: inherit; object-fit: contain; background: var(--screen-black); }
         .app[data-mode="replay"] .replay-video { display: block; }
-        .replay-note { position: absolute; left: 0; right: 0; bottom: 12px; z-index: 6; text-align: center; color: var(--ink2); }
+        .replay-note { position: absolute; left: 0; right: 0; bottom: 12px; z-index: 6; text-align: center; color: var(--screen-ink); }
         .transport { display: none; align-items: center; gap: var(--sp-2); height: 40px; padding: 0 var(--sp-3); border-top: 1px solid var(--line-thin); background: var(--g1); flex: none; }
         .app[data-mode="replay"] .transport { display: flex; }
         .t-time { font-size: var(--fs-11); color: var(--ink2); white-space: nowrap; }
@@ -4671,7 +4764,6 @@ enum WebViewerAssets {
         }
         .row:hover { background: var(--g3); }
         .list .row[aria-selected="true"] { background: var(--accent-bg); border-left-color: var(--accent); }
-        .list .row[aria-selected="true"]:hover { background: var(--accent-bg-strong); }
         .row.mocked { border-left-color: var(--course); }
         .list .row.mocked[aria-selected="true"] { border-left-color: var(--accent); }
         /* Earlier app launches read quieter; their failures keep their colour. */
@@ -4681,7 +4773,8 @@ enum WebViewerAssets {
         .cell { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
         .cell.num { text-align: right; font: var(--fs-11) var(--font-mono); font-variant-numeric: tabular-nums; color: var(--ink2); }
         .cell.time { font: var(--fs-11) var(--font-mono); font-variant-numeric: tabular-nums; color: var(--ink3); }
-        .list .row[aria-selected="true"] .cell.time { color: var(--ink2); }
+        /* On a selection's tint, meta text steps up to ink2 to keep 4.5:1 in both themes. */
+        .list .row[aria-selected="true"], .model[aria-selected="true"] { --ink3: var(--ink2); }
         .group-row {
           position: sticky; top: 24px; z-index: 1; display: flex; align-items: center; gap: 6px; width: 100%; height: 26px; padding: 0 var(--sp-3) 0 8px;
           border: 0; border-top: 1px solid var(--line-thin); border-bottom: 1px solid var(--line-hair); background: var(--g2);
@@ -4777,7 +4870,7 @@ enum WebViewerAssets {
         .log-grid { grid-template-columns: 86px 62px minmax(110px, 20%) minmax(0, 1fr); }
         @container insp (max-width: 640px) { .log-grid { grid-template-columns: 86px 62px minmax(0, 1fr); } .log-grid .c-ss { display: none; } }
         .lv { justify-self: start; padding: 2px 5px; border-radius: 3px; background: var(--g3); color: var(--ink2); font: 600 var(--fs-11)/1 var(--font-ui); }
-        .lv-error { color: var(--err); background: var(--err-bg); box-shadow: inset 0 0 0 1px var(--err-line); }
+        .lv-error { color: var(--err); background: transparent; box-shadow: inset 0 0 0 1px var(--err-line); }
         .lv-fault { color: var(--g1); background: var(--err); }
         .lv-info { background: transparent; box-shadow: inset 0 0 0 1px var(--line-thin); }
         .lv-debug { background: transparent; color: var(--ink3); }
@@ -4901,6 +4994,8 @@ enum WebViewerAssets {
         .menu hr { margin: 4px 2px; border: 0; border-top: 1px solid var(--line-thin); }
         .menu .m-course, .menu .m-course .ic { color: var(--course); }
         .menu .m-danger, .menu .m-danger .ic { color: var(--err); }
+        /* A destructive item lights up in its own ink: red on the blue tint falls under 4.5:1 in graphite. */
+        .menu .m-danger:hover, .menu .m-danger:focus { background: var(--err-bg); }
 
         .scrim { position: fixed; inset: 0; z-index: 50; display: flex; align-items: flex-start; justify-content: center; padding-top: 12vh; background: var(--scrim); }
         .palette { width: min(560px, calc(100vw - 32px)); overflow: hidden; background: var(--g2); border: 1px solid var(--line-thick); border-radius: var(--r-3); box-shadow: var(--pop-shadow); }
@@ -4942,9 +5037,10 @@ enum WebViewerAssets {
         <head>
           <meta charset="utf-8">
           <meta name="viewport" content="width=device-width, initial-scale=1">
-          <meta name="theme-color" content="#1d2024">
+          <meta name="theme-color">
           <title>{{title}}</title>
           <style>{{viewer.css}}</style>
+          <script>{{js/theme.js}}</script>
         </head>
         <body>
           <svg width="0" height="0" style="position:absolute" aria-hidden="true">
@@ -4979,6 +5075,8 @@ enum WebViewerAssets {
               <symbol id="i-mock" viewBox="0 0 16 16"><path d="M3 3.5h10v3.8a5 5 0 0 1-10 0Z"/><path d="M5.8 7h.01M10.2 7h.01M6 9.6c1.2.9 2.8.9 4 0"/></symbol>
               <symbol id="i-terminal" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="1.2"/><path d="m4.5 6 2.5 2-2.5 2M8.5 10.5h3"/></symbol>
               <symbol id="i-help" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M6.3 6.3a1.8 1.8 0 1 1 2.4 1.7c-.5.2-.7.6-.7 1.1v.3M8 11.4h.01"/></symbol>
+              <symbol id="i-sun" viewBox="0 0 16 16"><circle cx="8" cy="8" r="3"/><path d="M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1"/></symbol>
+              <symbol id="i-moon" viewBox="0 0 16 16"><path d="M13 9.6A5.5 5.5 0 0 1 6.4 3a5.5 5.5 0 1 0 6.6 6.6Z"/></symbol>
               <symbol id="i-filter" viewBox="0 0 16 16"><path d="M2.5 3.5h11l-4.2 5v4l-2.6 1v-5Z"/></symbol>
             </defs>
           </svg>
@@ -5009,6 +5107,7 @@ enum WebViewerAssets {
                 <button class="cmdk" type="button" id="paletteButton" aria-haspopup="dialog" aria-label="Commands" aria-keyshortcuts="Shift+Meta+P">
                   <svg class="ic" aria-hidden="true"><use href="#i-search"/></svg><span class="cmdk-label">Commands</span><kbd>⇧⌘P</kbd>
                 </button>
+                <button class="tb-btn" type="button" id="themeButton" aria-label="Switch to the light theme" data-tip="Switch to the light theme"><svg class="ic" aria-hidden="true"><use href="#i-sun"/></svg></button>
                 <button class="tb-btn" type="button" id="inspectorToggle" aria-pressed="true" aria-controls="inspector" aria-label="Inspector" data-tip="Show or hide the inspector" data-key="⌥⌘0" aria-keyshortcuts="Alt+Meta+0"><svg class="ic" aria-hidden="true"><use href="#i-panel"/></svg></button>
               </div>
             </header>
