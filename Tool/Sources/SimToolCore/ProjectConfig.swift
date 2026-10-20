@@ -57,17 +57,30 @@ public struct ProjectConfig: Codable, Equatable, Sendable {
         /// Maps the config build block onto the shared build selection so build
         /// validation (workspace XOR project, required scheme, default
         /// configuration, path canonicalization) is reused, not reimplemented.
-        /// `builder` overrides the configured one, as `--builder` does.
-        public func selection(builder: SimulatorAppBuilder? = nil) throws -> SimulatorAppBuildSelection {
+        /// `builder` overrides the configured one, as `--builder` does, and the
+        /// other arguments are flags over their keys — what `simtool app build`,
+        /// `app launch` and `app test` build when no `--workspace` or
+        /// `--project` names another project. Extra `settings` merge over the
+        /// configured ones key by key. Xcode takes neither a DerivedData path
+        /// nor settings, so with `xcode-mcp` the configured ones stay out and
+        /// an explicit one is an error.
+        public func selection(
+            builder: SimulatorAppBuilder? = nil,
+            scheme: String? = nil,
+            configuration: String? = nil,
+            derivedDataPath: String? = nil,
+            settings extraSettings: [String: String] = [:]
+        ) throws -> SimulatorAppBuildSelection {
             let builder = builder ?? self.builder
             let usesXcodebuild = builder == .xcodebuild
+            let configuredSettings = usesXcodebuild ? settings : [:]
             return try SimulatorAppBuildSelection.validated(
                 workspacePath: workspace,
                 projectPath: project,
-                scheme: scheme,
-                configuration: configuration,
-                derivedDataPath: usesXcodebuild ? derivedDataPath : nil,
-                buildSettings: usesXcodebuild ? settings : [:],
+                scheme: scheme ?? self.scheme,
+                configuration: configuration ?? self.configuration,
+                derivedDataPath: derivedDataPath ?? (usesXcodebuild ? self.derivedDataPath : nil),
+                buildSettings: configuredSettings.merging(extraSettings) { _, flag in flag },
                 builder: builder
             )
         }

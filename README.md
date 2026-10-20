@@ -381,6 +381,17 @@ swift run simtool app build --project MyApp.xcodeproj --scheme MyApp --configura
 swift run simtool app build --device <udid-or-name> --workspace MyApp.xcworkspace --scheme MyApp
 ```
 
+Inside a project with a `.simtool/config.yml`, `app build`, `app launch` and
+`app test` need neither: without `--workspace` or `--project` they build the app
+from the config's `build:` block — the one `run` builds, from the same cache —
+and `--scheme`, `--configuration`, `--derived-data-path`, `--build-setting` and
+`--builder` each override just their key:
+
+```sh
+swift run simtool app launch
+swift run simtool app build --configuration Release --json
+```
+
 Without `--device` the build targets any iOS simulator, so xcodebuild compiles
 every simulator architecture (arm64 and x86_64); with it, only that simulator's —
 noticeably faster. `app launch`, `run` and `test run` always build for the

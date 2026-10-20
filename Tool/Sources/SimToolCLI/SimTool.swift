@@ -944,19 +944,19 @@ struct AppCommand: AsyncParsableCommand {
 }
 
 struct AppBuildOptions: ParsableArguments {
-    @Option(help: "Xcode workspace path. Mutually exclusive with --project.")
+    @Option(help: "Xcode workspace path. Mutually exclusive with --project. Without either, builds the configured app: the `build:` block of .simtool/config.yml, with these flags over its keys.")
     var workspace: String?
 
-    @Option(help: "Xcode project path. Mutually exclusive with --workspace.")
+    @Option(help: "Xcode project path. Mutually exclusive with --workspace. Without either, builds the configured app (see --workspace).")
     var project: String?
 
-    @Option(help: "Xcode scheme to build.")
+    @Option(help: "Xcode scheme to build. Defaults to `build.scheme` for the configured app.")
     var scheme: String?
 
-    @Option(help: "Build configuration. Defaults to Debug.")
+    @Option(help: "Build configuration. Defaults to `build.configuration` for the configured app, else Debug.")
     var configuration: String?
 
-    @Option(name: .customLong("derived-data-path"), help: "DerivedData path for xcodebuild products.")
+    @Option(name: .customLong("derived-data-path"), help: "DerivedData path for xcodebuild products. Defaults to `build.derivedDataPath` for the configured app.")
     var derivedDataPath: String?
 
     @Option(name: .customLong("build-setting"), help: buildSettingHelp)
@@ -982,19 +982,19 @@ struct AppBuildOptions: ParsableArguments {
 }
 
 struct AppTestOptions: ParsableArguments {
-    @Option(help: "Xcode workspace path. Mutually exclusive with --project.")
+    @Option(help: "Xcode workspace path. Mutually exclusive with --project. Without either, builds the configured app: the `build:` block of .simtool/config.yml, with these flags over its keys.")
     var workspace: String?
 
-    @Option(help: "Xcode project path. Mutually exclusive with --workspace.")
+    @Option(help: "Xcode project path. Mutually exclusive with --workspace. Without either, builds the configured app (see --workspace).")
     var project: String?
 
-    @Option(help: "Xcode scheme to test.")
+    @Option(help: "Xcode scheme to test. Defaults to `build.scheme` for the configured app.")
     var scheme: String?
 
-    @Option(help: "Build configuration. Defaults to Debug.")
+    @Option(help: "Build configuration. Defaults to `build.configuration` for the configured app, else Debug.")
     var configuration: String?
 
-    @Option(name: .customLong("derived-data-path"), help: "DerivedData path for xcodebuild products.")
+    @Option(name: .customLong("derived-data-path"), help: "DerivedData path for xcodebuild products. Defaults to `build.derivedDataPath` for the configured app.")
     var derivedDataPath: String?
 
     @Option(name: .customLong("build-setting"), help: buildSettingHelp)
@@ -1026,11 +1026,13 @@ private let builderHelp = ArgumentHelp(
     discussion: "Defaults to `build.builder` from .simtool/config.yml, else xcodebuild. Xcode keeps the workspace loaded and builds into its own DerivedData, often much faster than a cold xcodebuild; it builds the scheme's Run configuration with the project's own settings, so --derived-data-path and --build-setting do not apply. Xcode asks to approve SimTool on first use."
 )
 
-/// The build selection a command line asks for, with the project config's
-/// `build.settings` and `build.builder` when it describes the same workspace
-/// or project, and the flags on top. Xcode takes no build settings, so with
-/// `xcode-mcp` the configured ones stay out and a `--build-setting` is an
-/// error.
+/// The build selection a command line asks for. Without `--workspace` or
+/// `--project` that is the project config's `build:` block — the app `run`
+/// builds — with each flag over its key. With one, it is that workspace or
+/// project, with the config's `build.settings` and `build.builder` when it
+/// describes the same one, and the flags on top. Xcode takes no build
+/// settings, so with `xcode-mcp` the configured ones stay out and a
+/// `--build-setting` is an error.
 private func appBuildSelection(
     workspace: String?,
     project: String?,
@@ -1041,6 +1043,19 @@ private func appBuildSelection(
     builder: SimulatorAppBuilder?
 ) throws -> SimulatorAppBuildSelection {
     let explicit = try SimulatorAppBuildSelection.parseBuildSettings(buildSettings)
+    let configBuild = try ProjectConfigLoader.loadIfPresent()?.build
+    if workspace == nil, project == nil {
+        guard let configBuild else {
+            throw SimToolError("Pass --workspace <path> or --project <path>, or run inside a project whose \(ProjectConfigLoader.displayPath) has a `build:` block.")
+        }
+        return try configBuild.selection(
+            builder: builder,
+            scheme: scheme,
+            configuration: configuration,
+            derivedDataPath: derivedDataPath,
+            settings: explicit
+        )
+    }
     let base = try SimulatorAppBuildSelection.validated(
         workspacePath: workspace,
         projectPath: project,
@@ -1048,7 +1063,6 @@ private func appBuildSelection(
         configuration: configuration,
         derivedDataPath: derivedDataPath
     )
-    let configBuild = try ProjectConfigLoader.loadIfPresent()?.build
     let builder = builder ?? configBuild?.builder(for: base) ?? .xcodebuild
     let configured = builder == .xcodebuild ? configBuild?.settings(for: base) ?? [:] : [:]
     let settings = configured.merging(explicit) { _, flag in flag }

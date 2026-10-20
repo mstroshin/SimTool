@@ -64,8 +64,11 @@ extension AgentSkill {
         > **Fill this in.** Replace the placeholders with your project's real values, and
         > note the repo root the commands must run from.
 
-        Run from the repo root. Pass these on every `app build` / `app launch` (confirm
-        flag names with `simtool app --help`):
+        Run from the repo root. With a `build:` block in `.simtool/config.yml`,
+        `app build` / `app launch` / `app test` take the workspace, scheme,
+        configuration and DerivedData path from it — pass a flag only to override that
+        one key. Without a config, pass these on every `app build` / `app launch`
+        (confirm flag names with `simtool app --help`):
 
         ```bash
         --workspace MyApp.xcworkspace --scheme MyApp --configuration Debug --derived-data-path DerivedData
@@ -124,6 +127,10 @@ extension AgentSkill {
         ### Canonical commands
 
         ```bash
+        # With `build:` in .simtool/config.yml: the configured app; a flag overrides its key
+        simtool app build
+        simtool app launch -- <app launch arguments>
+
         # Build only — fastest path for a quick syntax check
         simtool app build \
           --workspace MyApp.xcworkspace --scheme MyApp --configuration Debug \

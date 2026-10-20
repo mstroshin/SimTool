@@ -299,6 +299,54 @@ final class ProjectConfigLoaderTests: XCTestCase {
         XCTAssertNil(config.build.builder(for: otherProject))
     }
 
+    func testFlagsOverrideTheConfiguredBuildKeyByKey() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try writeConfig("""
+        simulator: booted
+        bundleId: com.example.MyApp
+        build:
+          workspace: App.xcworkspace
+          scheme: App
+          configuration: Beta
+          derivedDataPath: DerivedData
+          settings:
+            MACOSX_DEPLOYMENT_TARGET: 15.0
+            SWIFT_VERSION: 6
+        """, in: root)
+        let build = try ProjectConfigLoader.load(startDirectory: root).build
+
+        // No flags: the configured build as it stands, the one `run` makes.
+        let configured = try build.selection()
+        XCTAssertEqual(configured.identity.workspacePath.map { URL(fileURLWithPath: $0).lastPathComponent }, "App.xcworkspace")
+        XCTAssertEqual(configured.identity.scheme, "App")
+        XCTAssertEqual(configured.identity.configuration, "Beta")
+        XCTAssertEqual(configured.identity.derivedDataPath.map { URL(fileURLWithPath: $0).lastPathComponent }, "DerivedData")
+        XCTAssertEqual(configured.identity.buildSettings, ["MACOSX_DEPLOYMENT_TARGET=15.0", "SWIFT_VERSION=6"])
+
+        // Each flag wins over its key; the workspace stays the configured one.
+        let flagged = try build.selection(
+            scheme: "AppDev",
+            configuration: "Debug",
+            derivedDataPath: "/tmp/OtherDerivedData",
+            settings: ["SWIFT_VERSION": "5", "OTHER_SWIFT_FLAGS": "-DPROBE"]
+        )
+        XCTAssertEqual(flagged.identity.workspacePath, configured.identity.workspacePath)
+        XCTAssertEqual(flagged.identity.scheme, "AppDev")
+        XCTAssertEqual(flagged.identity.configuration, "Debug")
+        XCTAssertEqual(flagged.identity.derivedDataPath, "/tmp/OtherDerivedData")
+        XCTAssertEqual(flagged.identity.buildSettings, ["MACOSX_DEPLOYMENT_TARGET=15.0", "OTHER_SWIFT_FLAGS=-DPROBE", "SWIFT_VERSION=5"])
+
+        // Xcode leaves the configured DerivedData and settings out, but an
+        // explicit one is still a mistake to report.
+        let xcode = try build.selection(builder: .xcodeMCP, scheme: "AppDev")
+        XCTAssertEqual(xcode.identity.scheme, "AppDev")
+        XCTAssertNil(xcode.identity.derivedDataPath)
+        XCTAssertNil(xcode.identity.buildSettings)
+        XCTAssertThrowsError(try build.selection(builder: .xcodeMCP, derivedDataPath: "/tmp/OtherDerivedData"))
+        XCTAssertThrowsError(try build.selection(builder: .xcodeMCP, settings: ["SWIFT_VERSION": "5"]))
+    }
+
     func testUnknownBuilderThrows() throws {
         try assertLoadThrows("""
         simulator: booted
