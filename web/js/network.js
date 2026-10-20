@@ -95,14 +95,15 @@ const networkList = createList(networkView.list, {
   header: createSortHeader("net-grid", NETWORK_COLUMNS, network.sort, () => renderNetwork()),
   key: (event) => event.id,
   version: (event) => [event.response ? 1 : 0, event.error ? 1 : 0, event.launchId, event.durationMilliseconds, event._wf, newestLaunchId() === event.launchId].join("|"),
-  rowClass: (event) => "net-grid" + (event.mocked ? " mocked" : "") + (event.launchId != null && event.launchId !== newestLaunchId() ? " retired" : ""),
-  group: (event) => event.launchId != null ? String(event.launchId) : null,
+  // A reviewed run is one launch's story: no launch groups, nothing reads as earlier.
+  rowClass: (event) => "net-grid" + (event.mocked ? " mocked" : "") + (!reviewActive() && event.launchId != null && event.launchId !== newestLaunchId() ? " retired" : ""),
+  group: (event) => !reviewActive() && event.launchId != null ? String(event.launchId) : null,
   collapsed: [],
   renderGroup: (id, items, collapsed) => launchGroupHTML(id, items, collapsed, "request", networkMarks(items)),
   render: renderNetworkRow,
   empty: () => networkEmpty(),
   onSelect: (key, event) => { network.selected = event; renderNetworkDetail(); },
-  exists: (key) => !network.cleared.has(key) && network.events.some((event) => event.id === key),
+  exists: (key) => networkRows().some((event) => event.id === key),
   onActivate: () => { const tab = networkView.detail.querySelector("[role=tab][aria-selected=true]"); if (tab) tab.focus(); },
   onMenu: (key, event, x, y, row) => openMenu(x, y, networkRowMenu(event), row),
   onGroupMenu: (id, x, y, button) => openMenu(x, y, launchGroupMenu("network", id), button),
@@ -126,6 +127,7 @@ function renderNetworkRow(event, row) {
 }
 
 function networkEmpty() {
+  if (reviewActive()) return reviewEmpty("network");
   if (!inspector.attachedApp && inspector.configKnown && !network.events.length) return noAppPanel("network");
   if (network.events.length && network.events.every((event) => network.cleared.has(event.id))) {
     return el("div", { class: "empty", html: "<b>Cleared</b>New requests appear here as the app makes them." });
@@ -138,11 +140,15 @@ function networkEmpty() {
   return el("div", { class: "empty", html: "<b>No requests yet</b>The app's network logger reports each call here as it finishes. Apps launched by <code>simtool run</code> or <code>simtool app launch</code> have it armed; apps that link <code>SimToolNetworkLogger</code> keep reporting after a relaunch." });
 }
 
+// The requests the list is about: the live ones not cleared, or the reviewed run's in its window.
+function networkRows() {
+  return reviewActive() ? reviewRows("network", network.events) : network.events.filter((event) => !network.cleared.has(event.id));
+}
+
 function networkVisible() {
   const query = networkFilter.text;
   const chips = networkFilter.chips;
-  return network.events.filter((event) => {
-    if (network.cleared.has(event.id)) return false;
+  return networkRows().filter((event) => {
     if (network.protocol !== "all" && event.protocol !== network.protocol) return false;
     if (network.failedOnly && !isNetworkProblem(event)) return false;
     if (network.mockedOnly && !event.mocked) return false;
@@ -185,7 +191,8 @@ function renderNetwork() {
     event._wf = "left:" + left.toFixed(1) + "%;width:" + Math.min(width, 100 - left).toFixed(1) + "%";
   }
   networkList.update(rows);
-  const shown = rows.length, total = network.events.filter((event) => !network.cleared.has(event.id)).length;
+  const all = networkRows();
+  const shown = rows.length, total = all.length;
   const times = rows.map((event) => event.timestamp).filter(Boolean).sort();
   const hidden = total - shown;
   networkView.guide.innerHTML = guideHTML([
@@ -194,7 +201,7 @@ function renderNetwork() {
     hidden ? formatCount(hidden) + " hidden by filters" : "",
     network.paused && network.pausedNew ? plural(network.pausedNew, "new while paused", "new while paused") : ""
   ], liveTag("capturing", network.paused));
-  const [failed, problems] = networkMarks(network.events.filter((event) => !network.cleared.has(event.id)));
+  const [failed, problems] = networkMarks(all);
   setCount("network", total, failed.count, problems.count);
   if (network.selected) {
     const fresh = network.events.find((event) => event.id === network.selected.id);

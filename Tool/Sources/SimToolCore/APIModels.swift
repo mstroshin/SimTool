@@ -373,6 +373,10 @@ public struct SimulatorInputPayload: Codable, Equatable, Sendable {
     public var enabled: Bool?
     /// Shown or hidden (software-keyboard); absent, it toggles.
     public var visible: Bool?
+    /// What the input is aimed at, in words — the element a test step names
+    /// when it taps by coordinates. Only the activity feed reads it; it never
+    /// decides where a touch lands.
+    public var target: String?
 
     public init(
         action: String? = nil,
@@ -397,7 +401,8 @@ public struct SimulatorInputPayload: Codable, Equatable, Sendable {
         sourceWidth: Double? = nil,
         sourceHeight: Double? = nil,
         enabled: Bool? = nil,
-        visible: Bool? = nil
+        visible: Bool? = nil,
+        target: String? = nil
     ) {
         self.action = action
         self.type = type
@@ -422,6 +427,7 @@ public struct SimulatorInputPayload: Codable, Equatable, Sendable {
         self.sourceHeight = sourceHeight
         self.enabled = enabled
         self.visible = visible
+        self.target = target
     }
 }
 

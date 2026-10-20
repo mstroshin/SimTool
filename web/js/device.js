@@ -6,6 +6,7 @@ const deviceInfo = { name: "", udid: "", app: "" };
 // ---- Toolbar actions: each one confirms what it did ----
 
 async function deviceAction(label, payload, done) {
+  if (!manualInputAllowed(() => deviceAction(label, payload, done))) return;
   try {
     await postInput(payload);
     toast(done || label);
@@ -71,6 +72,7 @@ async function copyScreenshot() {
 let pasteInFlight = false;
 async function runPaste(label, send, failureHint) {
   if (pasteInFlight) return;
+  if (!manualInputAllowed(() => runPaste(label, send, failureHint))) return;
   pasteInFlight = true;
   setMessage(label);
   try {
@@ -89,7 +91,7 @@ function pasteIntoSimulator(text) {
 }
 
 async function postFile(path, blob) {
-  const headers = { "Content-Type": blob.type || "application/octet-stream" };
+  const headers = { "Content-Type": blob.type || "application/octet-stream", "X-SimTool-Source": "viewer" };
   if (blob.name) headers["X-SimTool-Filename"] = encodeURIComponent(blob.name);
   return (await api(path, { method: "POST", headers, body: blob })).json();
 }
@@ -277,6 +279,8 @@ canvas.addEventListener("pointerdown", (event) => {
     return;
   }
   if (!canTouch()) return;
+  // A run or an agent is driving: the first touch asks instead of landing.
+  if (!manualInputAllowed()) { event.preventDefault(); return; }
   try { canvas.setPointerCapture(event.pointerId); } catch (_) {}
   event.preventDefault();
   endWheelDrag();
@@ -358,7 +362,7 @@ document.addEventListener("visibilitychange", () => { if (document.hidden) { end
 canvas.addEventListener("wheel", (event) => {
   if (!screenState.width) return;
   event.preventDefault();
-  if (event.ctrlKey || touch || axPickActive() || !canTouch()) return;
+  if (event.ctrlKey || touch || axPickActive() || !canTouch() || (!wheel && !manualInputAllowed())) return;
   const rect = canvas.getBoundingClientRect();
   const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? rect.height : 1;
   const dx = -event.deltaX * unit / rect.width;
@@ -469,6 +473,7 @@ window.addEventListener("keydown", (event) => {
     if (!event.repeat) toggleSoftwareKeyboard();
     return;
   }
+  if (!manualInputAllowed()) { keepFromPage(event); return; }
   if (keyboardBridge.keydown(event)) keepFromPage(event);
 }, true);
 window.addEventListener("keyup", (event) => {

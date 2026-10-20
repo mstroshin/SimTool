@@ -96,10 +96,10 @@ public struct TestRunner {
             try check(await client.scroll(direction: direction), action: "swipe")
         case .scroll(let direction, let distance, let from, let timeout):
             let start = try await startPoint(on: from, timeout: timeout)
-            try check(await client.scroll(direction: direction, distance: distance, x: start?.x, y: start?.y), action: "scroll")
+            try check(await client.scroll(direction: direction, distance: distance, x: start?.x, y: start?.y, target: from?.query), action: "scroll")
         case .fling(let direction, let speed, let from, let timeout):
             let start = try await startPoint(on: from, timeout: timeout)
-            try check(await client.fling(direction: direction, velocity: speed, x: start?.x, y: start?.y), action: "fling")
+            try check(await client.fling(direction: direction, velocity: speed, x: start?.x, y: start?.y, target: from?.query), action: "fling")
         case .drag(let from, let to, let press, let speed, let hold, let timeout):
             let start = try center(of: try await waitForMatch(from, timeout: timeout), target: from)
             let end: TouchPoint = switch to {
@@ -107,7 +107,7 @@ public struct TestRunner {
             case .offset(let x, let y): TouchPoint(x: start.x + x, y: start.y + y)
             }
             try check(
-                await client.drag(startX: start.x, startY: start.y, endX: end.x, endY: end.y, press: press, velocity: speed, hold: hold),
+                await client.drag(startX: start.x, startY: start.y, endX: end.x, endY: end.y, press: press, velocity: speed, hold: hold, target: from.query),
                 action: "drag"
             )
         case .waitFor(let target, let timeout):
@@ -160,7 +160,7 @@ public struct TestRunner {
     private func tap(node: AccessibilityNode, target: TestTarget) async throws {
         if let frame = node.frame,
            let x = frame.x, let y = frame.y, let width = frame.width, let height = frame.height {
-            try check(await client.tap(x: x + width / 2, y: y + height / 2), action: "tap")
+            try check(await client.tap(x: x + width / 2, y: y + height / 2, target: target.query), action: "tap")
         } else if let id = node.accessibilityIdentifier, !id.isEmpty {
             try check(await client.tap(id: id), action: "tap")
         } else if let label = node.label, !label.isEmpty {
@@ -173,7 +173,7 @@ public struct TestRunner {
     private func longPress(node: AccessibilityNode, target: TestTarget, duration: Double?) async throws {
         if let frame = node.frame,
            let x = frame.x, let y = frame.y, let width = frame.width, let height = frame.height {
-            try check(await client.longPress(x: x + width / 2, y: y + height / 2, duration: duration), action: "long press")
+            try check(await client.longPress(x: x + width / 2, y: y + height / 2, duration: duration, target: target.query), action: "long press")
         } else if let id = node.accessibilityIdentifier, !id.isEmpty {
             try check(await client.longPress(id: id, duration: duration), action: "long press")
         } else if let label = node.label, !label.isEmpty {

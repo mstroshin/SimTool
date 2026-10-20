@@ -63,7 +63,7 @@ Open `http://127.0.0.1:3200` after starting `serve` (the URL is printed on start
 or pass `--web` to open the browser viewer automatically.
 
 The viewer is one window: the device on the left, the inspector on the right
-(**Network**, **Logs**, **State**, **Accessibility**, **Tests**), with a splitter
+(**Network**, **Logs**, **State**, **Accessibility**, **Tests**, **Activity**), with a splitter
 between them that remembers where you leave it; in a narrow pane the inspector
 moves under the device instead of covering it. Under the device are its size in
 points, the frame rate and the pointer's position in points; the status bar at
@@ -73,10 +73,24 @@ The viewer follows the system's light or dark appearance; the sun / moon button
 in the toolbar pins the other theme for this browser.
 ⇧⌘P opens a command palette with every action and test; the shortcuts follow
 Simulator.app and Xcode — ⇧⌘H Home, ⌘S screenshot, ⌃⌘Z shake, ⌥⌘0 show or hide
-the inspector — and ⌥1–5 switch inspector tabs, `/` filters the current list,
+the inspector — and ⌥1–6 switch inspector tabs, `/` filters the current list,
 ↑/↓ move through it and Shift-F10 opens a row's menu. When the server goes away
 the viewer greys the last frame, says so, stops sending touches and reconnects
 by itself; a restarted server is noticed and its lists are reloaded.
+
+What an agent or a test run does to the device shows as it happens. Every touch
+from `simtool input`, the HTTP API or a YAML step is drawn on the screen in
+course ink — a ring where the finger went down, a stroke to where it lifted, a
+caption naming it (`Tap “General”`, `Scroll up 300 pt`) — and launches, typing,
+mocks armed and test steps caption the top of the screen. The toolbar says who
+is driving: **Test running · step 3 of 7**, or **Agent driving** for half a
+minute after an agent's last action. The last action and how long ago it was
+stay under the device, and **Activity** (⌥6) lists every action with who did it,
+how long it took and whether it failed; a touch's row shows its path in points,
+draws it again on the screen and copies as the `simtool input` command that
+repeats it. A touch, key or button from the page while a test or an agent drives
+the device asks first — **Take over** lets the person act until the next run or
+agent starts — and a touch by hand during a run is itself in the feed.
 
 On the viewer's screen the mouse is a finger: it goes down on press, follows the
 pointer and lifts on release, so holding is a long press, holding and moving
@@ -209,7 +223,16 @@ live progress and each test's last outcome in words (*Bug reproduced*,
 *Confirmed*, …), and keeps the recorded runs under **History**. A finished run's
 recording plays in the screen's place — Replay is a mode of the whole viewer,
 so the inspector stays usable — with each step marked on its scrubber, and
-clicking a step seeks the video to that moment.
+clicking a step seeks the video to that moment. While it plays, **Network**,
+**Logs** and **State** show that run — its own `network.jsonl`, `logs.jsonl`
+and `state.jsonl`, so a run reads the same long after its server is gone — cut
+to the step under the playhead: from the moment the step began acting to the
+moment the next one did, so a tap's window holds the requests and lines it
+caused while the next step waited for them; State shows the models as they
+stood at the end of that window and what changed inside it. A bar over each
+list names the step and its span and switches to the whole run. In the
+timeline every step says what it caused — *1 request · 277 log lines · 1 state
+update* — and each count opens that list, held at that step.
 
 ```bash
 swift run simtool test run .simtool/tests/my-test.yml
@@ -735,6 +758,9 @@ POST /api/v1/logs/capture/stop
 GET /api/v1/network?seconds=2&limit=200
 GET /api/v1/mocks
 GET /api/v1/mocks/ack
+GET /api/v1/activity?since=<revision>&limit=200
+POST /api/v1/activity
+GET /api/v1/tests/<session-id>/evidence/<file>
 GET /api/v1/screenshot?maxDim=800
 ```
 
@@ -748,6 +774,24 @@ or `server.host` is refused too, so a DNS-rebinding page whose name resolves to
 127.0.0.1 is not this server either. The viewer runs under a Content Security
 Policy that allows only its own files from `/assets/`; nothing under `web/` may
 be inline script or `<style>`.
+
+`tests/<session-id>/evidence/<file>` serves a recorded run's evidence — only
+the files its session lists (`network.jsonl`, `logs.jsonl`, `state.jsonl`,
+failure screenshots…). Step times in a session carry milliseconds.
+
+`activity` is what was done to the device and by whom — `agent` (the CLI, the
+HTTP API), `test` (a YAML run) or `viewer` (a person at a SimTool page): every
+input with the path its finger took in screen points, mocks armed and removed,
+test runs and their steps. Each entry carries a `revision` that moves whenever
+it changes (a tap opens, learns where it lands, finishes), so `since` the last
+`revision` returns what changed, once per change; `run` is the test run driving
+the device, while one is. `simtool input …`, `app launch` and `open` act on the
+simulator in their own process and report themselves to every live server
+streaming that device with `POST /api/v1/activity` — `{"kind", "title",
+"detail", "gesture"}` opens an entry, `{"id", "status"}` finishes it — best
+effort, never failing the command. A request that sends `X-SimTool-Source:
+viewer` is the viewer's own; an input that names a `target` (a test step's
+element) is called by it in the feed, never aimed by it.
 
 `mocks/ack` reports the server's mock-rule generation and the newest one an app
 has confirmed applying (learned from its poll). A run that declares `mocks:`

@@ -1,5 +1,5 @@
 // The command palette (⇧⌘P) and the page's keyboard shortcuts. Shortcuts
-// follow Simulator.app and Xcode where they exist; tabs use ⌥1–5 because
+// follow Simulator.app and Xcode where they exist; tabs use ⌥1–6 because
 // browsers keep ⌘1–9 for themselves.
 
 function paletteCommands() {
@@ -23,6 +23,7 @@ function paletteCommands() {
     ["Inspector", "panel", "State", "⌥3", () => openTab("state")],
     ["Inspector", "pick", "Accessibility", "⌥4", () => openTab("ax")],
     ["Inspector", "panel", "Tests", "⌥5", () => openTab("tests")],
+    ["Inspector", "pick", "Activity — what was done to the device", "⌥6", () => openTab("activity")],
     ["Inspector", "search", "Filter the current list", "/", focusFilter],
     ["Network", network.paused ? "play" : "pause", network.paused ? "Resume the request list" : "Pause the request list", "", () => { openTab("network"); networkPause.click(); }],
     ["Network", "trash", "Clear the request list", "", () => { openTab("network"); networkClear.click(); }],
@@ -53,14 +54,14 @@ function openTab(tab) {
 }
 
 function focusTabList(tab) {
-  const lists = { network: networkList, logs: logsList, ax: axList, tests: tests.view === "history" ? historyList : definitionList };
+  const lists = { network: networkList, logs: logsList, ax: axList, tests: tests.view === "history" ? historyList : definitionList, activity: activityList };
   if (lists[tab]) lists[tab].focus();
   else if (tab === "state") (stateModels.querySelector('[tabindex="0"]') || stateModels).focus();
 }
 
 function focusFilter() {
   if (!inspector.open) setInspectorOpen(true);
-  const filters = { network: networkFilter, logs: logsFilter, state: stateFilter, ax: axFilter, tests: testsFilter };
+  const filters = { network: networkFilter, logs: logsFilter, state: stateFilter, ax: axFilter, tests: testsFilter, activity: activityFilter };
   filters[inspector.tab].focus();
 }
 
@@ -170,7 +171,7 @@ document.addEventListener("keydown", (event) => {
   if (event.metaKey && !event.shiftKey && !event.altKey && !event.ctrlKey && event.code === "KeyS") { event.preventDefault(); saveScreenshot(); return; }
   if (event.metaKey && event.ctrlKey && event.code === "KeyZ") { event.preventDefault(); pressShake(); return; }
   if (event.metaKey && event.altKey && event.code === "Digit0") { event.preventDefault(); setInspectorOpen(!inspector.open); return; }
-  if (event.altKey && !meta && /^Digit[1-5]$/.test(event.code)) { event.preventDefault(); openTab(TABS[Number(event.code.slice(5)) - 1]); return; }
+  if (event.altKey && !meta && /^Digit[1-6]$/.test(event.code)) { event.preventDefault(); openTab(TABS[Number(event.code.slice(5)) - 1]); return; }
   if (meta && event.key === "Enter" && inspector.tab === "tests" && tests.view === "tests" && tests.selectedFile) { event.preventDefault(); runTest(tests.selectedFile); return; }
   if (editing || keyboardBridge.enabled) return;
   if (meta && event.code === "KeyF" && inspector.open) { event.preventDefault(); focusFilter(); return; }

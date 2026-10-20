@@ -67,6 +67,7 @@
       </div>
 
       <div class="tb-group tb-right">
+        <span class="driver-status" role="status" aria-live="polite"><button class="driver" type="button" id="driverChip" hidden data-tip=""><span class="driver-dot" aria-hidden="true"></span><span class="driver-label" id="driverLabel"></span><span class="driver-short" id="driverShort" aria-hidden="true"></span></button></span>
         <button class="toggle" type="button" id="keyboardToggle" aria-pressed="false" data-tip="Type into the simulator with the Mac keyboard" data-key="⇧⌘K" aria-keyshortcuts="Shift+Meta+K">
           <svg class="ic" aria-hidden="true"><use href="#i-keyboard"/></svg><span class="toggle-label">Mac keyboard</span>
         </button>
@@ -94,6 +95,7 @@
               <svg class="redlines" id="redlines" aria-hidden="true"></svg>
               <div class="redline-labels" id="redlineLabels" aria-hidden="true"></div>
               <div class="touch-layer" id="touchLayer" aria-hidden="true"></div>
+              <div class="activity-layer" id="activityLayer" aria-hidden="true"></div>
               <video class="replay-video" id="replayVideo" playsinline></video>
               <div class="replay-note" id="replayNote" hidden>The recording is unavailable — the timeline still works.</div>
               <div class="placeholder" id="placeholder">Connecting to the simulator…</div>
@@ -121,6 +123,7 @@
 
         <div class="readout mono" id="readout" aria-hidden="true">
           <span id="readSize">—</span><span id="readFps">— fps</span>
+          <span class="readout-last" id="readLast" title="The last thing done to the device — ⌥6 shows them all" hidden></span>
           <span class="readout-ptr" id="readPointer"></span>
         </div>
       </section>
@@ -134,12 +137,14 @@
           <button role="tab" class="tab" type="button" id="tab-state" data-tab="state" aria-controls="panel-state" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+3">State <span class="count" id="count-state"></span></button>
           <button role="tab" class="tab" type="button" id="tab-ax" data-tab="ax" aria-controls="panel-ax" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+4">Accessibility</button>
           <button role="tab" class="tab" type="button" id="tab-tests" data-tab="tests" aria-controls="panel-tests" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+5">Tests <span class="count" id="count-tests"></span><span class="count-err" id="err-tests" hidden></span></button>
+          <button role="tab" class="tab" type="button" id="tab-activity" data-tab="activity" aria-controls="panel-activity" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+6">Activity <span class="count" id="count-activity"></span><span class="count-err" id="err-activity" hidden></span></button>
         </div>
         <div class="panel" role="tabpanel" id="panel-network" aria-labelledby="tab-network"></div>
         <div class="panel" role="tabpanel" id="panel-logs" aria-labelledby="tab-logs" hidden></div>
         <div class="panel" role="tabpanel" id="panel-state" aria-labelledby="tab-state" hidden></div>
         <div class="panel" role="tabpanel" id="panel-ax" aria-labelledby="tab-ax" hidden></div>
         <div class="panel" role="tabpanel" id="panel-tests" aria-labelledby="tab-tests" hidden></div>
+        <div class="panel" role="tabpanel" id="panel-activity" aria-labelledby="tab-activity" hidden></div>
       </section>
     </main>
 
@@ -187,6 +192,8 @@
 {{js/state.js}}
 {{js/ax.js}}
 {{js/tests.js}}
+{{js/review.js}}
+{{js/activity.js}}
 {{js/palette.js}}
 {{js/events.js}}
 {{js/main.js}}

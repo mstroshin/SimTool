@@ -51,6 +51,38 @@ public struct TestSessionEntry: Codable, Equatable, Sendable {
         self.logCursorTo = logCursorTo
         self.criterion = criterion
     }
+
+    // `at` and `endedAt` keep their milliseconds: they bound the window a
+    // reviewer filters network, logs and state to, and steps a second apart
+    // would otherwise share their edges. Sessions written with whole seconds
+    // still read.
+    private enum CodingKeys: String, CodingKey {
+        case kind, at, endedAt, text, logs, logCursorFrom, logCursorTo, criterion
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        kind = try container.decode(TestSessionEntryKind.self, forKey: .kind)
+        at = try PreciseTime.date(container.decode(String.self, forKey: .at), key: .at, in: container)
+        endedAt = try container.decodeIfPresent(String.self, forKey: .endedAt).map { try PreciseTime.date($0, key: .endedAt, in: container) }
+        text = try container.decodeIfPresent(String.self, forKey: .text)
+        logs = try container.decodeIfPresent([String].self, forKey: .logs)
+        logCursorFrom = try container.decodeIfPresent(Int.self, forKey: .logCursorFrom)
+        logCursorTo = try container.decodeIfPresent(Int.self, forKey: .logCursorTo)
+        criterion = try container.decodeIfPresent(String.self, forKey: .criterion)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(PreciseTime.string(at), forKey: .at)
+        try container.encodeIfPresent(endedAt.map(PreciseTime.string), forKey: .endedAt)
+        try container.encodeIfPresent(text, forKey: .text)
+        try container.encodeIfPresent(logs, forKey: .logs)
+        try container.encodeIfPresent(logCursorFrom, forKey: .logCursorFrom)
+        try container.encodeIfPresent(logCursorTo, forKey: .logCursorTo)
+        try container.encodeIfPresent(criterion, forKey: .criterion)
+    }
 }
 
 public struct TestSession: Codable, Equatable, Sendable, Identifiable {

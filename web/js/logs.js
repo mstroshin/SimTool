@@ -37,13 +37,13 @@ const logsList = createList(logsView.list, {
   header: el("div", { class: "thead log-grid", role: "row", html: '<span class="cell" role="columnheader">Time</span><span class="cell" role="columnheader">Level</span><span class="cell c-ss" role="columnheader">Subsystem</span><span class="cell" role="columnheader">Message</span>' }),
   key: (entry) => String(entry.sequence),
   version: (entry) => (logsFilter.text || "") + "|" + (entry.launchId === newestLaunchId() ? 1 : 0),
-  rowClass: (entry) => "log-grid" + (isLogError(entry) ? " lvl-err" : "") + (entry.launchId != null && entry.launchId !== newestLaunchId() ? " retired" : ""),
-  group: (entry) => entry.launchId != null ? String(entry.launchId) : null,
+  rowClass: (entry) => "log-grid" + (isLogError(entry) ? " lvl-err" : "") + (!reviewActive() && entry.launchId != null && entry.launchId !== newestLaunchId() ? " retired" : ""),
+  group: (entry) => !reviewActive() && entry.launchId != null ? String(entry.launchId) : null,
   renderGroup: (id, items, collapsed) => launchGroupHTML(id, items, collapsed, "line", [{ count: items.filter(isLogError).length, tone: "err", one: "error", many: "errors" }]),
   render: renderLogRow,
   empty: () => logsEmpty(),
   onSelect: (key, entry) => { logs.selected = entry; renderLogDetail(); },
-  exists: (key) => logs.entries.some((entry) => String(entry.sequence) === key && entry.sequence >= logs.cleared),
+  exists: (key) => logRows().some((entry) => String(entry.sequence) === key),
   onMenu: (key, entry, x, y, row) => openMenu(x, y, logRowMenu(entry, row), row),
   onGroupMenu: (id, x, y, button) => openMenu(x, y, launchGroupMenu("logs", id), button),
   follow: () => logs.follow
@@ -68,6 +68,7 @@ function renderLogRow(entry, row) {
 }
 
 function logsEmpty() {
+  if (reviewActive()) return reviewEmpty("logs");
   if (!inspector.attachedApp && inspector.configKnown) return noAppPanel("logs");
   if (logs.entries.length && logs.entries.every((entry) => entry.sequence < logs.cleared)) return el("div", { class: "empty", html: "<b>Cleared</b>New lines appear here as the app logs them." });
   if (logs.entries.length) {
@@ -100,8 +101,7 @@ for (const level of LOG_LEVELS) {
 
 function renderLevels() {
   const counts = {};
-  for (const entry of logs.entries) {
-    if (entry.sequence < logs.cleared) continue;
+  for (const entry of logRows()) {
     const level = logLevel(entry);
     counts[level] = (counts[level] || 0) + 1;
   }
@@ -113,11 +113,15 @@ function renderLevels() {
   }
 }
 
+// The lines the list is about: the live ones not cleared, or the reviewed run's in its window.
+function logRows() {
+  return reviewActive() ? reviewRows("logs", logs.entries) : logs.entries.filter((entry) => entry.sequence >= logs.cleared);
+}
+
 function logsVisible() {
   const parsed = parseFieldTerm(logsFilter.text, LOGS_FILTER_FIELDS);
   const chips = logsFilter.chips;
-  return logs.entries.filter((entry) => {
-    if (entry.sequence < logs.cleared) return false;
+  return logRows().filter((entry) => {
     if (logs.levels[logLevel(entry)] === false) return false;
     if (!parsed.term && !chips.length) return true;
     const fields = logFields(entry);
@@ -136,14 +140,15 @@ function renderLogs() {
   rows.sort((a, b) => ((a.launchId ?? -1) - (b.launchId ?? -1)) || (a.sequence - b.sequence));
   logsList.update(rows);
   renderLevels();
-  const errors = logs.entries.filter((entry) => entry.sequence >= logs.cleared && isLogError(entry)).length;
-  setCount("logs", logs.entries.filter((entry) => entry.sequence >= logs.cleared).length, errors);
+  const all = logRows();
+  const errors = all.filter(isLogError).length;
+  setCount("logs", all.length, errors);
   const times = rows.length ? [rows[0].timestamp, rows[rows.length - 1].timestamp] : null;
   logsView.guide.innerHTML = guideHTML([
     times ? "<b>" + escapeHTML(formatClock(times[0], true)) + " → " + escapeHTML(formatClock(times[1], true)) + "</b>" : "",
     formatCount(rows.length) + " shown",
-    logs.entries.length >= LOGS_MAX ? "newest " + formatCount(LOGS_MAX) + " kept" : "",
-    logs.dropped ? '<span title="The capture fell behind and skipped lines">' + plural(logs.dropped, "line dropped by the capture", "lines dropped by the capture") + "</span>" : "",
+    !reviewActive() && logs.entries.length >= LOGS_MAX ? "newest " + formatCount(LOGS_MAX) + " kept" : "",
+    !reviewActive() && logs.dropped ? '<span title="The capture fell behind and skipped lines">' + plural(logs.dropped, "line dropped by the capture", "lines dropped by the capture") + "</span>" : "",
     inspector.attachedApp ? escapeHTML(inspector.attachedApp) : ""
   ], liveTag(logs.follow ? "following" : "capturing"));
 }

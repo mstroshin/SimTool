@@ -25,15 +25,20 @@ statePanel.append(
 );
 
 stateCopy.addEventListener("click", () => {
-  const event = stateView.latest[stateView.selected];
+  const event = stateModelsView().latest[stateView.selected];
   if (event) copyText(JSON.stringify(event.snapshot, (key, value) => key === MODEL_ID_KEY ? undefined : value, 2), "Snapshot copied");
 });
 
-function stateMatches(id) {
+// The models the tab is about: live, or as a reviewed run held them at the end of its window.
+function stateModelsView() {
+  return reviewStateView(stateView);
+}
+
+function stateMatches(id, view) {
   const query = stateFilter.text;
   const chips = stateFilter.chips;
   if (!query && !chips.length) return true;
-  const event = stateView.latest[id];
+  const event = view.latest[id];
   const hay = (id + " " + JSON.stringify(event ? event.snapshot : "")).toLowerCase();
   return matchesFilters(hay, chips, query);
 }
@@ -56,19 +61,22 @@ function renderStateTree(value, changed, path, modelId) {
 }
 
 function renderState() {
-  const ids = Object.keys(stateView.latest).sort((a, b) => {
-    const left = stateView.latest[a], right = stateView.latest[b];
+  const view = stateModelsView();
+  const ids = Object.keys(view.latest).sort((a, b) => {
+    const left = view.latest[a], right = view.latest[b];
     return (left.deallocated ? 1 : 0) - (right.deallocated ? 1 : 0) || a.localeCompare(b);
-  }).filter(stateMatches);
-  if (stateView.selected && !stateView.latest[stateView.selected]) stateView.selected = null;
-  if (!stateView.selected && ids.length) stateView.selected = ids[0];
-  setCount("state", Object.keys(stateView.latest).length, 0);
+  }).filter((id) => stateMatches(id, view));
+  // A reviewed moment without the chosen model keeps the choice for when the playhead finds it again.
+  if (stateView.selected && !view.latest[stateView.selected] && view === stateView) stateView.selected = null;
+  const selected = stateView.selected && view.latest[stateView.selected] ? stateView.selected : ids[0] || null;
+  if (view === stateView) stateView.selected = selected;
+  setCount("state", Object.keys(view.latest).length, 0);
 
   const focusedId = document.activeElement && stateModels.contains(document.activeElement) ? document.activeElement.dataset.model : null;
   stateModels.innerHTML = "";
   for (const id of ids) {
-    const event = stateView.latest[id];
-    const button = el("button", { type: "button", class: "model" + (event.deallocated ? " dead" : ""), role: "option", "aria-selected": String(id === stateView.selected), tabindex: id === stateView.selected ? "0" : "-1", "data-model": id });
+    const event = view.latest[id];
+    const button = el("button", { type: "button", class: "model" + (event.deallocated ? " dead" : ""), role: "option", "aria-selected": String(id === selected), tabindex: id === selected ? "0" : "-1", "data-model": id });
     button.innerHTML = '<span class="dot ' + (event.deallocated ? "dot-idle" : "dot-ok") + '" title="' + (event.deallocated ? "deallocated" : "alive") + '"></span>' +
       '<span class="m-name" translate="no">' + escapeHTML(id) + '</span><span class="m-seq">#' + escapeHTML(event.seq) + "</span>" +
       '<span class="m-sub">' + (event.deallocated ? "deallocated " : "changed ") + escapeHTML(formatClock(event.timestamp)) + "</span>";
@@ -79,33 +87,35 @@ function renderState() {
   if (!ids.length) {
     stateBody.innerHTML = "";
     stateBody.paneKey = null;
-    if (!inspector.attachedApp && inspector.configKnown && !Object.keys(stateView.latest).length) stateBody.append(noAppPanel("state"));
-    else if (Object.keys(stateView.latest).length) stateBody.append(el("div", { class: "empty", html: "<b>No model matches</b>Clear the filter to see all " + formatCount(Object.keys(stateView.latest).length) + "." }));
+    if (view !== stateView && !Object.keys(view.latest).length) stateBody.append(reviewEmpty("state"));
+    else if (!inspector.attachedApp && inspector.configKnown && !Object.keys(view.latest).length) stateBody.append(noAppPanel("state"));
+    else if (Object.keys(view.latest).length) stateBody.append(el("div", { class: "empty", html: "<b>No model matches</b>Clear the filter to see all " + formatCount(Object.keys(view.latest).length) + "." }));
     else stateBody.append(el("div", { class: "empty", html: "<b>No tracked models yet</b>Annotate an <code>@Observable</code> model with <code>@SimToolDebugState</code>, register it with <code>SimToolState.track(model)</code>, and launch the app through SimTool — its state streams here on every change." }));
     return;
   }
-  const event = stateView.latest[stateView.selected];
+  const event = view.latest[selected];
   // Every state event re-renders; patchPane keeps folds, focus, scroll and a text selection.
-  const paneKey = stateView.selected + "|" + stateView.mode;
+  const paneKey = selected + "|" + stateView.mode;
   if (stateView.mode === "snapshot") {
-    patchPane(stateBody, paneKey, '<div class="dhead flat"><span class="dtitle" translate="no">' + escapeHTML(stateView.selected) + '</span><span class="muted small">seq ' + escapeHTML(event.seq) + " · " + (event.deallocated ? "deallocated" : "alive") + "</span></div>" +
-      '<div class="tree-kv" translate="no">' + renderStateTree(event.snapshot, stateView.lastChange[stateView.selected] || [], "", stateView.selected) + "</div>");
+    patchPane(stateBody, paneKey, '<div class="dhead flat"><span class="dtitle" translate="no">' + escapeHTML(selected) + '</span><span class="muted small">seq ' + escapeHTML(event.seq) + " · " + (event.deallocated ? "deallocated" : "alive") + "</span></div>" +
+      '<div class="tree-kv" translate="no">' + renderStateTree(event.snapshot, view.lastChange[selected] || [], "", selected) + "</div>");
   } else {
-    const embedded = embeddedModelIds(stateView.latest);
+    const embedded = embeddedModelIds(view.latest);
     const blocks = [];
-    if (embedded[stateView.selected]) {
-      patchPane(stateBody, paneKey, '<div class="empty"><b>Changes show in ' + escapeHTML(embedded[stateView.selected]) + "</b>This model lives inside that one, so its changes appear there as nested paths.</div>");
+    if (embedded[selected]) {
+      patchPane(stateBody, paneKey, '<div class="empty"><b>Changes show in ' + escapeHTML(embedded[selected]) + "</b>This model lives inside that one, so its changes appear there as nested paths.</div>");
       return;
     }
-    for (let index = stateView.changes.length - 1; index >= 0; index--) {
-      const { event: change, diffs } = stateView.changes[index];
-      if (change.modelId !== stateView.selected) continue;
+    for (let index = view.changes.length - 1; index >= 0; index--) {
+      const { event: change, diffs } = view.changes[index];
+      if (change.modelId !== selected) continue;
       // The parent's history entry already shows this change as a nested diff.
       if (embedded[change.modelId]) continue;
       blocks.push('<div class="change"><div class="change-head"><b translate="no">' + escapeHTML(change.modelId) + "</b><span>seq " + escapeHTML(change.seq) + '</span><span class="mono">' + escapeHTML(formatClock(change.timestamp, true)) + "</span>" + (change.deallocated ? "<span>deallocated</span>" : "") + "</div>" +
         diffs.map((diff) => '<div class="diffline" translate="no"><span class="path">' + escapeHTML(diff.path) + "</span><del>" + escapeHTML(stateValueText(diff.before)) + '</del><span class="arrow">→</span><ins>' + escapeHTML(stateValueText(diff.after)) + "</ins></div>").join("") + "</div>");
     }
-    patchPane(stateBody, paneKey, blocks.length ? blocks.join("") : '<div class="empty"><b>No changes yet</b>This model has not changed since it was first reported.</div>');
+    const none = view === stateView ? "<b>No changes yet</b>This model has not changed since it was first reported." : "<b>No changes here</b>This model did not change in the reviewed span.";
+    patchPane(stateBody, paneKey, blocks.length ? blocks.join("") : '<div class="empty">' + none + "</div>");
   }
 }
 

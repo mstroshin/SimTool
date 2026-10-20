@@ -5,6 +5,7 @@
 enum WebViewerAssets {
     /// `web/<path>` → that file's contents, without its final newline.
     static let files: [String: String] = [
+        "js/activity.js": jsActivityJs,
         "js/ax.js": jsAxJs,
         "js/core.js": jsCoreJs,
         "js/device.js": jsDeviceJs,
@@ -17,6 +18,7 @@ enum WebViewerAssets {
         "js/main.js": jsMainJs,
         "js/network.js": jsNetworkJs,
         "js/palette.js": jsPaletteJs,
+        "js/review.js": jsReviewJs,
         "js/state.js": jsStateJs,
         "js/stream.js": jsStreamJs,
         "js/tests.js": jsTestsJs,
@@ -25,6 +27,348 @@ enum WebViewerAssets {
         "viewer.css": viewerCss,
         "viewer.html": viewerHtml,
     ]
+
+    static let jsActivityJs = #"""
+        // Activity: what agents, test runs and viewers did to the device — taps,
+        // scrolls, typing, launches, mocks armed, test steps. The server keeps the
+        // record; this page marks each touch on the screen in course ink as it
+        // happens, says in the toolbar who is driving, keeps the last action under the
+        // device, lists everything in the Activity tab, and asks before a person's own
+        // input lands in the middle of someone else's run.
+
+        const ACTIVITY_MAX = 500;
+        const MARK_FRESH_MS = 6000;   // older entries are history, not something to draw
+        const MARK_HOLD_MS = 1600;    // how long a mark stays before it fades
+        const activity = {
+          entries: [],                 // oldest first
+          revision: null,
+          run: null,                   // the test run the server says drives the device
+          drawn: new Set(),            // ids already marked on the screen
+          cleared: 0,                  // ids below this are cleared from the list
+          who: stored("activity.who", "all"),   // all | agent | test | viewer
+          follow: true,
+          selected: null,
+          takenOver: null,             // the driving stretch a person chose to take the device from
+          declinedAt: 0                // when a person last chose not to take over
+        };
+
+        const activityFilter = createFilter("activity", { placeholder: "Filter actions — tap, scroll, launch, mock…", onChange: () => renderActivity() });
+        const activityWho = segmented("Who", [["all", "All"], ["agent", "Agent"], ["test", "Test"], ["viewer", "Viewer"]], () => activity.who, (who) => { activity.who = who; store("activity.who", who); renderActivity(); });
+        const activityFollow = el("button", { class: "toggle toggle-sm", type: "button", "aria-pressed": "true", "data-tip": "Keep the newest action in view", html: icon("follow") + '<span class="toggle-label">Follow</span>' });
+        const activityClear = el("button", { class: "tb-btn", type: "button", "aria-label": "Clear the list", "data-tip": "Clear the list", html: icon("trash") });
+        const activityView = buildListPanel("activity", {
+          listLabel: "Actions on the device",
+          toolbar: [activityFilter.field, activityWho, el("span", { class: "ptool-spacer" }), activityFilter.help, activityFollow, activityClear]
+        });
+
+        const activityList = createList(activityView.list, {
+          header: el("div", { class: "thead act-grid", role: "row", html: '<span class="cell" role="columnheader">Time</span><span class="cell" role="columnheader">Who</span><span class="cell" role="columnheader">Action</span><span class="cell num" role="columnheader">Result</span>' }),
+          key: (entry) => String(entry.id),
+          version: (entry) => entry.revision + "|" + (activityFilter.text || ""),
+          rowClass: (entry) => "act-grid" + (entry.status === "failed" ? " act-failed" : "") + (entry.actor === "viewer" ? " act-viewer" : ""),
+          render: renderActivityRow,
+          empty: () => activityEmpty(),
+          onSelect: (key, entry) => { activity.selected = entry; renderActivityDetail(); },
+          exists: (key) => activity.entries.some((entry) => String(entry.id) === key && entry.id >= activity.cleared),
+          onActivate: (key, entry) => { if (entry && entry.gesture) markActivity(entry, { replay: true }); },
+          onMenu: (key, entry, x, y, row) => openMenu(x, y, activityMenu(entry), row),
+          follow: () => activity.follow
+        });
+
+        function actorTag(entry) {
+          return '<span class="who who-' + escapeHTML(entry.actor) + '">' + escapeHTML(ACTOR_NAMES[entry.actor] || entry.actor) + "</span>";
+        }
+
+        function activityResult(entry) {
+          if (entry.status === "running") return '<span class="verdict v-running"><span class="spinner" aria-hidden="true"></span>Running</span>';
+          if (entry.status === "failed") return '<span class="st st-err" title="' + escapeHTML(entry.error || "Failed") + '">' + icon("warn") + "Failed</span>";
+          const ms = entry.endedAt ? Date.parse(entry.endedAt) - Date.parse(entry.at) : NaN;
+          return '<span class="muted">' + escapeHTML(isFinite(ms) && ms > 0 ? formatDuration(ms) : "—") + "</span>";
+        }
+
+        function renderActivityRow(entry, row) {
+          row.innerHTML =
+            '<span class="cell time" title="' + escapeHTML(entry.at) + '">' + escapeHTML(formatClock(entry.at, true)) + "</span>" +
+            '<span class="cell">' + actorTag(entry) + "</span>" +
+            '<span class="cell name" translate="no"><b>' + markMatches(entry.title, activityFilter.text) + "</b>" +
+              (entry.detail ? "<span>" + escapeHTML(entry.detail) + "</span>" : "") + "</span>" +
+            '<span class="cell num">' + activityResult(entry) + "</span>";
+          row.title = entry.title + (entry.error ? " — " + entry.error : "");
+        }
+
+        function activityEmpty() {
+          const shown = activity.entries.filter((entry) => entry.id >= activity.cleared);
+          if (activity.entries.length && !shown.length) return el("div", { class: "empty", html: "<b>Cleared</b>New actions appear here as they happen." });
+          if (shown.length) {
+            const node = el("div", { class: "empty", html: "<b>No action matches</b>The filter above hides all " + formatCount(shown.length) + ". " });
+            node.append(el("button", { class: "btn btn-sm", type: "button", text: "Show all actions", onclick: () => { activity.who = "all"; store("activity.who", "all"); activityWho.sync(); activityFilter.clear(); } }));
+            return node;
+          }
+          return el("div", { class: "empty", html: "<b>Nothing has acted on the device yet</b>Taps, scrolls, typing and launches from <code>simtool input</code>, the HTTP API and test runs appear here as they happen — and on the screen, in course ink, where the finger went." });
+        }
+
+        function activityVisible() {
+          const query = activityFilter.text, chips = activityFilter.chips;
+          return activity.entries.filter((entry) => {
+            if (entry.id < activity.cleared) return false;
+            if (activity.who !== "all" && entry.actor !== activity.who) return false;
+            if (!query && !chips.length) return true;
+            const hay = [entry.title, entry.detail, entry.kind, ACTOR_NAMES[entry.actor], entry.via, entry.error].filter(Boolean).join(" ").toLowerCase();
+            return matchesFilters(hay, chips, query);
+          });
+        }
+
+        let activityLastFilter = "";
+        function renderActivity() {
+          const filterKey = activity.who + "|" + activityFilter.text + "|" + JSON.stringify(activityFilter.chips);
+          if (filterKey !== activityLastFilter) { activityLastFilter = filterKey; activityList.invalidate(); }
+          const rows = activityVisible();
+          activityList.update(rows);
+          const total = activity.entries.filter((entry) => entry.id >= activity.cleared).length;
+          const failed = activity.entries.filter((entry) => entry.id >= activity.cleared && entry.status === "failed").length;
+          setCount("activity", total, failed);
+          activityView.guide.innerHTML = guideHTML([
+            rows.length ? "<b>" + escapeHTML(formatClock(rows[0].at, true)) + " → " + escapeHTML(formatClock(rows[rows.length - 1].at, true)) + "</b>" : "",
+            formatCount(rows.length) + " of " + plural(total, "action", "actions"),
+            failed ? '<span class="st-err">' + plural(failed, "failed", "failed") + "</span>" : ""
+          ], liveTag(activity.follow ? "following" : "recording"));
+          if (activity.selected) {
+            const fresh = activity.entries.find((entry) => entry.id === activity.selected.id);
+            if (fresh && fresh !== activity.selected) { activity.selected = fresh; renderActivityDetail(); }
+          }
+        }
+
+        function activityMenu(entry) {
+          const command = activityCommand(entry);
+          return [
+            { icon: "pick", label: "Show on the screen", disabled: !entry.gesture || app.dataset.mode === "replay", run: () => markActivity(entry, { replay: true }) },
+            { icon: "terminal", label: "Copy as command", disabled: !command, run: () => copyText(command, "Command copied") },
+            { icon: "copy", label: "Copy the action", run: () => copyText(entry.title + (entry.detail ? " — " + entry.detail : ""), "Copied") },
+            "-",
+            { icon: "filter", label: "Show only " + (ACTOR_NAMES[entry.actor] || entry.actor), run: () => { activity.who = entry.actor; store("activity.who", entry.actor); activityWho.sync(); renderActivity(); } }
+          ];
+        }
+
+        function renderActivityDetail() {
+          const entry = activity.selected;
+          showDetail(activityView.panel, !!entry);
+          if (!entry) return;
+          const command = activityCommand(entry);
+          const ms = entry.endedAt ? Date.parse(entry.endedAt) - Date.parse(entry.at) : NaN;
+          const gesture = entry.gesture;
+          const point = (p) => Math.round(p.x) + ", " + Math.round(p.y) + " pt";
+          let body = "";
+          if (entry.status === "failed") body += '<div class="callout err">' + icon("warn") + "<div><b>Failed</b>" + (entry.error ? "<br>" + escapeHTML(entry.error) : "") + "</div></div>";
+          // The head names who and how; a touch's own section says where.
+          body += kvHTML({
+            Action: entry.kind,
+            Started: formatClock(entry.at, true),
+            Finished: entry.endedAt ? formatClock(entry.endedAt, true) : "still running",
+            Took: isFinite(ms) ? formatDuration(ms) : "",
+            Detail: gesture ? "" : entry.detail
+          });
+          if (gesture) {
+            body += '<div class="sec">Finger</div>' + kvHTML({
+              Down: point(gesture.from),
+              Up: Math.hypot(gesture.to.x - gesture.from.x, gesture.to.y - gesture.from.y) >= 1 ? point(gesture.to) : "where it went down",
+              Rested: gesture.press ? formatDuration(gesture.press * 1000) : "",
+              "Down for": formatDuration(gesture.duration * 1000),
+              Screen: gesture.screen ? Math.round(gesture.screen.width) + " × " + Math.round(gesture.screen.height) + " pt" : ""
+            });
+          }
+          if (command) body += '<div class="sec">Repeat it</div><div class="snippet"><pre class="code" translate="no">' + escapeHTML(command) + '</pre><button class="tb-btn" type="button" data-act="copy-command" aria-label="Copy the command" data-tip="Copy the command">' + icon("copy", "ic-sm") + "</button></div>";
+          patchPane(activityView.detail, String(entry.id) + "|" + entry.revision,
+            '<div class="dhead">' + actorTag(entry) + '<span class="dtitle ui" translate="no">' + escapeHTML(entry.title) + "</span>" +
+              '<div class="dactions">' + (gesture ? '<button class="btn btn-sm btn-course" type="button" data-act="show">' + icon("pick", "ic-sm") + "Show on the screen</button>" : "") +
+              '<button class="tb-btn" type="button" data-act="close" aria-label="Close the details">' + icon("close") + "</button></div></div>" +
+            '<div class="dmeta"><span>' + escapeHTML(formatClock(entry.at, true)) + "</span>" + (entry.via ? "<span>via " + escapeHTML(entry.via) + "</span>" : "") + "<span>" + activityResult(entry) + "</span></div>" +
+            '<div class="dbody">' + body + "</div>");
+        }
+
+        activityView.detail.addEventListener("click", (event) => {
+          const action = event.target.closest("[data-act]");
+          if (!action || !activity.selected) return;
+          if (action.dataset.act === "show") markActivity(activity.selected, { replay: true });
+          if (action.dataset.act === "copy-command") copyText(activityCommand(activity.selected), "Command copied");
+          if (action.dataset.act === "close") { activityList.select(null); activityList.focus(); }
+        });
+
+        function setActivityFollow(on) {
+          if (activity.follow === on) return;
+          activity.follow = on;
+          activityFollow.setAttribute("aria-pressed", String(on));
+          renderActivity();
+        }
+        activityFollow.addEventListener("click", () => { setActivityFollow(!activity.follow); if (activity.follow) activityList.scrollToEnd(); });
+        activityView.list.addEventListener("scroll", () => {
+          const atBottom = activityList.atBottom();
+          if (atBottom !== activity.follow && activityView.list.scrollHeight > activityView.list.clientHeight) setActivityFollow(atBottom);
+        }, { passive: true });
+        activityClear.addEventListener("click", () => {
+          const previous = activity.cleared;
+          const last = activity.entries[activity.entries.length - 1];
+          activity.cleared = last ? last.id + 1 : 0;
+          activityList.select(null);
+          renderActivity();
+          toast("Activity list cleared", { icon: "trash", duration: 5000, action: { label: "Undo", run: () => { activity.cleared = previous; renderActivity(); } } });
+        });
+
+        // ---- Marks on the screen: where the finger went, in course ink ----
+
+        const activityLayer = $("activityLayer");
+        let activityCaption = null;
+
+        // A touch draws its path and a caption beside it; anything else captions the
+        // top of the screen. A mark comes and goes by timers, so it reads the same
+        // with reduced motion — only the drawing-in is animated.
+        function markActivity(entry, { replay } = {}) {
+          if (app.dataset.mode === "replay") return;
+          const ratios = entry.gesture ? gestureRatios(entry.gesture, screenState.points) : null;
+          const rect = activityLayer.getBoundingClientRect();
+          if (ratios && rect.width) {
+            const mark = el("div", { class: "act-mark" + (entry.status === "failed" ? " failed" : "") });
+            const x1 = ratios.from.x * rect.width, y1 = ratios.from.y * rect.height, x2 = ratios.to.x * rect.width, y2 = ratios.to.y * rect.height;
+            const travel = Math.max(0.3, Math.min(2, entry.gesture.duration - entry.gesture.press)) + "s";
+            if (ratios.moved) {
+              const length = Math.hypot(x2 - x1, y2 - y1);
+              const angle = Math.atan2(y2 - y1, x2 - x1) * 180 / Math.PI;
+              mark.innerHTML = '<svg class="act-path" width="' + rect.width + '" height="' + rect.height + '" viewBox="0 0 ' + rect.width + " " + rect.height + '">' +
+                '<line x1="' + x1 + '" y1="' + y1 + '" x2="' + x2 + '" y2="' + y2 + '" style="stroke-dasharray:' + length + ";stroke-dashoffset:" + length + ";--travel:" + travel + '"/>' +
+                '<path d="M -9 -6 L 0 0 L -9 6" transform="translate(' + x2 + " " + y2 + ") rotate(" + angle + ')" style="--travel:' + travel + '"/></svg>';
+            }
+            mark.append(el("span", { class: "act-ring" + (entry.kind === "long-press" || entry.gesture.press >= 0.5 ? " held" : ""), style: "left:" + x1 + "px;top:" + y1 + "px" }));
+            const caption = el("span", { class: "act-label", text: (replay ? "" : (ACTOR_NAMES[entry.actor] || "") + " · ") + entry.title });
+            // Above the finger unless that would leave the screen; kept inside its sides.
+            caption.style.top = (y1 > 48 ? y1 - 40 : y1 + 26) + "px";
+            caption.style.left = Math.min(Math.max(8, x1 - 60), Math.max(8, rect.width - 168)) + "px";
+            mark.append(caption);
+            activityLayer.append(mark);
+            retire(mark, Math.max(MARK_HOLD_MS, entry.gesture.duration * 1000 + 900));
+            return;
+          }
+          if (activityCaption) activityCaption.remove();
+          const caption = el("div", { class: "act-caption" + (entry.status === "failed" ? " failed" : "") }, el("span", { class: "who who-" + entry.actor, text: ACTOR_NAMES[entry.actor] || entry.actor }), el("span", { text: entry.title }));
+          activityLayer.append(caption);
+          activityCaption = caption;
+          retire(caption, MARK_HOLD_MS + 800, () => { if (activityCaption === caption) activityCaption = null; });
+        }
+
+        function retire(node, after, done) {
+          setTimeout(() => {
+            node.classList.add("fading");
+            setTimeout(() => { node.remove(); if (done) done(); }, 400);
+          }, after);
+        }
+
+        // Marks only what is happening now: an entry seen first in history is a row, not a mark.
+        function markFresh(entry) {
+          if (entry.actor === "viewer" || activity.drawn.has(entry.id)) return;
+          if (Date.now() - Date.parse(entry.at) > MARK_FRESH_MS) { activity.drawn.add(entry.id); return; }
+          // A touch waits for its path; the server learns it a moment after the entry opens.
+          if (["tap", "long-press", "swipe", "drag", "scroll", "fling"].includes(entry.kind) && !entry.gesture && entry.status === "running") return;
+          activity.drawn.add(entry.id);
+          markActivity(entry);
+        }
+
+        // ---- Who drives the device, and the last thing done to it ----
+
+        function currentDriver() {
+          return deviceDriver(activity.entries, activity.run, Date.now());
+        }
+
+        function renderDriver() {
+          const driver = currentDriver();
+          const chip = $("driverChip");
+          app.classList.toggle("driven", !!driver);
+          chip.hidden = !driver;
+          if (driver) {
+            const long = driver.actor === "test"
+              ? "Test running" + (driver.step ? " · step " + driver.step.index + " of " + driver.step.total : "")
+              : "Agent driving";
+            const short = driver.actor === "test" ? (driver.step ? driver.step.index + "/" + driver.step.total : "Test") : "Agent";
+            $("driverLabel").textContent = long;
+            $("driverShort").textContent = short;
+            chip.dataset.tip = driver.actor === "test" ? "“" + driver.title + "” is driving the device" : "Last: " + driver.title + " · " + formatSince(Date.now() - driver.lastAt);
+            chip.setAttribute("aria-label", long + (driver.actor === "test" ? ": " + driver.title : "") + " — show the activity");
+          }
+          const last = [...activity.entries].reverse().find((entry) => entry.actor !== "viewer");
+          const age = last ? Date.now() - Date.parse(last.endedAt || last.at) : Infinity;
+          const cell = $("readLast");
+          cell.hidden = !last || age > 10 * 60 * 1000;
+          if (!cell.hidden) {
+            cell.classList.toggle("recent", last.status === "running" || age < 5000);
+            cell.innerHTML = '<span class="who who-' + escapeHTML(last.actor) + '">' + escapeHTML(ACTOR_NAMES[last.actor] || last.actor) + "</span>" +
+              '<span class="read-title" translate="no">' + escapeHTML(last.title) + "</span>" +
+              "<span>" + escapeHTML(last.status === "running" ? "running" : last.status === "failed" ? "failed · " + formatSince(age) : formatSince(age)) + "</span>";
+          }
+        }
+        setInterval(renderDriver, 1000);
+        $("driverChip").addEventListener("click", () => openTab("activity"));
+        $("readLast").addEventListener("click", () => openTab("activity"));
+
+        // ---- Before a person's input lands in someone else's run ----
+
+        // True when the person may act now. Otherwise asks once per driving stretch
+        // whether to take over, and runs `proceed` (the action that was stopped) on yes.
+        // A no holds for a moment: a trackpad's momentum and a held key keep sending
+        // input after the answer, and none of it should ask again.
+        const DECLINE_QUIET_MS = 1500;
+        function manualInputAllowed(proceed) {
+          const driver = currentDriver();
+          if (!driver || activity.takenOver === driver.key) return true;
+          if (!$("dialogScrim").hidden || Date.now() - activity.declinedAt < DECLINE_QUIET_MS) return false;
+          const text = driver.actor === "test"
+            ? "“" + driver.title + "” is running" + (driver.step ? " at step " + driver.step.index + " of " + driver.step.total : "") + ". A touch, a key or a button now lands in the middle of its steps and can break the run — and the recording shows it."
+            : "An agent acted on it " + formatSince(Date.now() - driver.lastAt) + " (" + driver.title + "). Input from here can change the screen under its next step.";
+          confirmDestructive(driver.actor === "test" ? "A test is driving this device" : "An agent is driving this device", text, "Take over").then((yes) => {
+            if (!yes) { activity.declinedAt = Date.now(); return; }
+            activity.takenOver = driver.key;
+            toast("You have the device until the next run or agent starts", { icon: "check" });
+            if (proceed) proceed();
+          });
+          return false;
+        }
+
+        // ---- Polling ----
+
+        function mergeActivity(entries) {
+          if (!entries.length) return;
+          const index = new Map(activity.entries.map((entry, position) => [entry.id, position]));
+          for (const entry of entries) {
+            const at = index.get(entry.id);
+            if (at == null) { index.set(entry.id, activity.entries.length); activity.entries.push(entry); }
+            else activity.entries[at] = entry;
+          }
+          activity.entries.sort((a, b) => a.id - b.id);
+          if (activity.entries.length > ACTIVITY_MAX) activity.entries.splice(0, activity.entries.length - ACTIVITY_MAX);
+        }
+
+        async function pollActivity() {
+          const since = activity.revision == null ? "" : "?since=" + activity.revision;
+          const payload = await apiJSON("/api/v1/activity" + since);
+          const entries = payload.entries || [];
+          const first = activity.revision == null;
+          activity.revision = payload.revision;
+          activity.run = payload.run || null;
+          mergeActivity(entries);
+          // The first answer is history: marks are for what happens while the page watches.
+          for (const entry of entries) { if (first) activity.drawn.add(entry.id); else markFresh(entry); }
+          renderDriver();
+          if (entries.length || first) renderActivity();
+        }
+
+        tabHandlers.activity = { show() { renderActivity(); poller.poke("activity"); } };
+
+        function resetActivity() {
+          activity.entries = [];
+          activity.revision = null;
+          activity.run = null;
+          activity.cleared = 0;
+          activityList.select(null);
+          renderActivity();
+          renderDriver();
+        }
+        """#
 
     static let jsAxJs = #"""
         // Accessibility: the served AX tree, picking on the screen, and redlines —
@@ -508,8 +852,9 @@ enum WebViewerAssets {
           return (await api(path, options)).json();
         }
 
+        // The header tells the server's activity feed this came from a person at a viewer.
         function postInput(payload) {
-          return api("/api/v1/input", { method: "POST", body: JSON.stringify(payload) });
+          return api("/api/v1/input", { method: "POST", body: JSON.stringify(payload), headers: { "X-SimTool-Source": "viewer" } });
         }
 
         // ---- Status message, toasts, announcements ----
@@ -829,6 +1174,7 @@ enum WebViewerAssets {
         // ---- Toolbar actions: each one confirms what it did ----
 
         async function deviceAction(label, payload, done) {
+          if (!manualInputAllowed(() => deviceAction(label, payload, done))) return;
           try {
             await postInput(payload);
             toast(done || label);
@@ -894,6 +1240,7 @@ enum WebViewerAssets {
         let pasteInFlight = false;
         async function runPaste(label, send, failureHint) {
           if (pasteInFlight) return;
+          if (!manualInputAllowed(() => runPaste(label, send, failureHint))) return;
           pasteInFlight = true;
           setMessage(label);
           try {
@@ -912,7 +1259,7 @@ enum WebViewerAssets {
         }
 
         async function postFile(path, blob) {
-          const headers = { "Content-Type": blob.type || "application/octet-stream" };
+          const headers = { "Content-Type": blob.type || "application/octet-stream", "X-SimTool-Source": "viewer" };
           if (blob.name) headers["X-SimTool-Filename"] = encodeURIComponent(blob.name);
           return (await api(path, { method: "POST", headers, body: blob })).json();
         }
@@ -1100,6 +1447,8 @@ enum WebViewerAssets {
             return;
           }
           if (!canTouch()) return;
+          // A run or an agent is driving: the first touch asks instead of landing.
+          if (!manualInputAllowed()) { event.preventDefault(); return; }
           try { canvas.setPointerCapture(event.pointerId); } catch (_) {}
           event.preventDefault();
           endWheelDrag();
@@ -1181,7 +1530,7 @@ enum WebViewerAssets {
         canvas.addEventListener("wheel", (event) => {
           if (!screenState.width) return;
           event.preventDefault();
-          if (event.ctrlKey || touch || axPickActive() || !canTouch()) return;
+          if (event.ctrlKey || touch || axPickActive() || !canTouch() || (!wheel && !manualInputAllowed())) return;
           const rect = canvas.getBoundingClientRect();
           const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? rect.height : 1;
           const dx = -event.deltaX * unit / rect.width;
@@ -1292,6 +1641,7 @@ enum WebViewerAssets {
             if (!event.repeat) toggleSoftwareKeyboard();
             return;
           }
+          if (!manualInputAllowed()) { keepFromPage(event); return; }
           if (keyboardBridge.keydown(event)) keepFromPage(event);
         }, true);
         window.addEventListener("keyup", (event) => {
@@ -1411,7 +1761,7 @@ enum WebViewerAssets {
         // inspector, the filter field every tab shares, app launches, and the
         // split detail under each list.
 
-        const TABS = ["network", "logs", "state", "ax", "tests"];
+        const TABS = ["network", "logs", "state", "ax", "tests", "activity"];
         const inspector = { tab: stored("tab", "network"), open: stored("inspectorOpen", true), attachedApp: "", configKnown: false };
         const tabHandlers = {};   // tab → { show(), hide() }
 
@@ -1583,7 +1933,8 @@ enum WebViewerAssets {
           logs: '<p><b>Type</b> to filter messages; <b>subsystem:text</b> (or category, process, level, message) matches one field.</p><p><b>Enter</b> keeps it as an include chip; <b>-text Enter</b> excludes.</p><p><b>Select text</b> in a line and right-click to show or hide it.</p>',
           state: '<p><b>Type</b> to filter models by name and their keys and values.</p>',
           ax: '<p><b>Type</b> to filter by identifier, label, role; matches keep their ancestors visible.</p>',
-          tests: '<p><b>Type</b> to filter tests and runs by name, file, reference, verdict.</p>'
+          tests: '<p><b>Type</b> to filter tests and runs by name, file, reference, verdict.</p>',
+          activity: '<p><b>Type</b> to filter actions by what they did — tap, scroll, launch, mock — and who did it.</p><p><b>Enter</b> on an action draws it on the screen again.</p>'
         };
 
         function createFilter(tab, { placeholder, fields, onChange }) {
@@ -1699,6 +2050,8 @@ enum WebViewerAssets {
         }
 
         function liveTag(word, paused) {
+          // A reviewed run does not move: its lists are a recording, not a capture.
+          if (typeof reviewActive === "function" && reviewActive()) return '<span class="rec">◼ recorded run</span>';
           if (screenState.connection === "reconnecting" || screenState.connection === "offline") return '<span class="stale">● server unreachable — showing the last data</span>';
           if (paused) return '<span class="stale">❚❚ paused</span>';
           return '<span class="live">● ' + word + "</span>";
@@ -2577,6 +2930,152 @@ enum WebViewerAssets {
           const next = shown === "dark" ? "light" : "dark";
           return next === system ? null : next;
         }
+
+        // ---- Activity: what agents, test runs and viewers did to the device ----
+
+        // "3 s ago" — the feed's age, finer than formatAgo's "just now".
+        function formatSince(milliseconds) {
+          if (!isFinite(milliseconds)) return "";
+          const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+          if (seconds < 1) return "now";
+          if (seconds < 60) return seconds + " s ago";
+          const minutes = Math.floor(seconds / 60);
+          return minutes < 60 ? minutes + " min ago" : Math.floor(minutes / 60) + " h ago";
+        }
+
+        const ACTOR_NAMES = { agent: "Agent", test: "Test", viewer: "Viewer" };
+
+        // How long an agent counts as driving after its last action: long enough to
+        // cover it reading the screen between two taps.
+        const AGENT_DRIVING_MS = 30000;
+
+        // Who drives the device now: the test run the server reports, or an agent that
+        // acted within AGENT_DRIVING_MS, or nobody (null). `key` names one stretch of
+        // driving, so a person who took over is asked again only when a new one starts.
+        function deviceDriver(entries, run, now) {
+          if (run && run.active) {
+            let step = run.totalSteps ? { index: Math.min(run.completedSteps + 1, run.totalSteps), total: run.totalSteps } : null;
+            for (let i = entries.length - 1; i >= 0 && !step; i--) {
+              const parsed = entries[i].kind === "step" ? parseStepText(entries[i].title) : null;
+              if (parsed && parsed.index) step = { index: Math.min(parsed.index + 1, parsed.total), total: parsed.total };
+            }
+            return { actor: "test", key: "test:" + (run.sessionId || run.file || run.name || ""), title: run.name || run.file || "a test", step };
+          }
+          let newest = null, first = null;
+          for (let i = entries.length - 1; i >= 0; i--) {
+            const entry = entries[i];
+            if (entry.actor !== "agent") continue;
+            const end = Date.parse(entry.endedAt || entry.at);
+            if (!newest) {
+              if (entry.status !== "running" && !(now - end < AGENT_DRIVING_MS)) return null;
+              newest = entry;
+            } else if (Date.parse(first.at) - end >= AGENT_DRIVING_MS) {
+              break;
+            }
+            first = entry;
+          }
+          return newest ? { actor: "agent", key: "agent:" + first.id, title: newest.title, lastAt: Date.parse(newest.endedAt || newest.at), entry: newest } : null;
+        }
+
+        // A gesture's ends as fractions of the screen, from the points it was played
+        // in; the server's screen size wins, the page's own (AX) size is the fallback.
+        function gestureRatios(gesture, screenPoints) {
+          const screen = gesture && (gesture.screen || screenPoints);
+          if (!screen || !screen.width || !screen.height) return null;
+          const ratio = (point) => ({ x: Math.min(1, Math.max(0, point.x / screen.width)), y: Math.min(1, Math.max(0, point.y / screen.height)) });
+          const from = ratio(gesture.from), to = ratio(gesture.to);
+          const moved = Math.hypot(gesture.to.x - gesture.from.x, gesture.to.y - gesture.from.y) >= 1;
+          return { from, to, moved };
+        }
+
+        // The CLI command that does what an entry did, for touches with a known path.
+        function activityCommand(entry) {
+          const gesture = entry && entry.gesture;
+          if (!gesture) return "";
+          const round = (value) => Math.round(value);
+          const at = "--x " + round(gesture.from.x) + " --y " + round(gesture.from.y);
+          const path = "--start-x " + round(gesture.from.x) + " --start-y " + round(gesture.from.y) + " --end-x " + round(gesture.to.x) + " --end-y " + round(gesture.to.y);
+          switch (entry.kind) {
+            case "tap": return "simtool input tap " + at;
+            case "long-press": return "simtool input long-press " + at + " --duration " + Math.round(gesture.press * 100) / 100;
+            case "drag": return "simtool input drag " + path;
+            case "swipe": case "scroll": case "fling": return "simtool input swipe " + path + (entry.kind === "fling" ? " --hold 0" : "");
+            default: return "";
+          }
+        }
+
+        // ---- Session review: the part of a run one step covers ----
+
+        // Milliseconds since the epoch from the times evidence carries: epoch seconds
+        // (state), ISO 8601 (network, steps) and OSLog's "2026-10-20 18:40:11.226211-0300"
+        // (logs), which not every browser parses. NaN when unreadable.
+        function parseInstant(value) {
+          if (typeof value === "number") return value * 1000;
+          if (value == null || value === "") return NaN;
+          const text = String(value);
+          const oslog = /^(\d{4}-\d\d-\d\d)[ T](\d\d:\d\d:\d\d)(?:\.(\d+))?([+-]\d\d):?(\d\d)$/.exec(text);
+          if (oslog) return Date.parse(oslog[1] + "T" + oslog[2] + oslog[4] + ":" + oslog[5]) + (oslog[3] ? Number("0." + oslog[3]) * 1000 : 0);
+          return Date.parse(text);
+        }
+
+        // What each step of a session covers: from the moment it began acting (its
+        // first input, or its end for a step that only waited) to the moment the next
+        // step did; the last one to the end of the run. A tap's window therefore holds
+        // the requests and lines it caused while the next step waited for them.
+        // `index` is the step's position in session.entries.
+        function stepWindows(session) {
+          const end = parseInstant(session.endedAt);
+          const steps = (session.entries || []).map((entry, index) => ({ entry, index })).filter(({ entry }) => entry.kind === "step");
+          return steps.map(({ entry, index }, position) => ({
+            index,
+            text: entry.text || "",
+            from: parseInstant(entry.at),
+            to: position + 1 < steps.length ? parseInstant(steps[position + 1].entry.at) : (isFinite(end) ? end : Infinity)
+          }));
+        }
+
+        // The window the playhead is in — the step at `entryIndex`, or what came
+        // before the first step — or the whole run.
+        function reviewWindow(session, entryIndex, scope) {
+          const start = parseInstant(session.startedAt), end = parseInstant(session.endedAt);
+          const run = { from: start, to: isFinite(end) ? end : Infinity, step: null, text: "" };
+          if (scope === "run") return run;
+          const windows = stepWindows(session);
+          const position = windows.findIndex((window) => window.index === entryIndex);
+          if (position < 0) return { from: start, to: windows.length ? windows[0].from : run.to, step: 0, text: "" };
+          return { from: windows[position].from, to: windows[position].to, step: position + 1, text: windows[position].text };
+        }
+
+        // When an item of evidence happened: a request when it started (the logger
+        // stamps it when it finishes), a log line and a state change when they were written.
+        function evidenceInstant(kind, item) {
+          if (kind === "network") return parseInstant(item.timestamp) - (item.durationMilliseconds || 0);
+          return parseInstant(item.timestamp);
+        }
+
+        function inWindow(kind, item, window) {
+          const at = evidenceInstant(kind, item);
+          return at >= window.from && at < window.to;
+        }
+
+        // The tracked models as they stood at the end of a window, and what changed
+        // inside it — the State tab's latest/changes/lastChange for a moment of a run.
+        function foldStateEvents(events, window) {
+          const latest = {}, changes = [], lastChange = {};
+          const ordered = events.slice().sort((a, b) => (a.timestamp - b.timestamp) || ((a.cursor || 0) - (b.cursor || 0)));
+          for (const event of ordered) {
+            const at = event.timestamp * 1000;
+            if (at >= window.to) break;
+            const previous = latest[event.modelId];
+            const diffs = diffStateValues(previous ? previous.snapshot : undefined, event.snapshot, "", []);
+            if (at >= window.from) {
+              if (previous || event.deallocated) changes.push({ event, diffs });
+              lastChange[event.modelId] = event.deallocated ? [] : diffs.map((diff) => diff.path);
+            }
+            latest[event.modelId] = event.deallocated && previous ? { ...event, snapshot: previous.snapshot } : event;
+          }
+          return { latest, changes, lastChange };
+        }
         """#
 
     static let jsLogsJs = #"""
@@ -2619,13 +3118,13 @@ enum WebViewerAssets {
           header: el("div", { class: "thead log-grid", role: "row", html: '<span class="cell" role="columnheader">Time</span><span class="cell" role="columnheader">Level</span><span class="cell c-ss" role="columnheader">Subsystem</span><span class="cell" role="columnheader">Message</span>' }),
           key: (entry) => String(entry.sequence),
           version: (entry) => (logsFilter.text || "") + "|" + (entry.launchId === newestLaunchId() ? 1 : 0),
-          rowClass: (entry) => "log-grid" + (isLogError(entry) ? " lvl-err" : "") + (entry.launchId != null && entry.launchId !== newestLaunchId() ? " retired" : ""),
-          group: (entry) => entry.launchId != null ? String(entry.launchId) : null,
+          rowClass: (entry) => "log-grid" + (isLogError(entry) ? " lvl-err" : "") + (!reviewActive() && entry.launchId != null && entry.launchId !== newestLaunchId() ? " retired" : ""),
+          group: (entry) => !reviewActive() && entry.launchId != null ? String(entry.launchId) : null,
           renderGroup: (id, items, collapsed) => launchGroupHTML(id, items, collapsed, "line", [{ count: items.filter(isLogError).length, tone: "err", one: "error", many: "errors" }]),
           render: renderLogRow,
           empty: () => logsEmpty(),
           onSelect: (key, entry) => { logs.selected = entry; renderLogDetail(); },
-          exists: (key) => logs.entries.some((entry) => String(entry.sequence) === key && entry.sequence >= logs.cleared),
+          exists: (key) => logRows().some((entry) => String(entry.sequence) === key),
           onMenu: (key, entry, x, y, row) => openMenu(x, y, logRowMenu(entry, row), row),
           onGroupMenu: (id, x, y, button) => openMenu(x, y, launchGroupMenu("logs", id), button),
           follow: () => logs.follow
@@ -2650,6 +3149,7 @@ enum WebViewerAssets {
         }
 
         function logsEmpty() {
+          if (reviewActive()) return reviewEmpty("logs");
           if (!inspector.attachedApp && inspector.configKnown) return noAppPanel("logs");
           if (logs.entries.length && logs.entries.every((entry) => entry.sequence < logs.cleared)) return el("div", { class: "empty", html: "<b>Cleared</b>New lines appear here as the app logs them." });
           if (logs.entries.length) {
@@ -2682,8 +3182,7 @@ enum WebViewerAssets {
 
         function renderLevels() {
           const counts = {};
-          for (const entry of logs.entries) {
-            if (entry.sequence < logs.cleared) continue;
+          for (const entry of logRows()) {
             const level = logLevel(entry);
             counts[level] = (counts[level] || 0) + 1;
           }
@@ -2695,11 +3194,15 @@ enum WebViewerAssets {
           }
         }
 
+        // The lines the list is about: the live ones not cleared, or the reviewed run's in its window.
+        function logRows() {
+          return reviewActive() ? reviewRows("logs", logs.entries) : logs.entries.filter((entry) => entry.sequence >= logs.cleared);
+        }
+
         function logsVisible() {
           const parsed = parseFieldTerm(logsFilter.text, LOGS_FILTER_FIELDS);
           const chips = logsFilter.chips;
-          return logs.entries.filter((entry) => {
-            if (entry.sequence < logs.cleared) return false;
+          return logRows().filter((entry) => {
             if (logs.levels[logLevel(entry)] === false) return false;
             if (!parsed.term && !chips.length) return true;
             const fields = logFields(entry);
@@ -2718,14 +3221,15 @@ enum WebViewerAssets {
           rows.sort((a, b) => ((a.launchId ?? -1) - (b.launchId ?? -1)) || (a.sequence - b.sequence));
           logsList.update(rows);
           renderLevels();
-          const errors = logs.entries.filter((entry) => entry.sequence >= logs.cleared && isLogError(entry)).length;
-          setCount("logs", logs.entries.filter((entry) => entry.sequence >= logs.cleared).length, errors);
+          const all = logRows();
+          const errors = all.filter(isLogError).length;
+          setCount("logs", all.length, errors);
           const times = rows.length ? [rows[0].timestamp, rows[rows.length - 1].timestamp] : null;
           logsView.guide.innerHTML = guideHTML([
             times ? "<b>" + escapeHTML(formatClock(times[0], true)) + " → " + escapeHTML(formatClock(times[1], true)) + "</b>" : "",
             formatCount(rows.length) + " shown",
-            logs.entries.length >= LOGS_MAX ? "newest " + formatCount(LOGS_MAX) + " kept" : "",
-            logs.dropped ? '<span title="The capture fell behind and skipped lines">' + plural(logs.dropped, "line dropped by the capture", "lines dropped by the capture") + "</span>" : "",
+            !reviewActive() && logs.entries.length >= LOGS_MAX ? "newest " + formatCount(LOGS_MAX) + " kept" : "",
+            !reviewActive() && logs.dropped ? '<span title="The capture fell behind and skipped lines">' + plural(logs.dropped, "line dropped by the capture", "lines dropped by the capture") + "</span>" : "",
             inspector.attachedApp ? escapeHTML(inspector.attachedApp) : ""
           ], liveTag(logs.follow ? "following" : "capturing"));
         }
@@ -2917,6 +3421,7 @@ enum WebViewerAssets {
           resetNetwork();
           resetLogs();
           resetState();
+          resetActivity();
           ax.tree = null;
           networkLastPayload = "";
           testsLastSessions = "";
@@ -2962,12 +3467,15 @@ enum WebViewerAssets {
         poller.add("tests", () => (activeTab("tests") ? ACTIVE_MS : BACKGROUND_MS), loadTests, polling);
         // The tree is not on the stream: it is read when the screen changed.
         poller.add("ax", AX_CHECK_MS, loadAx, () => activeTab("ax") && app.dataset.mode !== "replay" && axTreeStale());
+        // Every tab needs it: the marks on the screen and who drives the device.
+        poller.add("activity", 500, pollActivity);
 
         onReconnect(async () => {
           try { await bootstrap(); } catch (_) {}
           // A server that came back may be one that streams, where the last one did not.
           startInspectorEvents();
           for (const name of ["network", "logs", "state", "tests"]) refreshInspector(name);
+          poller.poke("activity");
         });
 
         onConnection((state) => {
@@ -3084,14 +3592,15 @@ enum WebViewerAssets {
           header: createSortHeader("net-grid", NETWORK_COLUMNS, network.sort, () => renderNetwork()),
           key: (event) => event.id,
           version: (event) => [event.response ? 1 : 0, event.error ? 1 : 0, event.launchId, event.durationMilliseconds, event._wf, newestLaunchId() === event.launchId].join("|"),
-          rowClass: (event) => "net-grid" + (event.mocked ? " mocked" : "") + (event.launchId != null && event.launchId !== newestLaunchId() ? " retired" : ""),
-          group: (event) => event.launchId != null ? String(event.launchId) : null,
+          // A reviewed run is one launch's story: no launch groups, nothing reads as earlier.
+          rowClass: (event) => "net-grid" + (event.mocked ? " mocked" : "") + (!reviewActive() && event.launchId != null && event.launchId !== newestLaunchId() ? " retired" : ""),
+          group: (event) => !reviewActive() && event.launchId != null ? String(event.launchId) : null,
           collapsed: [],
           renderGroup: (id, items, collapsed) => launchGroupHTML(id, items, collapsed, "request", networkMarks(items)),
           render: renderNetworkRow,
           empty: () => networkEmpty(),
           onSelect: (key, event) => { network.selected = event; renderNetworkDetail(); },
-          exists: (key) => !network.cleared.has(key) && network.events.some((event) => event.id === key),
+          exists: (key) => networkRows().some((event) => event.id === key),
           onActivate: () => { const tab = networkView.detail.querySelector("[role=tab][aria-selected=true]"); if (tab) tab.focus(); },
           onMenu: (key, event, x, y, row) => openMenu(x, y, networkRowMenu(event), row),
           onGroupMenu: (id, x, y, button) => openMenu(x, y, launchGroupMenu("network", id), button),
@@ -3115,6 +3624,7 @@ enum WebViewerAssets {
         }
 
         function networkEmpty() {
+          if (reviewActive()) return reviewEmpty("network");
           if (!inspector.attachedApp && inspector.configKnown && !network.events.length) return noAppPanel("network");
           if (network.events.length && network.events.every((event) => network.cleared.has(event.id))) {
             return el("div", { class: "empty", html: "<b>Cleared</b>New requests appear here as the app makes them." });
@@ -3127,11 +3637,15 @@ enum WebViewerAssets {
           return el("div", { class: "empty", html: "<b>No requests yet</b>The app's network logger reports each call here as it finishes. Apps launched by <code>simtool run</code> or <code>simtool app launch</code> have it armed; apps that link <code>SimToolNetworkLogger</code> keep reporting after a relaunch." });
         }
 
+        // The requests the list is about: the live ones not cleared, or the reviewed run's in its window.
+        function networkRows() {
+          return reviewActive() ? reviewRows("network", network.events) : network.events.filter((event) => !network.cleared.has(event.id));
+        }
+
         function networkVisible() {
           const query = networkFilter.text;
           const chips = networkFilter.chips;
-          return network.events.filter((event) => {
-            if (network.cleared.has(event.id)) return false;
+          return networkRows().filter((event) => {
             if (network.protocol !== "all" && event.protocol !== network.protocol) return false;
             if (network.failedOnly && !isNetworkProblem(event)) return false;
             if (network.mockedOnly && !event.mocked) return false;
@@ -3174,7 +3688,8 @@ enum WebViewerAssets {
             event._wf = "left:" + left.toFixed(1) + "%;width:" + Math.min(width, 100 - left).toFixed(1) + "%";
           }
           networkList.update(rows);
-          const shown = rows.length, total = network.events.filter((event) => !network.cleared.has(event.id)).length;
+          const all = networkRows();
+          const shown = rows.length, total = all.length;
           const times = rows.map((event) => event.timestamp).filter(Boolean).sort();
           const hidden = total - shown;
           networkView.guide.innerHTML = guideHTML([
@@ -3183,7 +3698,7 @@ enum WebViewerAssets {
             hidden ? formatCount(hidden) + " hidden by filters" : "",
             network.paused && network.pausedNew ? plural(network.pausedNew, "new while paused", "new while paused") : ""
           ], liveTag("capturing", network.paused));
-          const [failed, problems] = networkMarks(network.events.filter((event) => !network.cleared.has(event.id)));
+          const [failed, problems] = networkMarks(all);
           setCount("network", total, failed.count, problems.count);
           if (network.selected) {
             const fresh = network.events.find((event) => event.id === network.selected.id);
@@ -3377,7 +3892,7 @@ enum WebViewerAssets {
 
     static let jsPaletteJs = #"""
         // The command palette (⇧⌘P) and the page's keyboard shortcuts. Shortcuts
-        // follow Simulator.app and Xcode where they exist; tabs use ⌥1–5 because
+        // follow Simulator.app and Xcode where they exist; tabs use ⌥1–6 because
         // browsers keep ⌘1–9 for themselves.
 
         function paletteCommands() {
@@ -3401,6 +3916,7 @@ enum WebViewerAssets {
             ["Inspector", "panel", "State", "⌥3", () => openTab("state")],
             ["Inspector", "pick", "Accessibility", "⌥4", () => openTab("ax")],
             ["Inspector", "panel", "Tests", "⌥5", () => openTab("tests")],
+            ["Inspector", "pick", "Activity — what was done to the device", "⌥6", () => openTab("activity")],
             ["Inspector", "search", "Filter the current list", "/", focusFilter],
             ["Network", network.paused ? "play" : "pause", network.paused ? "Resume the request list" : "Pause the request list", "", () => { openTab("network"); networkPause.click(); }],
             ["Network", "trash", "Clear the request list", "", () => { openTab("network"); networkClear.click(); }],
@@ -3431,14 +3947,14 @@ enum WebViewerAssets {
         }
 
         function focusTabList(tab) {
-          const lists = { network: networkList, logs: logsList, ax: axList, tests: tests.view === "history" ? historyList : definitionList };
+          const lists = { network: networkList, logs: logsList, ax: axList, tests: tests.view === "history" ? historyList : definitionList, activity: activityList };
           if (lists[tab]) lists[tab].focus();
           else if (tab === "state") (stateModels.querySelector('[tabindex="0"]') || stateModels).focus();
         }
 
         function focusFilter() {
           if (!inspector.open) setInspectorOpen(true);
-          const filters = { network: networkFilter, logs: logsFilter, state: stateFilter, ax: axFilter, tests: testsFilter };
+          const filters = { network: networkFilter, logs: logsFilter, state: stateFilter, ax: axFilter, tests: testsFilter, activity: activityFilter };
           filters[inspector.tab].focus();
         }
 
@@ -3548,7 +4064,7 @@ enum WebViewerAssets {
           if (event.metaKey && !event.shiftKey && !event.altKey && !event.ctrlKey && event.code === "KeyS") { event.preventDefault(); saveScreenshot(); return; }
           if (event.metaKey && event.ctrlKey && event.code === "KeyZ") { event.preventDefault(); pressShake(); return; }
           if (event.metaKey && event.altKey && event.code === "Digit0") { event.preventDefault(); setInspectorOpen(!inspector.open); return; }
-          if (event.altKey && !meta && /^Digit[1-5]$/.test(event.code)) { event.preventDefault(); openTab(TABS[Number(event.code.slice(5)) - 1]); return; }
+          if (event.altKey && !meta && /^Digit[1-6]$/.test(event.code)) { event.preventDefault(); openTab(TABS[Number(event.code.slice(5)) - 1]); return; }
           if (meta && event.key === "Enter" && inspector.tab === "tests" && tests.view === "tests" && tests.selectedFile) { event.preventDefault(); runTest(tests.selectedFile); return; }
           if (editing || keyboardBridge.enabled) return;
           if (meta && event.code === "KeyF" && inspector.open) { event.preventDefault(); focusFilter(); return; }
@@ -3563,6 +4079,181 @@ enum WebViewerAssets {
           if (!$("popover").hidden && !$("popover").contains(event.target) && !event.target.closest("[aria-haspopup=dialog]")) closePopover();
         });
         window.addEventListener("resize", () => { closeMenu(); closePopover(); });
+        """#
+
+    static let jsReviewJs = #"""
+        // Session review: while a recording plays, Network, Logs and State show that
+        // run — its own evidence files, or this server's memory when it kept none —
+        // cut to the step the playhead is in, or to the whole run. The window follows
+        // the playhead; each step of the timeline says what it caused and opens it.
+
+        const REVIEW_FILES = { network: "network.jsonl", logs: "logs.jsonl", state: "state.jsonl" };
+        const review = {
+          scope: stored("review.scope", "step"),   // step | run
+          evidence: new Map(),                     // session id → { network, logs, state, loading, error }
+          window: null                             // the span the lists show: { from, to, step, text }
+        };
+
+        function reviewActive() {
+          return app.dataset.mode === "replay" && !!tests.replay;
+        }
+
+        // A session's evidence, fetched once. Kinds it kept no file for stay null and
+        // read from this server's memory instead.
+        function loadEvidence(session) {
+          const known = review.evidence.get(session.id);
+          if (known) return known.ready;
+          const record = { network: null, logs: null, state: null, loading: true, error: "" };
+          record.ready = Promise.all(Object.entries(REVIEW_FILES).map(async ([kind, name]) => {
+            if (!(session.evidence || []).includes(name)) return;
+            try {
+              const text = await (await api("/api/v1/tests/" + encodeURIComponent(session.id) + "/evidence/" + encodeURIComponent(name))).text();
+              record[kind] = text.split("\n").filter(Boolean).map((line) => { try { return JSON.parse(line); } catch (_) { return null; } }).filter(Boolean);
+            } catch (error) {
+              record.error = error.message;
+            }
+          })).then(() => {
+            record.loading = false;
+            if (reviewActive() && tests.replay.id === session.id) refreshReview();
+            if (tests.selectedSession === session.id && inspector.tab === "tests") renderTestsDetail();
+          });
+          review.evidence.set(session.id, record);
+          return record.ready;
+        }
+
+        function reviewRecord(session) {
+          return session ? review.evidence.get(session.id) || null : null;
+        }
+
+        // The whole run's items of one kind: its file, else what this server still holds.
+        function reviewSource(kind, live) {
+          const record = reviewRecord(tests.replay);
+          return record && record[kind] ? record[kind] : live;
+        }
+
+        function fromEvidenceFile(kind) {
+          const record = reviewRecord(tests.replay);
+          return !!(record && record[kind]);
+        }
+
+        // What a list shows: the live items, or the reviewed run's items in the window.
+        function reviewRows(kind, live) {
+          if (!reviewActive() || !review.window) return live;
+          return reviewSource(kind, live).filter((item) => inWindow(kind, item, review.window));
+        }
+
+        // The State tab's models at the end of the window and its changes inside it.
+        // Only from the run's state.jsonl: the live tab keeps folded models, not the
+        // events a past moment could be rebuilt from.
+        function reviewStateView(live) {
+          if (!reviewActive() || !review.window) return live;
+          const record = reviewRecord(tests.replay);
+          return foldStateEvents(record && record.state ? record.state : [], review.window);
+        }
+
+        // ---- The bar over Network, Logs and State while a run is reviewed ----
+
+        const reviewBars = ["network", "logs", "state"].map((tab) => {
+          const scope = segmented("Review span", [["step", "This step"], ["run", "Whole run"]], () => review.scope, (value) => {
+            review.scope = value;
+            store("review.scope", value);
+            refreshReview();
+          });
+          scope.classList.add("keep");
+          const text = el("span", { class: "rb-text" });
+          const bar = el("div", { class: "review-bar", role: "status", hidden: true }, el("span", { html: icon("film") }), text, el("span", { class: "ptool-spacer" }), scope);
+          $("panel-" + tab).prepend(bar);
+          return { tab, bar, text, scope };
+        });
+
+        function reviewBarHTML(kind) {
+          const window = review.window;
+          if (!window) return "";
+          const what = window.step == null ? "<b>Whole run</b>" : window.step === 0 ? "<b>Before the first step</b>" : "<b>Step " + window.step + "</b> " + escapeHTML(splitStep(parseStepText(window.text).text).head);
+          const span = '<span class="mono">' + escapeHTML(formatClock(new Date(window.from), true)) + " → " + (isFinite(window.to) ? escapeHTML(formatClock(new Date(window.to), true)) : "end") + "</span>";
+          const record = reviewRecord(tests.replay);
+          const source = record && record.loading ? "loading the run's evidence…" : fromEvidenceFile(kind) ? "from the run's " + REVIEW_FILES[kind]
+            : kind === "state" ? "the run kept no state.jsonl" : "from this server's memory — the run kept no " + REVIEW_FILES[kind];
+          return what + span + '<span class="rb-source">' + escapeHTML(source) + "</span>";
+        }
+
+        function renderReviewBars() {
+          for (const { tab, bar, text, scope } of reviewBars) {
+            bar.hidden = !reviewActive();
+            if (bar.hidden) continue;
+            text.innerHTML = reviewBarHTML(tab);
+            scope.sync();
+          }
+        }
+
+        // The window moved — a new step under the playhead, the scope switched, the evidence arrived.
+        function refreshReview() {
+          review.window = reviewActive() ? reviewWindow(tests.replay, replayCurrentIndex, review.scope) : null;
+          renderReviewBars();
+          networkList.invalidate();
+          logsList.invalidate();
+          renderNetwork();
+          renderLogs();
+          renderState();
+        }
+
+        function startReview(session) {
+          loadEvidence(session);
+          refreshReview();
+        }
+
+        function stopReview() {
+          review.window = null;
+          refreshReview();
+        }
+
+        // The note a list shows when the window holds nothing of its kind.
+        function reviewEmpty(kind) {
+          const record = reviewRecord(tests.replay);
+          if (record && record.loading) return el("div", { class: "empty", html: "<b>Loading the run's evidence</b>" });
+          const noun = { network: "requests", logs: "log lines", state: "state changes" }[kind];
+          const where = review.window && review.window.step != null ? "in this step" : "in this run";
+          const missing = kind === "state" ? "The run kept no state.jsonl." : "The run kept no " + REVIEW_FILES[kind] + ", and this server holds none from then.";
+          const node = el("div", { class: "empty", html: "<b>No " + noun + " " + where + "</b>" + (fromEvidenceFile(kind) ? "The run's evidence holds none between these times." : missing) });
+          if (review.scope === "step") node.append(el("button", { class: "btn btn-sm", type: "button", text: "Show the whole run", onclick: () => { review.scope = "run"; store("review.scope", "run"); refreshReview(); } }));
+          return node;
+        }
+
+        // ---- What each step of a timeline caused ----
+
+        // Counts of the requests, log lines and state changes in each step's window,
+        // once the session's evidence is in. Kinds the run kept no file for are left out.
+        function stepEvidenceCounts(session) {
+          const record = reviewRecord(session);
+          if (!record || record.loading) return null;
+          const counts = new Map();
+          for (const window of stepWindows(session)) {
+            counts.set(window.index, {
+              network: record.network ? record.network.filter((item) => inWindow("network", item, window)).length : null,
+              logs: record.logs ? record.logs.filter((item) => inWindow("logs", item, window)).length : null,
+              state: record.state ? record.state.filter((item) => inWindow("state", item, window)).length : null
+            });
+          }
+          return counts;
+        }
+
+        // The row under a step that opens what it caused, in the tab that shows it.
+        function stepEvidenceHTML(counts, offset) {
+          if (!counts) return "";
+          const links = [["network", "request", "requests"], ["logs", "log line", "log lines"], ["state", "state update", "state updates"]]
+            .filter(([kind]) => counts[kind] != null)
+            .map(([kind, one, many]) => '<button class="ev-link" type="button" data-act="step-evidence" data-tab="' + kind + '" data-offset="' + offset + '"' + (counts[kind] ? "" : " disabled") + ">" + plural(counts[kind], one, many) + "</button>");
+          return links.length ? '<li class="step-ev">' + links.join("") + "</li>" : "";
+        }
+
+        // Seek to the step and hold there, cut the lists to it, and show the one asked for.
+        function openStepEvidence(tab, offset) {
+          review.scope = "step";
+          store("review.scope", "step");
+          seekToStep(offset, { hold: true });
+          openTab(tab);
+          refreshReview();
+        }
         """#
 
     static let jsStateJs = #"""
@@ -3593,15 +4284,20 @@ enum WebViewerAssets {
         );
 
         stateCopy.addEventListener("click", () => {
-          const event = stateView.latest[stateView.selected];
+          const event = stateModelsView().latest[stateView.selected];
           if (event) copyText(JSON.stringify(event.snapshot, (key, value) => key === MODEL_ID_KEY ? undefined : value, 2), "Snapshot copied");
         });
 
-        function stateMatches(id) {
+        // The models the tab is about: live, or as a reviewed run held them at the end of its window.
+        function stateModelsView() {
+          return reviewStateView(stateView);
+        }
+
+        function stateMatches(id, view) {
           const query = stateFilter.text;
           const chips = stateFilter.chips;
           if (!query && !chips.length) return true;
-          const event = stateView.latest[id];
+          const event = view.latest[id];
           const hay = (id + " " + JSON.stringify(event ? event.snapshot : "")).toLowerCase();
           return matchesFilters(hay, chips, query);
         }
@@ -3624,19 +4320,22 @@ enum WebViewerAssets {
         }
 
         function renderState() {
-          const ids = Object.keys(stateView.latest).sort((a, b) => {
-            const left = stateView.latest[a], right = stateView.latest[b];
+          const view = stateModelsView();
+          const ids = Object.keys(view.latest).sort((a, b) => {
+            const left = view.latest[a], right = view.latest[b];
             return (left.deallocated ? 1 : 0) - (right.deallocated ? 1 : 0) || a.localeCompare(b);
-          }).filter(stateMatches);
-          if (stateView.selected && !stateView.latest[stateView.selected]) stateView.selected = null;
-          if (!stateView.selected && ids.length) stateView.selected = ids[0];
-          setCount("state", Object.keys(stateView.latest).length, 0);
+          }).filter((id) => stateMatches(id, view));
+          // A reviewed moment without the chosen model keeps the choice for when the playhead finds it again.
+          if (stateView.selected && !view.latest[stateView.selected] && view === stateView) stateView.selected = null;
+          const selected = stateView.selected && view.latest[stateView.selected] ? stateView.selected : ids[0] || null;
+          if (view === stateView) stateView.selected = selected;
+          setCount("state", Object.keys(view.latest).length, 0);
 
           const focusedId = document.activeElement && stateModels.contains(document.activeElement) ? document.activeElement.dataset.model : null;
           stateModels.innerHTML = "";
           for (const id of ids) {
-            const event = stateView.latest[id];
-            const button = el("button", { type: "button", class: "model" + (event.deallocated ? " dead" : ""), role: "option", "aria-selected": String(id === stateView.selected), tabindex: id === stateView.selected ? "0" : "-1", "data-model": id });
+            const event = view.latest[id];
+            const button = el("button", { type: "button", class: "model" + (event.deallocated ? " dead" : ""), role: "option", "aria-selected": String(id === selected), tabindex: id === selected ? "0" : "-1", "data-model": id });
             button.innerHTML = '<span class="dot ' + (event.deallocated ? "dot-idle" : "dot-ok") + '" title="' + (event.deallocated ? "deallocated" : "alive") + '"></span>' +
               '<span class="m-name" translate="no">' + escapeHTML(id) + '</span><span class="m-seq">#' + escapeHTML(event.seq) + "</span>" +
               '<span class="m-sub">' + (event.deallocated ? "deallocated " : "changed ") + escapeHTML(formatClock(event.timestamp)) + "</span>";
@@ -3647,33 +4346,35 @@ enum WebViewerAssets {
           if (!ids.length) {
             stateBody.innerHTML = "";
             stateBody.paneKey = null;
-            if (!inspector.attachedApp && inspector.configKnown && !Object.keys(stateView.latest).length) stateBody.append(noAppPanel("state"));
-            else if (Object.keys(stateView.latest).length) stateBody.append(el("div", { class: "empty", html: "<b>No model matches</b>Clear the filter to see all " + formatCount(Object.keys(stateView.latest).length) + "." }));
+            if (view !== stateView && !Object.keys(view.latest).length) stateBody.append(reviewEmpty("state"));
+            else if (!inspector.attachedApp && inspector.configKnown && !Object.keys(view.latest).length) stateBody.append(noAppPanel("state"));
+            else if (Object.keys(view.latest).length) stateBody.append(el("div", { class: "empty", html: "<b>No model matches</b>Clear the filter to see all " + formatCount(Object.keys(view.latest).length) + "." }));
             else stateBody.append(el("div", { class: "empty", html: "<b>No tracked models yet</b>Annotate an <code>@Observable</code> model with <code>@SimToolDebugState</code>, register it with <code>SimToolState.track(model)</code>, and launch the app through SimTool — its state streams here on every change." }));
             return;
           }
-          const event = stateView.latest[stateView.selected];
+          const event = view.latest[selected];
           // Every state event re-renders; patchPane keeps folds, focus, scroll and a text selection.
-          const paneKey = stateView.selected + "|" + stateView.mode;
+          const paneKey = selected + "|" + stateView.mode;
           if (stateView.mode === "snapshot") {
-            patchPane(stateBody, paneKey, '<div class="dhead flat"><span class="dtitle" translate="no">' + escapeHTML(stateView.selected) + '</span><span class="muted small">seq ' + escapeHTML(event.seq) + " · " + (event.deallocated ? "deallocated" : "alive") + "</span></div>" +
-              '<div class="tree-kv" translate="no">' + renderStateTree(event.snapshot, stateView.lastChange[stateView.selected] || [], "", stateView.selected) + "</div>");
+            patchPane(stateBody, paneKey, '<div class="dhead flat"><span class="dtitle" translate="no">' + escapeHTML(selected) + '</span><span class="muted small">seq ' + escapeHTML(event.seq) + " · " + (event.deallocated ? "deallocated" : "alive") + "</span></div>" +
+              '<div class="tree-kv" translate="no">' + renderStateTree(event.snapshot, view.lastChange[selected] || [], "", selected) + "</div>");
           } else {
-            const embedded = embeddedModelIds(stateView.latest);
+            const embedded = embeddedModelIds(view.latest);
             const blocks = [];
-            if (embedded[stateView.selected]) {
-              patchPane(stateBody, paneKey, '<div class="empty"><b>Changes show in ' + escapeHTML(embedded[stateView.selected]) + "</b>This model lives inside that one, so its changes appear there as nested paths.</div>");
+            if (embedded[selected]) {
+              patchPane(stateBody, paneKey, '<div class="empty"><b>Changes show in ' + escapeHTML(embedded[selected]) + "</b>This model lives inside that one, so its changes appear there as nested paths.</div>");
               return;
             }
-            for (let index = stateView.changes.length - 1; index >= 0; index--) {
-              const { event: change, diffs } = stateView.changes[index];
-              if (change.modelId !== stateView.selected) continue;
+            for (let index = view.changes.length - 1; index >= 0; index--) {
+              const { event: change, diffs } = view.changes[index];
+              if (change.modelId !== selected) continue;
               // The parent's history entry already shows this change as a nested diff.
               if (embedded[change.modelId]) continue;
               blocks.push('<div class="change"><div class="change-head"><b translate="no">' + escapeHTML(change.modelId) + "</b><span>seq " + escapeHTML(change.seq) + '</span><span class="mono">' + escapeHTML(formatClock(change.timestamp, true)) + "</span>" + (change.deallocated ? "<span>deallocated</span>" : "") + "</div>" +
                 diffs.map((diff) => '<div class="diffline" translate="no"><span class="path">' + escapeHTML(diff.path) + "</span><del>" + escapeHTML(stateValueText(diff.before)) + '</del><span class="arrow">→</span><ins>' + escapeHTML(stateValueText(diff.after)) + "</ins></div>").join("") + "</div>");
             }
-            patchPane(stateBody, paneKey, blocks.length ? blocks.join("") : '<div class="empty"><b>No changes yet</b>This model has not changed since it was first reported.</div>');
+            const none = view === stateView ? "<b>No changes yet</b>This model has not changed since it was first reported." : "<b>No changes here</b>This model did not change in the reviewed span.";
+            patchPane(stateBody, paneKey, blocks.length ? blocks.join("") : '<div class="empty">' + none + "</div>");
           }
         }
 
@@ -4283,12 +4984,16 @@ enum WebViewerAssets {
             "</div>" : "";
           const seekable = session.status !== "running" && !session.videoError;
           const current = tests.replay && tests.replay.id === session.id ? replayCurrentIndex : -1;
+          // What each step caused, once the run's evidence is in.
+          if (session.status !== "running") loadEvidence(session);
+          const counts = seekable ? stepEvidenceCounts(session) : null;
           const entries = (session.entries || []).map((entry, index) => {
             const offset = entryOffsetSeconds(session, entry);
             if (entry.kind === "step") {
               const step = parseStepText(entry.text);
               const parts = splitStep(step.text);
-              return stepHTML({ text: parts.head, detail: parts.tail, mark: step.mark, at: formatOffset(offset) }, seekable, index === current, offset.toFixed(2));
+              return stepHTML({ text: parts.head, detail: parts.tail, mark: step.mark, at: formatOffset(offset) }, seekable, index === current, offset.toFixed(2)) +
+                (counts && counts.get(index) ? stepEvidenceHTML(counts.get(index), offset.toFixed(2)) : "");
             }
             const lines = entry.logs || [];
             if (!lines.length) return "";
@@ -4319,6 +5024,7 @@ enum WebViewerAssets {
             if (action.dataset.act === "play") { const session = tests.sessions.find((candidate) => candidate.id === tests.selectedSession); if (session) enterReplay(session); }
             if (action.dataset.act === "more") { const session = tests.sessions.find((candidate) => candidate.id === tests.selectedSession); if (session) openMenuAt(action, sessionMenu(session)); }
             if (action.dataset.act === "copy-path") copyText(action.dataset.path, "Path copied");
+            if (action.dataset.act === "step-evidence") openStepEvidence(action.dataset.tab, Number(action.dataset.offset));
             return;
           }
           const step = event.target.closest(".step.seekable");
@@ -4381,6 +5087,7 @@ enum WebViewerAssets {
           if (tests.view !== "history") { tests.view = "history"; store("tests.view", "history"); }
           tests.selectedSession = session.id;
           if (inspector.tab === "tests") renderTests();
+          startReview(session);
           video.play().catch(() => {});
         }
 
@@ -4397,13 +5104,15 @@ enum WebViewerAssets {
           updateAxMode();
           layoutWorkspace();
           if (inspector.tab === "tests") renderTestsDetail();
+          stopReview();
         }
 
-        function seekToStep(offset) {
+        // `hold` stops the recording at the step, for reading what it caused.
+        function seekToStep(offset, { hold } = {}) {
           const session = tests.sessions.find((candidate) => candidate.id === tests.selectedSession);
           if (!session) return;
           if (!tests.replay || tests.replay.id !== session.id) enterReplay(session);
-          const seek = () => { video.currentTime = offset; video.play().catch(() => {}); };
+          const seek = () => { video.currentTime = offset; if (hold) video.pause(); else video.play().catch(() => {}); };
           if (video.readyState >= 1) seek(); else video.addEventListener("loadedmetadata", seek, { once: true });
         }
 
@@ -4436,6 +5145,8 @@ enum WebViewerAssets {
           (session.entries || []).forEach((entry, index) => { if (entry.kind === "step" && entryOffsetSeconds(session, entry) <= position + 0.25) current = index; });
           if (current !== replayCurrentIndex) {
             replayCurrentIndex = current;
+            // Network, Logs and State follow the playhead into the step.
+            refreshReview();
             if (inspector.tab === "tests" && tests.view === "history" && tests.selectedSession === session.id) {
               testsView.detail.querySelectorAll(".step").forEach((row) => row.classList.remove("current"));
               const steps = [...testsView.detail.querySelectorAll(".step[data-offset]")];
@@ -4803,10 +5514,20 @@ enum WebViewerAssets {
         .cmdk:hover { border-color: var(--line-thick); color: var(--ink1); }
         .cmdk kbd { margin-left: auto; }
 
+        /* Who drives the device right now — a test run or an agent — in course ink. */
+        .driver-status { display: contents; }
+        .driver {
+          display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; white-space: nowrap; font-weight: 500;
+          border: 1px solid var(--course-line); border-radius: var(--r-2); background: var(--course-bg); color: var(--course); cursor: pointer;
+        }
+        .driver:hover { border-color: var(--course); }
+        .driver-dot { width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--course); }
+        .driver-short { display: none; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
         /* The toolbar sheds words before it sheds actions: every button keeps its icon, label and
            shortcut tip. These come after the base rules so that they win over them. */
         @container bar (max-width: 1060px) { .cmdk-label, .cmdk kbd { display: none; } .cmdk { min-width: 0; } }
-        @container bar (max-width: 940px) { .toggle-label { display: none; } .tb-app { max-width: 120px; } }
+        @container bar (max-width: 940px) { .toggle-label, .driver-label { display: none; } .driver-short { display: inline; } .tb-app { max-width: 120px; } }
         @container bar (max-width: 820px) { .tb-app, #deviceRuntime, .tb-sep { display: none; } }
         @container bar (max-width: 700px) {
           .brand-name { display: none; }
@@ -4866,6 +5587,29 @@ enum WebViewerAssets {
         .touch-dot.held::after { content: ""; position: absolute; inset: -9px; border-radius: 50%; border: 2px solid var(--course); animation: touch-held .18s var(--ease); }
         @keyframes touch-held { from { transform: scale(.6); opacity: 0; } to { transform: scale(1); opacity: 1; } }
 
+        /* What an agent or a test run did, drawn where the finger went and gone in two
+           seconds: a ring where it went down, a stroke to where it lifted, a caption. */
+        .activity-layer { position: absolute; inset: 0; z-index: 3; overflow: hidden; pointer-events: none; }
+        .app[data-mode="replay"] .activity-layer { display: none; }
+        .act-mark, .act-caption { transition: opacity .4s var(--ease); }
+        .act-mark.fading, .act-caption.fading { opacity: 0; }
+        .act-path { position: absolute; left: 0; top: 0; overflow: visible; }
+        .act-path line { stroke: var(--course); stroke-width: 3; stroke-linecap: round; animation: act-draw var(--travel, .4s) linear forwards; }
+        .act-path path { fill: none; stroke: var(--course); stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; opacity: 0; animation: act-arrive 1ms var(--travel, .4s) forwards; }
+        @keyframes act-draw { to { stroke-dashoffset: 0; } }
+        @keyframes act-arrive { to { opacity: 1; } }
+        .act-ring { position: absolute; width: 34px; height: 34px; margin: -17px 0 0 -17px; border-radius: 50%; border: 2px solid var(--course); background: var(--course-fill); animation: act-ring .3s var(--ease); }
+        .act-ring.held::after { content: ""; position: absolute; inset: -9px; border-radius: 50%; border: 2px solid var(--course); }
+        @keyframes act-ring { from { transform: scale(.4); opacity: 0; } }
+        .act-mark.failed .act-ring { border-color: var(--err); background: var(--err-bg-strong); }
+        .act-label, .act-caption {
+          position: absolute; max-width: 160px; padding: 3px 7px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+          border: 1px solid var(--course-line); border-radius: var(--r-1); background: var(--g2); color: var(--ink1); font: 500 var(--fs-11)/1.3 var(--font-ui);
+        }
+        .act-caption { top: 12%; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 6px; max-width: calc(100% - 32px); }
+        .act-caption span:last-child { overflow: hidden; text-overflow: ellipsis; }
+        .act-caption.failed, .act-mark.failed .act-label { border-color: var(--err-line); }
+
         /* Rulers and redlines (Accessibility) — distances in points. */
         .ruler { position: absolute; display: none; color: var(--ink3); font: var(--fs-11)/1 var(--font-mono); pointer-events: none; }
         .app.ax-pick .ruler { display: block; }
@@ -4910,6 +5654,10 @@ enum WebViewerAssets {
 
         .readout { display: flex; align-items: center; gap: var(--sp-3); height: 28px; padding: 0 var(--sp-3); flex: none; overflow: hidden; white-space: nowrap; border-top: 1px solid var(--line-hair); color: var(--ink3); font-size: var(--fs-11); }
         .readout-ptr { margin-left: auto; color: var(--ink2); }
+        /* The last thing done to the device and how long ago. */
+        .readout-last { display: inline-flex; flex: 0 1 auto; align-items: center; gap: 6px; min-width: 0; overflow: hidden; color: var(--ink3); cursor: pointer; }
+        .readout-last .read-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--ink2); font-family: var(--font-ui); }
+        .readout-last.recent .read-title { color: var(--ink1); }
 
         /* ── Inspector ── */
         .inspector { position: relative; container: insp / inline-size; display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--g1); }
@@ -4967,6 +5715,7 @@ enum WebViewerAssets {
         .guide b { color: var(--ink2); font-weight: 500; }
         .guide .live { color: var(--ok); }
         .guide .stale { color: var(--warn); }
+        .guide .rec { color: var(--course); }
         .guide button { border: 0; background: none; padding: 0; color: var(--accent); cursor: pointer; font: inherit; }
 
         /* Lists: keyed rows, roving focus. */
@@ -5190,6 +5939,32 @@ enum WebViewerAssets {
         .evidence li { display: flex; align-items: center; gap: 4px; min-height: 26px; }
         .evidence .mono { min-width: 0; overflow-wrap: anywhere; color: var(--ink2); }
 
+        /* Session review: Network, Logs and State cut to the step under the playhead. */
+        .review-bar {
+          display: flex; align-items: center; gap: var(--sp-2); min-width: 0; height: 34px; padding: 0 var(--sp-2) 0 var(--sp-3); flex: none;
+          border-bottom: 1px solid var(--line-thin); background: var(--course-bg); color: var(--ink2); white-space: nowrap;
+        }
+        .review-bar > span:first-child { display: inline-flex; color: var(--course); }
+        .rb-text { display: flex; align-items: baseline; gap: var(--sp-2); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+        .rb-text b { color: var(--ink1); font-weight: 600; }
+        .rb-text .mono { font-size: var(--fs-11); color: var(--ink2); }
+        .rb-source { overflow: hidden; text-overflow: ellipsis; color: var(--ink3); font-size: var(--fs-11); }
+        @container insp (max-width: 640px) { .rb-source { display: none; } }
+        .step-ev { display: flex; flex-wrap: wrap; gap: 2px var(--sp-2); margin: -2px 0 4px 72px; }
+        .ev-link { padding: 0; border: 0; background: none; color: var(--course); font: var(--fs-11)/1.6 var(--font-ui); cursor: pointer; }
+        .ev-link:hover { text-decoration: underline; }
+        .ev-link:disabled { color: var(--ink3); cursor: default; text-decoration: none; }
+
+        /* Activity */
+        .act-grid { grid-template-columns: 86px 54px minmax(140px, 1fr) 84px; }
+        @container insp (max-width: 560px) { .act-grid { grid-template-columns: 86px 54px minmax(0, 1fr); } .act-grid > .cell:nth-child(4) { display: none; } }
+        .row.act-failed { background: var(--err-bg); }
+        .row.act-failed:hover { background: var(--err-bg-strong); }
+        .row.act-viewer .name b { color: var(--ink2); }
+        .who { display: inline-flex; align-items: center; flex: none; height: 16px; padding: 0 5px; border-radius: 3px; font: 600 var(--fs-11)/1 var(--font-ui); }
+        .who-agent, .who-test { color: var(--course); background: var(--course-bg); }
+        .who-viewer { color: var(--ink2); background: var(--g3); }
+
         /* No app attached */
         .noapp { flex: 1; overflow: auto; padding: var(--sp-6) var(--sp-5); }
         .noapp h2 { margin: 0 0 var(--sp-2); font-size: var(--fs-15); font-weight: 600; }
@@ -5250,7 +6025,7 @@ enum WebViewerAssets {
           *, *::before, *::after { transition-duration: 0ms !important; animation-duration: 0ms !important; }
           .spinner { border-top-color: var(--course); }
         }
-        .tb-btn, .toggle, .pill, .seg button, .tab, .row, .btn, .cmdk, .levels button, .model, .group-row { transition: background-color var(--dur) var(--ease), color var(--dur) var(--ease), border-color var(--dur) var(--ease); }
+        .tb-btn, .toggle, .pill, .seg button, .tab, .row, .btn, .cmdk, .levels button, .model, .group-row, .driver { transition: background-color var(--dur) var(--ease), color var(--dur) var(--ease), border-color var(--dur) var(--ease); }
         @media (max-width: 720px) {
           .statusbar .sb-cell.opt { display: none; }
         }
@@ -5326,6 +6101,7 @@ enum WebViewerAssets {
               </div>
 
               <div class="tb-group tb-right">
+                <span class="driver-status" role="status" aria-live="polite"><button class="driver" type="button" id="driverChip" hidden data-tip=""><span class="driver-dot" aria-hidden="true"></span><span class="driver-label" id="driverLabel"></span><span class="driver-short" id="driverShort" aria-hidden="true"></span></button></span>
                 <button class="toggle" type="button" id="keyboardToggle" aria-pressed="false" data-tip="Type into the simulator with the Mac keyboard" data-key="⇧⌘K" aria-keyshortcuts="Shift+Meta+K">
                   <svg class="ic" aria-hidden="true"><use href="#i-keyboard"/></svg><span class="toggle-label">Mac keyboard</span>
                 </button>
@@ -5353,6 +6129,7 @@ enum WebViewerAssets {
                       <svg class="redlines" id="redlines" aria-hidden="true"></svg>
                       <div class="redline-labels" id="redlineLabels" aria-hidden="true"></div>
                       <div class="touch-layer" id="touchLayer" aria-hidden="true"></div>
+                      <div class="activity-layer" id="activityLayer" aria-hidden="true"></div>
                       <video class="replay-video" id="replayVideo" playsinline></video>
                       <div class="replay-note" id="replayNote" hidden>The recording is unavailable — the timeline still works.</div>
                       <div class="placeholder" id="placeholder">Connecting to the simulator…</div>
@@ -5380,6 +6157,7 @@ enum WebViewerAssets {
 
                 <div class="readout mono" id="readout" aria-hidden="true">
                   <span id="readSize">—</span><span id="readFps">— fps</span>
+                  <span class="readout-last" id="readLast" title="The last thing done to the device — ⌥6 shows them all" hidden></span>
                   <span class="readout-ptr" id="readPointer"></span>
                 </div>
               </section>
@@ -5393,12 +6171,14 @@ enum WebViewerAssets {
                   <button role="tab" class="tab" type="button" id="tab-state" data-tab="state" aria-controls="panel-state" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+3">State <span class="count" id="count-state"></span></button>
                   <button role="tab" class="tab" type="button" id="tab-ax" data-tab="ax" aria-controls="panel-ax" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+4">Accessibility</button>
                   <button role="tab" class="tab" type="button" id="tab-tests" data-tab="tests" aria-controls="panel-tests" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+5">Tests <span class="count" id="count-tests"></span><span class="count-err" id="err-tests" hidden></span></button>
+                  <button role="tab" class="tab" type="button" id="tab-activity" data-tab="activity" aria-controls="panel-activity" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+6">Activity <span class="count" id="count-activity"></span><span class="count-err" id="err-activity" hidden></span></button>
                 </div>
                 <div class="panel" role="tabpanel" id="panel-network" aria-labelledby="tab-network"></div>
                 <div class="panel" role="tabpanel" id="panel-logs" aria-labelledby="tab-logs" hidden></div>
                 <div class="panel" role="tabpanel" id="panel-state" aria-labelledby="tab-state" hidden></div>
                 <div class="panel" role="tabpanel" id="panel-ax" aria-labelledby="tab-ax" hidden></div>
                 <div class="panel" role="tabpanel" id="panel-tests" aria-labelledby="tab-tests" hidden></div>
+                <div class="panel" role="tabpanel" id="panel-activity" aria-labelledby="tab-activity" hidden></div>
               </section>
             </main>
 
@@ -5446,6 +6226,8 @@ enum WebViewerAssets {
         {{js/state.js}}
         {{js/ax.js}}
         {{js/tests.js}}
+        {{js/review.js}}
+        {{js/activity.js}}
         {{js/palette.js}}
         {{js/events.js}}
         {{js/main.js}}

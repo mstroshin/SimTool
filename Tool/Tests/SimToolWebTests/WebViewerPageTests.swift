@@ -7,7 +7,7 @@ final class WebViewerPageTests: XCTestCase {
     private let page = WebViewer.pageWithAssets
 
     func testTheInspectorIsATablistWithAPanelPerTab() throws {
-        for tab in ["network", "logs", "state", "ax", "tests"] {
+        for tab in ["network", "logs", "state", "ax", "tests", "activity"] {
             let tabButton = try XCTUnwrap(page.range(of: #"role="tab" class="tab" type="button" id="tab-\#(tab)""#), "missing tab \(tab)")
             XCTAssertTrue(page[tabButton.upperBound...].prefix(200).contains(#"aria-controls="panel-\#(tab)""#), "tab \(tab) must name its panel")
             XCTAssertTrue(page.contains(#"role="tabpanel" id="panel-\#(tab)" aria-labelledby="tab-\#(tab)""#), "missing panel \(tab)")
@@ -60,13 +60,47 @@ final class WebViewerPageTests: XCTestCase {
         for route in ["/api/v1/input/stream", "/api/v1/input", "/api/v1/screenshot", "/api/v1/photos", "/api/v1/input/paste-image",
                       "/api/v1/network/events", "/api/v1/mocks", "/api/v1/launches", "/api/v1/logs/capture", "/api/v1/state/events",
                       "/api/v1/ax/tree?raw=1", "/api/v1/tests/definitions", "/api/v1/tests/run", "/api/v1/tests/run/stop", "/config",
-                      "/api/v1/events"] {
+                      "/api/v1/events", "/api/v1/activity"] {
             XCTAssertTrue(page.contains(route), "missing \(route)")
         }
         for action in [#"action: "button", name: "home""#, #"action: "shake""#, #"action: "terminate""#, #"action: "launch""#,
                        #"action: "software-keyboard""#, #"action: "hardware-keyboard", enabled: on"#, #"action: "paste", text"#] {
             XCTAssertTrue(page.contains(action), "missing \(action)")
         }
+    }
+
+    // A person watching can tell what was done to the device, and by whom,
+    // without opening anything: marks on the screen, the driver in the
+    // toolbar, the last action under the device.
+    func testWhatAgentsDoShowsOnTheScreenAndWhoDrivesIsSaid() {
+        XCTAssertTrue(page.contains(#"<div class="activity-layer" id="activityLayer" aria-hidden="true"></div>"#), "marks are drawn over the screen")
+        XCTAssertTrue(page.contains(#"<span class="driver-status" role="status" aria-live="polite"><button class="driver" type="button" id="driverChip""#), "the driver is announced")
+        XCTAssertTrue(page.contains(#"id="readLast""#), "the last action stays under the device")
+        XCTAssertTrue(page.contains(#""X-SimTool-Source": "viewer""#), "the viewer's own input is told apart from an agent's")
+    }
+
+    // Input from the page while a test or an agent drives the device asks
+    // first, wherever it comes from: the finger, the wheel, the keys, the toolbar, a paste.
+    func testManualInputAsksBeforeItLandsInSomeoneElsesRun() throws {
+        XCTAssertTrue(page.contains("if (!manualInputAllowed()) { event.preventDefault(); return; }"), "the first touch asks")
+        XCTAssertTrue(page.contains("(!wheel && !manualInputAllowed())"), "a wheel scroll asks")
+        XCTAssertTrue(page.contains("if (!manualInputAllowed()) { keepFromPage(event); return; }"), "a key asks")
+        XCTAssertTrue(page.contains("if (!manualInputAllowed(() => deviceAction(label, payload, done))) return;"), "toolbar actions ask, then run")
+        XCTAssertTrue(page.contains("if (!manualInputAllowed(() => runPaste(label, send, failureHint))) return;"), "a paste asks, then runs")
+        let guardBody = try XCTUnwrap(page.range(of: "function manualInputAllowed(proceed)"))
+        XCTAssertTrue(page[guardBody.upperBound...].prefix(900).contains("confirmDestructive("), "asking is a confirmation, not a toast")
+    }
+
+    // A recording under review cuts Network, Logs and State to the step the
+    // playhead is in, from the run's own evidence, and each step opens what it caused.
+    func testReviewingARunFollowsThePlayheadIntoTheLists() throws {
+        XCTAssertTrue(page.contains(#"api("/api/v1/tests/" + encodeURIComponent(session.id) + "/evidence/""#), "the run's own evidence files")
+        let transport = try XCTUnwrap(page.range(of: "if (current !== replayCurrentIndex) {"))
+        XCTAssertTrue(page[transport.upperBound...].prefix(200).contains("refreshReview();"), "the window follows the playhead")
+        XCTAssertTrue(page.contains("return reviewActive() ? reviewRows(\"network\", network.events)"), "Network reads the reviewed run")
+        XCTAssertTrue(page.contains("return reviewActive() ? reviewRows(\"logs\", logs.entries)"), "Logs reads the reviewed run")
+        XCTAssertTrue(page.contains("return reviewStateView(stateView);"), "State reads the reviewed run")
+        XCTAssertTrue(page.contains(#"data-act="step-evidence""#), "a step opens what it caused")
     }
 
     // The toolbar is drawn with the page's own icons, never emoji, which every

@@ -19,6 +19,7 @@ public enum TestSessionError: Error, LocalizedError, Equatable {
     case sessionRunning(id: String)
     case videoNotReady(id: String)
     case videoMissing(id: String)
+    case evidenceMissing(id: String, name: String)
 
     public var errorDescription: String? {
         switch self {
@@ -40,6 +41,8 @@ public enum TestSessionError: Error, LocalizedError, Equatable {
             "Test session \(id) is still recording; the video is available after stop."
         case let .videoMissing(id):
             "Test session \(id) has no video file."
+        case let .evidenceMissing(id, name):
+            "Test session \(id) has no evidence file \(name)."
         }
     }
 }
@@ -259,6 +262,24 @@ public final class TestSessionController: @unchecked Sendable {
         let file = store.videoFile(for: id)
         guard FileManager.default.fileExists(atPath: file.path) else {
             throw TestSessionError.videoMissing(id: id)
+        }
+        return file
+    }
+
+    /// One of the evidence files a session lists (`logs.jsonl`, a failure
+    /// screenshot, …) — only those, so the route cannot read anything else in
+    /// the project.
+    public func evidenceFile(id: String, name: String) throws -> URL {
+        guard !id.contains("/"), !id.contains(".."), !name.contains("/"), !name.contains("..") else {
+            throw TestSessionError.sessionNotFound(id: id)
+        }
+        lock.lock()
+        sweepLocked()
+        lock.unlock()
+        guard let session = try? store.session(id: id) else { throw TestSessionError.sessionNotFound(id: id) }
+        let file = store.directory(for: id).appendingPathComponent(name)
+        guard session.evidence.contains(name), FileManager.default.fileExists(atPath: file.path) else {
+            throw TestSessionError.evidenceMissing(id: id, name: name)
         }
         return file
     }

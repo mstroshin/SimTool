@@ -62,8 +62,9 @@ async function apiJSON(path, options) {
   return (await api(path, options)).json();
 }
 
+// The header tells the server's activity feed this came from a person at a viewer.
 function postInput(payload) {
-  return api("/api/v1/input", { method: "POST", body: JSON.stringify(payload) });
+  return api("/api/v1/input", { method: "POST", body: JSON.stringify(payload), headers: { "X-SimTool-Source": "viewer" } });
 }
 
 // ---- Status message, toasts, announcements ----

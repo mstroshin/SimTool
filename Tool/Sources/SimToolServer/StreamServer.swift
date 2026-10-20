@@ -79,6 +79,8 @@ public final class StreamServer: @unchecked Sendable {
     /// Agent test sessions: timeline + screen recording, persisted on disk.
     private let testSessions: TestSessionController
     private let testRuns: TestRunController
+    /// What was done to the device and by whom, for the viewer's activity feed.
+    private let activity = DeviceActivityLog()
     /// OSLog category that, by convention, carries a crash summary of the previous run (apps can
     /// only write it after relaunching - crash handlers cannot safely log at crash time).
     private static let crashReportCategory = "Crash"
@@ -208,6 +210,26 @@ public final class StreamServer: @unchecked Sendable {
             }
         }
 
+        server.GET["/api/v1/activity"] = { request in
+            let page = self.activity.query(since: request.queryInt("since"), limit: request.queryInt("limit") ?? 200)
+            let run = self.testRuns.status(activeSession: self.testSessions.activeSession)
+            do {
+                return try self.jsonEncodedResponse(DeviceActivityPayload(entries: page.entries, revision: page.revision, run: run.active ? run : nil))
+            } catch {
+                return self.errorResponse(error)
+            }
+        }
+
+        // The CLI acts on the device in its own process and says so here.
+        server.POST["/api/v1/activity"] = { request in
+            do {
+                let report = try self.decodeJSON(DeviceActivityReport.self, from: request)
+                return try self.jsonEncodedResponse(try self.activity.apply(report))
+            } catch {
+                return self.errorResponse(error, statusCode: 400, reason: "Bad Request")
+            }
+        }
+
         server.POST["/api/v1/input"] = { request in self.handleInput(request) }
         // The viewer's live finger and keys: down/move/up and keydown/keyup
         // frames, never answered.
@@ -299,11 +321,14 @@ public final class StreamServer: @unchecked Sendable {
         server.POST["/api/v1/mocks"] = { request in
             do {
                 let draft = try self.decodeJSON(MockRuleDraft.self, from: request)
-                return try self.jsonEncodedResponse(self.inspectorEvents.publish { changes in
+                let created = self.inspectorEvents.publish { changes in
                     let created = self.mockRules.add(draft)
                     changes.emit(.network, NetworkTopicPayload(mocks: self.mockRules.list(since: nil).rules))
                     return created
-                })
+                }
+                let (actor, via) = self.activityActor(of: request)
+                self.activity.record(actor: actor, via: via, kind: "mock", title: "Mock armed: " + draft.match.method, detail: Self.mockAnswer(draft) + " · " + created.id)
+                return try self.jsonEncodedResponse(created)
             } catch {
                 return self.errorResponse(error, statusCode: 400, reason: "Bad Request")
             }
@@ -339,14 +364,22 @@ public final class StreamServer: @unchecked Sendable {
                 if removed { changes.emit(.network, NetworkTopicPayload(mocks: self.mockRules.list(since: nil).rules)) }
                 return removed
             }
+            if removed {
+                let (actor, via) = self.activityActor(of: request)
+                self.activity.record(actor: actor, via: via, kind: "mock", title: "Mock removed: " + id)
+            }
             return self.jsonResponse(["ok": true, "removed": removed ? 1 : 0])
         }
 
-        server.DELETE["/api/v1/mocks"] = { _ in
+        server.DELETE["/api/v1/mocks"] = { request in
             let removed = self.inspectorEvents.publish { changes in
                 let removed = self.mockRules.clear()
                 if removed > 0 { changes.emit(.network, NetworkTopicPayload(mocks: [])) }
                 return removed
+            }
+            if removed > 0 {
+                let (actor, via) = self.activityActor(of: request)
+                self.activity.record(actor: actor, via: via, kind: "mock", title: removed == 1 ? "1 mock cleared" : "\(removed) mocks cleared")
             }
             return self.jsonResponse(["ok": true, "removed": removed])
         }
@@ -427,7 +460,7 @@ public final class StreamServer: @unchecked Sendable {
         server.POST["/api/v1/tests/start"] = { request in
             do {
                 let start = try self.decodeJSON(TestSessionStartRequest.self, from: request)
-                return try self.jsonEncodedResponse(self.inspectorEvents.publish { changes in
+                let session = try self.inspectorEvents.publish { changes in
                     let session = try self.testSessions.start(
                         title: start.title,
                         file: start.file,
@@ -439,7 +472,9 @@ public final class StreamServer: @unchecked Sendable {
                     )
                     changes.emit(.tests, TestsTopicPayload(session: session, run: self.testRunStatus()))
                     return session
-                })
+                }
+                self.activity.record(actor: .test, via: "api", kind: "test", title: "Test started: " + session.title, detail: session.file)
+                return try self.jsonEncodedResponse(session)
             } catch {
                 return self.testSessionErrorResponse(error)
             }
@@ -448,11 +483,17 @@ public final class StreamServer: @unchecked Sendable {
         server.POST["/api/v1/tests/entries"] = { request in
             do {
                 let entry = try self.decodeJSON(TestSessionEntryRequest.self, from: request)
-                return try self.jsonEncodedResponse(self.inspectorEvents.publish { changes in
+                let session = try self.inspectorEvents.publish { changes in
                     let session = try self.testSessions.append(entry)
                     changes.emit(.tests, TestsTopicPayload(session: session))
                     return session
-                })
+                }
+                // Steps and the run's narration ("Launched …"), not the log
+                // dumps attached to a failure.
+                if entry.kind == .step, let text = entry.text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+                    self.activity.record(actor: .test, via: "api", kind: "step", title: text, failed: text.hasPrefix("✗") ? "step failed" : nil)
+                }
+                return try self.jsonEncodedResponse(session)
             } catch {
                 return self.testSessionErrorResponse(error)
             }
@@ -473,6 +514,14 @@ public final class StreamServer: @unchecked Sendable {
                 // Stopping awaits the recorder, so it cannot run under the hub's
                 // lock; nothing else changes a session once it is no longer active.
                 self.inspectorEvents.publish(.tests, TestsTopicPayload(session: session, run: self.testRunStatus()))
+                self.activity.record(
+                    actor: .test,
+                    via: "api",
+                    kind: "test",
+                    title: "Test \(session.status.rawValue): " + session.title,
+                    detail: session.verdict.map { "verdict " + $0.rawValue },
+                    failed: session.status == .failed ? "the run failed" : nil
+                )
                 return try self.jsonEncodedResponse(session)
             } catch {
                 return self.testSessionErrorResponse(error)
@@ -552,6 +601,20 @@ public final class StreamServer: @unchecked Sendable {
             do {
                 let file = try self.testSessions.videoFile(id: id)
                 return self.videoFileResponse(file, rangeHeader: request.headers["range"])
+            } catch {
+                return self.testSessionErrorResponse(error)
+            }
+        }
+
+        // A session's own network, logs and state, for reviewing it step by step
+        // long after the server that recorded it is gone.
+        server.GET["/api/v1/tests/:id/evidence/:name"] = { request in
+            guard let id = request.params[":id"], let name = request.params[":name"]?.removingPercentEncoding, !id.isEmpty, !name.isEmpty else {
+                return self.errorResponse(SimToolError("Missing session id or file name"), statusCode: 400, reason: "Bad Request")
+            }
+            do {
+                let file = try self.testSessions.evidenceFile(id: id, name: name)
+                return self.dataResponse(try Data(contentsOf: file), contentType: Self.evidenceContentType(file.pathExtension))
             } catch {
                 return self.testSessionErrorResponse(error)
             }
@@ -688,7 +751,10 @@ public final class StreamServer: @unchecked Sendable {
         }
         let channel = LiveInputChannel(
             emit: { continuation.yield($0) },
-            onDown: { testSessions.noteInput(at: Date()) }
+            onDown: { [weak self] in
+                testSessions.noteInput(at: Date())
+                self?.noteLiveInputDuringRun()
+            }
         )
         liveInputLock.withLock { liveInputs[ObjectIdentifier(session)] = (channel, continuation) }
     }
@@ -746,22 +812,82 @@ public final class StreamServer: @unchecked Sendable {
     }
 
     private func handleInput(_ request: HttpRequest) -> HttpResponse {
+        let input: SimulatorInputPayload
         do {
-            let input = try decodeJSON(SimulatorInputPayload.self, from: request)
-            let action = (input.action ?? input.type ?? "").lowercased()
+            input = try decodeJSON(SimulatorInputPayload.self, from: request)
+        } catch {
+            return errorResponse(error, statusCode: 400, reason: "Bad Request")
+        }
+        let action = (input.action ?? input.type ?? "").lowercased()
+        let (actor, via) = activityActor(of: request)
+        let words = DeviceActivityWording.describe(input, action: action)
+        let entry = activity.begin(actor: actor, via: via, kind: words.kind, title: words.title, detail: words.detail)
+        let activity = activity
+        do {
             // Stamped before the gesture so a step entry lands on the frame
             // just before its action; failed inputs never reach noteInput.
             let startedAt = Date()
-            let output = try waitForAsync { try await self.perform(input: input, action: action) }
+            let output = try waitForAsync {
+                // Where the finger goes is known before it goes down: the
+                // viewer draws it while it moves.
+                try await self.perform(input: input, action: action) { stroke, screen in
+                    let words = DeviceActivityWording.describe(input, action: action, stroke: stroke)
+                    activity.update(id: entry.id) {
+                        $0.title = words.title
+                        $0.detail = words.detail
+                        $0.gesture = DeviceActivityGesture(stroke: stroke, screen: screen)
+                    }
+                }
+            }
             testSessions.noteInput(at: startedAt)
+            activity.finish(id: entry.id)
             return try jsonEncodedResponse(CommandResultPayload(
                 ok: true,
                 stdout: output.stdoutString,
                 stderr: output.stderrString
             ))
         } catch {
+            activity.finish(id: entry.id, error: error.localizedDescription)
             return errorResponse(error, statusCode: 400, reason: "Bad Request")
         }
+    }
+
+    /// Who sent a request that acts on the device. The viewer says so in a
+    /// header; anything else is an agent — or, while a test session records,
+    /// the run itself, which drives the device over this same API.
+    private func activityActor(of request: HttpRequest) -> (DeviceActivityActor, String) {
+        if request.headers["x-simtool-source"]?.lowercased() == "viewer" { return (.viewer, "viewer") }
+        return (testSessions.activeSession != nil ? .test : .agent, "api")
+    }
+
+    /// A person touching the device while a test records is part of that
+    /// run's story. One entry per burst: a drag or a typed word is one
+    /// interference, not forty.
+    private func noteLiveInputDuringRun() {
+        guard testSessions.activeSession != nil else { return }
+        let now = Date()
+        if let last = activity.last(where: { $0.kind == "live-input" }), now.timeIntervalSince(last.endedAt ?? last.at) < 3 {
+            activity.update(id: last.id) { $0.endedAt = now }
+            return
+        }
+        activity.record(actor: .viewer, via: "viewer", kind: "live-input", title: "Touched by hand during the run")
+    }
+
+    private static func evidenceContentType(_ pathExtension: String) -> String {
+        switch pathExtension.lowercased() {
+        case "jsonl": "application/x-ndjson"
+        case "json": "application/json"
+        case "png": "image/png"
+        default: "text/plain; charset=utf-8"
+        }
+    }
+
+    private static func mockAnswer(_ draft: MockRuleDraft) -> String {
+        let answer = switch draft.response.kind {
+        case .success: draft.response.bodyJSON == nil ? "answers empty" : "answers a body"
+        case .error: "fails with " + (draft.response.grpcStatus ?? "an error")
+        }
+        return draft.match.times.map { answer + ", \($0)×" } ?? answer
     }
 
     /// The image arrives as the raw body; Content-Type and the percent-encoded
@@ -771,7 +897,9 @@ public final class StreamServer: @unchecked Sendable {
             let file = try receiveMedia(request, accepting: [.image])
             defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
             let startedAt = Date()
-            let output = try waitForAsync { try await SimulatorInputClient.pasteImage(at: file, deviceUDID: self.config.device.udid) }
+            let output = try recordingActivity(of: request, kind: "paste", title: "Paste an image", detail: file.lastPathComponent) {
+                try self.waitForAsync { try await SimulatorInputClient.pasteImage(at: file, deviceUDID: self.config.device.udid) }
+            }
             testSessions.noteInput(at: startedAt)
             return try jsonEncodedResponse(CommandResultPayload(ok: true, stdout: output.stdoutString, stderr: output.stderrString))
         } catch {
@@ -779,11 +907,27 @@ public final class StreamServer: @unchecked Sendable {
         }
     }
 
+    /// Runs `body` as one activity of whoever sent `request`.
+    private func recordingActivity<T>(of request: HttpRequest, kind: String, title: String, detail: String? = nil, _ body: () throws -> T) throws -> T {
+        let (actor, via) = activityActor(of: request)
+        let entry = activity.begin(actor: actor, via: via, kind: kind, title: title, detail: detail)
+        do {
+            let result = try body()
+            activity.finish(id: entry.id)
+            return result
+        } catch {
+            activity.finish(id: entry.id, error: error.localizedDescription)
+            throw error
+        }
+    }
+
     private func handleAddToPhotos(_ request: HttpRequest) -> HttpResponse {
         do {
             let file = try receiveMedia(request, accepting: [.image, .video])
             defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
-            let output = try waitForAsync { try await SimulatorPhotosClient.add([file], deviceUDID: self.config.device.udid) }
+            let output = try recordingActivity(of: request, kind: "photos", title: "Add " + file.lastPathComponent + " to Photos") {
+                try self.waitForAsync { try await SimulatorPhotosClient.add([file], deviceUDID: self.config.device.udid) }
+            }
             return try jsonEncodedResponse(CommandResultPayload(ok: true, stdout: output.stdoutString, stderr: output.stderrString))
         } catch {
             return errorResponse(error, statusCode: 400, reason: "Bad Request")
@@ -1013,33 +1157,36 @@ public final class StreamServer: @unchecked Sendable {
         )
     }
 
-    private func perform(input: SimulatorInputPayload, action: String) async throws -> ProcessOutput {
+    /// Performs one API input. A touch is worked out first and handed to
+    /// `onStroke` just before it plays.
+    private func perform(
+        input: SimulatorInputPayload,
+        action: String,
+        onStroke: @escaping @Sendable (TouchStroke, SimulatorScreenSize?) -> Void = { _, _ in }
+    ) async throws -> ProcessOutput {
+        let udid = config.device.udid
+        @Sendable func play(_ stroke: TouchStroke) async throws -> ProcessOutput {
+            onStroke(stroke, try? await SimulatorInputClient.screenSize(deviceUDID: udid))
+            return try await SimulatorInputClient.play(stroke, deviceUDID: udid)
+        }
         switch action {
         case "tap":
             if (input.x == nil) != (input.y == nil) {
                 throw SimToolError("Tap requires both x and y when using coordinates")
             }
             let point = try await points(input.x, input.y, of: input)
-            return try await SimulatorInputClient.tap(
-                deviceUDID: config.device.udid,
-                x: point?.x,
-                y: point?.y,
-                id: input.id,
-                label: input.label
-            )
+            let target = try await SimulatorInputClient.touchPoint(deviceUDID: udid, x: point?.x, y: point?.y, id: input.id, label: input.label, action: "Tap")
+            return try await play(.tap(at: target))
         case "longpress", "long-press":
             if (input.x == nil) != (input.y == nil) {
                 throw SimToolError("Long press requires both x and y when using coordinates")
             }
             let point = try await points(input.x, input.y, of: input)
-            return try await SimulatorInputClient.longPress(
-                deviceUDID: config.device.udid,
-                x: point?.x,
-                y: point?.y,
-                id: input.id,
-                label: input.label,
-                duration: input.duration ?? TouchStroke.longPressDuration
-            )
+            let target = try await SimulatorInputClient.touchPoint(deviceUDID: udid, x: point?.x, y: point?.y, id: input.id, label: input.label, action: "Long press")
+            let duration = input.duration ?? TouchStroke.longPressDuration
+            onStroke(.longPress(at: target, duration: max(0.1, duration)), try? await SimulatorInputClient.screenSize(deviceUDID: udid))
+            // Through longPress rather than play: it warns about a press too short to register.
+            return try await SimulatorInputClient.longPress(deviceUDID: udid, x: target.x, y: target.y, duration: duration)
         case "type", "typetext", "text":
             guard let text = input.text else { throw SimToolError("Type input requires text") }
             return try await SimulatorInputClient.typeText(text, deviceUDID: config.device.udid)
@@ -1058,23 +1205,23 @@ public final class StreamServer: @unchecked Sendable {
                 throw SimToolError("\(action == "drag" ? "Drag" : "Swipe") requires startX, startY, endX, and endY")
             }
             if action == "drag" {
-                return try await SimulatorInputClient.drag(
-                    deviceUDID: config.device.udid,
-                    startX: start.x, startY: start.y, endX: end.x, endY: end.y,
-                    press: input.press,
-                    velocity: input.velocity,
-                    hold: input.hold
-                )
+                return try await play(.drag(
+                    from: start,
+                    to: end,
+                    press: input.press ?? TouchStroke.dragPress,
+                    velocity: input.velocity ?? TouchStroke.dragVelocity,
+                    hold: input.hold ?? TouchStroke.dragHold
+                ))
             }
             // The old pixel swipe from a viewer is a straight move lifted in motion.
             let pixels = input.coordinateSpace?.lowercased() == "pixels"
-            return try await SimulatorInputClient.swipe(
-                deviceUDID: config.device.udid,
-                startX: start.x, startY: start.y, endX: end.x, endY: end.y,
+            return try await play(SimulatorInputClient.swipeStroke(
+                from: start,
+                to: end,
                 duration: input.duration ?? (pixels ? 0.2 : nil),
                 velocity: input.velocity,
                 hold: input.hold ?? (pixels ? 0 : nil)
-            )
+            ))
         case "scroll", "fling":
             guard let raw = input.direction, let direction = TouchDirection(rawValue: raw.lowercased()) else {
                 throw SimToolError("\(action == "fling" ? "Fling" : "Scroll") requires direction: up, down, left or right")
@@ -1084,21 +1231,10 @@ public final class StreamServer: @unchecked Sendable {
             }
             let start = try await points(input.x, input.y, of: input)
             if action == "fling" {
-                return try await SimulatorInputClient.fling(
-                    deviceUDID: config.device.udid,
-                    direction: direction,
-                    velocity: input.velocity ?? TouchStroke.flingVelocity,
-                    x: start?.x,
-                    y: start?.y
-                )
+                let velocity = input.velocity ?? TouchStroke.flingVelocity
+                return try await play(try await SimulatorInputClient.flingStroke(deviceUDID: udid, direction: direction, velocity: velocity, x: start?.x, y: start?.y))
             }
-            return try await SimulatorInputClient.scroll(
-                deviceUDID: config.device.udid,
-                direction: direction,
-                distance: input.distance,
-                x: start?.x,
-                y: start?.y
-            )
+            return try await play(try await SimulatorInputClient.scrollStroke(deviceUDID: udid, direction: direction, distance: input.distance, x: start?.x, y: start?.y))
         case "shake":
             // Same darwin notification Simulator.app's Device > Shake menu posts;
             // UIKit in the simulated OS turns it into motionEnded(.motionShake).
@@ -1286,7 +1422,7 @@ public final class StreamServer: @unchecked Sendable {
         case TestSessionError.alreadyActive, TestSessionError.noActiveSession, TestSessionError.videoNotReady,
              TestSessionError.sessionRunning:
             return errorResponse(error, statusCode: 409, reason: "Conflict")
-        case TestSessionError.sessionNotFound, TestSessionError.videoMissing:
+        case TestSessionError.sessionNotFound, TestSessionError.videoMissing, TestSessionError.evidenceMissing:
             return errorResponse(error, statusCode: 404, reason: "Not Found")
         case TestSessionError.emptyEntry, TestSessionError.entryTooLarge, TestSessionError.badStatus,
              is DecodingError, is SimToolError:

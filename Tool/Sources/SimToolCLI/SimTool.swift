@@ -233,7 +233,11 @@ extension Input {
 
         func run() async throws {
             let device = try await resolveConfiguredDevice(device)
-            let output = try await SimulatorInputClient.tap(deviceUDID: device.udid, x: x, y: y, id: id, label: label)
+            let output = try await ActivityReporter(device: device).touch(SimulatorInputPayload(action: "tap", x: x, y: y, id: id, label: label)) {
+                .tap(at: try await SimulatorInputClient.touchPoint(deviceUDID: device.udid, x: x, y: y, id: id, label: label, action: "Tap"))
+            } play: { stroke in
+                try await SimulatorInputClient.play(stroke, deviceUDID: device.udid)
+            }
             try emitCommandResult(output, json: common.json)
         }
     }
@@ -254,14 +258,14 @@ extension Input {
 
         func run() async throws {
             let device = try await resolveConfiguredDevice(device)
-            let output = try await SimulatorInputClient.longPress(
-                deviceUDID: device.udid,
-                x: x,
-                y: y,
-                id: id,
-                label: label,
-                duration: duration
-            )
+            let input = SimulatorInputPayload(action: "long-press", x: x, y: y, id: id, label: label, duration: duration)
+            let output = try await ActivityReporter(device: device).touch(input) {
+                let point = try await SimulatorInputClient.touchPoint(deviceUDID: device.udid, x: x, y: y, id: id, label: label, action: "Long press")
+                return .longPress(at: point, duration: max(0.1, duration))
+            } play: { stroke in
+                // Through longPress: it warns about a press too short to register.
+                try await SimulatorInputClient.longPress(deviceUDID: device.udid, x: stroke.from.x, y: stroke.from.y, duration: duration)
+            }
             try emitCommandResult(output, json: common.json)
         }
     }
@@ -278,7 +282,9 @@ extension Input {
 
         func run() async throws {
             let device = try await resolveConfiguredDevice(device)
-            let output = try await SimulatorInputClient.typeText(text, deviceUDID: device.udid)
+            let output = try await ActivityReporter(device: device).command(SimulatorInputPayload(action: "type", text: text)) {
+                try await SimulatorInputClient.typeText(text, deviceUDID: device.udid)
+            }
             try emitCommandResult(output, json: common.json)
         }
     }
@@ -312,9 +318,11 @@ extension Input {
 
         func run() async throws {
             let device = try await resolveConfiguredDevice(device)
+            let reporter = ActivityReporter(device: device)
             if let image {
                 let file = URL(fileURLWithPath: (image as NSString).expandingTildeInPath)
                 let output = try await SimulatorInputClient.pasteImage(at: file, deviceUDID: device.udid)
+                await reporter.done(kind: "paste", title: "Paste an image", detail: file.lastPathComponent)
                 try emitCommandResult(output, json: common.json)
                 return
             }
@@ -327,7 +335,9 @@ extension Input {
             } else {
                 value = text ?? ""
             }
-            let output = try await SimulatorInputClient.paste(value, deviceUDID: device.udid)
+            let output = try await reporter.command(SimulatorInputPayload(action: "paste", text: value)) {
+                try await SimulatorInputClient.paste(value, deviceUDID: device.udid)
+            }
             try emitCommandResult(output, json: common.json)
         }
     }
@@ -360,16 +370,18 @@ extension Input {
 
         func run() async throws {
             let device = try await resolveConfiguredDevice(device)
-            let output = try await SimulatorInputClient.swipe(
-                deviceUDID: device.udid,
-                startX: startX,
-                startY: startY,
-                endX: endX,
-                endY: endY,
-                duration: duration,
-                velocity: velocity,
-                hold: hold
-            )
+            let input = SimulatorInputPayload(action: "swipe", startX: startX, startY: startY, endX: endX, endY: endY, duration: duration, velocity: velocity, hold: hold)
+            let output = try await ActivityReporter(device: device).touch(input) {
+                SimulatorInputClient.swipeStroke(
+                    from: TouchPoint(x: startX, y: startY),
+                    to: TouchPoint(x: endX, y: endY),
+                    duration: duration,
+                    velocity: velocity,
+                    hold: hold
+                )
+            } play: { stroke in
+                try await SimulatorInputClient.play(stroke, deviceUDID: device.udid)
+            }
             try emitCommandResult(output, json: common.json)
         }
     }
@@ -396,7 +408,12 @@ extension Input {
 
         func run() async throws {
             let device = try await resolveConfiguredDevice(device)
-            let output = try await SimulatorInputClient.scroll(deviceUDID: device.udid, direction: direction, distance: distance, x: x, y: y)
+            let input = SimulatorInputPayload(action: "scroll", x: x, y: y, direction: direction.rawValue, distance: distance)
+            let output = try await ActivityReporter(device: device).touch(input) {
+                try await SimulatorInputClient.scrollStroke(deviceUDID: device.udid, direction: direction, distance: distance, x: x, y: y)
+            } play: { stroke in
+                try await SimulatorInputClient.play(stroke, deviceUDID: device.udid)
+            }
             try emitCommandResult(output, json: common.json)
         }
     }
@@ -421,13 +438,13 @@ extension Input {
 
         func run() async throws {
             let device = try await resolveConfiguredDevice(device)
-            let output = try await SimulatorInputClient.fling(
-                deviceUDID: device.udid,
-                direction: direction,
-                velocity: FlingSpeed.parse(speed) ?? FlingSpeed.normal,
-                x: x,
-                y: y
-            )
+            let velocity = FlingSpeed.parse(speed) ?? FlingSpeed.normal
+            let input = SimulatorInputPayload(action: "fling", x: x, y: y, velocity: velocity, direction: direction.rawValue)
+            let output = try await ActivityReporter(device: device).touch(input) {
+                try await SimulatorInputClient.flingStroke(deviceUDID: device.udid, direction: direction, velocity: velocity, x: x, y: y)
+            } play: { stroke in
+                try await SimulatorInputClient.play(stroke, deviceUDID: device.udid)
+            }
             try emitCommandResult(output, json: common.json)
         }
     }
@@ -455,16 +472,18 @@ extension Input {
 
         func run() async throws {
             let device = try await resolveConfiguredDevice(device)
-            let output = try await SimulatorInputClient.drag(
-                deviceUDID: device.udid,
-                startX: startX,
-                startY: startY,
-                endX: endX,
-                endY: endY,
-                press: press,
-                velocity: velocity,
-                hold: hold
-            )
+            let input = SimulatorInputPayload(action: "drag", startX: startX, startY: startY, endX: endX, endY: endY, velocity: velocity, hold: hold, press: press)
+            let output = try await ActivityReporter(device: device).touch(input) {
+                .drag(
+                    from: TouchPoint(x: startX, y: startY),
+                    to: TouchPoint(x: endX, y: endY),
+                    press: press ?? TouchStroke.dragPress,
+                    velocity: velocity ?? TouchStroke.dragVelocity,
+                    hold: hold ?? TouchStroke.dragHold
+                )
+            } play: { stroke in
+                try await SimulatorInputClient.play(stroke, deviceUDID: device.udid)
+            }
             try emitCommandResult(output, json: common.json)
         }
     }
@@ -478,10 +497,12 @@ extension Input {
 
         func run() async throws {
             let device = try await resolveConfiguredDevice(device)
-            let output = if name.lowercased() == "home" {
-                try await ProcessRunner.runXcrun(["simctl", "launch", device.udid, "com.apple.springboard"])
-            } else {
-                try await SimulatorInputClient.button(name, deviceUDID: device.udid)
+            let output = try await ActivityReporter(device: device).command(SimulatorInputPayload(action: "button", name: name)) {
+                if name.lowercased() == "home" {
+                    try await ProcessRunner.runXcrun(["simctl", "launch", device.udid, "com.apple.springboard"])
+                } else {
+                    try await SimulatorInputClient.button(name, deviceUDID: device.udid)
+                }
             }
             try emitCommandResult(output, json: common.json)
         }
@@ -509,10 +530,17 @@ extension Input {
 
         func run() async throws {
             let device = try await resolveConfiguredDevice(device)
-            let output = switch action {
-            case .show: try await SimulatorInputClient.setSoftwareKeyboard(visible: true, deviceUDID: device.udid)
-            case .hide: try await SimulatorInputClient.setSoftwareKeyboard(visible: false, deviceUDID: device.udid)
-            case .toggle: try await SimulatorInputClient.toggleSoftwareKeyboard(deviceUDID: device.udid)
+            let visible: Bool? = switch action {
+            case .show: true
+            case .hide: false
+            case .toggle: nil
+            }
+            let output = try await ActivityReporter(device: device).command(SimulatorInputPayload(action: "software-keyboard", visible: visible)) {
+                if let visible {
+                    try await SimulatorInputClient.setSoftwareKeyboard(visible: visible, deviceUDID: device.udid)
+                } else {
+                    try await SimulatorInputClient.toggleSoftwareKeyboard(deviceUDID: device.udid)
+                }
             }
             try emitCommandResult(output, json: common.json)
         }
@@ -1213,6 +1241,7 @@ extension AppCommand {
                     force: buildOptions.force,
                     cache: buildCache
                 )
+                await ActivityReporter(device: resolved).done(kind: "launch", title: "Launch " + payload.build.bundleIdentifier)
                 try printJSON(payload)
                 return
             }
@@ -1228,6 +1257,7 @@ extension AppCommand {
             )
             let buildAction = payload.build.xcodebuildRan ? "built" : "reused"
             let installAction = payload.installRan ? "installed" : "already installed"
+            await ActivityReporter(device: resolved).done(kind: "launch", title: "Launch " + payload.build.bundleIdentifier, detail: buildAction + ", " + installAction)
             var takeaways: [TerminalText] = [
                 "Device: \(payload.device.name)",
                 "Bundle: \(payload.build.bundleIdentifier)",
@@ -2678,6 +2708,7 @@ struct Open: AsyncParsableCommand {
             url: deeplink.url,
             device: booted
         )
+        await ActivityReporter(device: booted).done(kind: "deeplink", title: "Open deeplink “\(payload.name)”", detail: payload.url)
         if common.json {
             try printJSON(payload)
         } else {
