@@ -12,6 +12,8 @@ const ax = {
   pick: stored("ax.pick", true),
   hideEmpty: stored("ax.hideEmpty", true),
   updatedAt: 0,
+  readAt: -Infinity,       // performance.now() when the last read began
+  changeSeenAt: null,      // when a change since that read was first noticed
   error: ""
 };
 
@@ -354,10 +356,27 @@ function drawRedlines() {
 
 // ---- Loading ----
 
+// The tree is read again when the picture changed since the last read: once it
+// has been still for a moment — not in the middle of a transition — or every two
+// seconds while it keeps moving. An idle page reads nothing. Without a live
+// screen to go by, or after a failed read, it is read every two seconds.
+const AX_CHECK_MS = 250;
+const AX_SETTLE_MS = 300;
+const AX_REFRESH_MS = 2000;
+function axTreeStale() {
+  const now = performance.now();
+  if (!ax.tree || ax.error || screenState.connection !== "live") return now - ax.readAt >= AX_REFRESH_MS;
+  if (screenState.changedAt <= ax.readAt) return false;
+  if (ax.changeSeenAt == null) ax.changeSeenAt = now;
+  return now - screenState.changedAt >= AX_SETTLE_MS || now - ax.changeSeenAt >= AX_REFRESH_MS;
+}
+
 let axFetching = false;
 async function loadAx() {
   if (axFetching) return;
   axFetching = true;
+  ax.readAt = performance.now();
+  ax.changeSeenAt = null;
   try {
     const tree = await apiJSON("/api/v1/ax/tree?raw=1");
     const firstLoad = !ax.tree;

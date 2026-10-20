@@ -222,15 +222,13 @@ logsView.detail.addEventListener("click", (event) => {
   if (action.dataset.act === "close") { logsList.select(null); logsList.focus(); }
 });
 
-// ---- Capture and polling ----
+// ---- Capture, and lines pushed or polled ----
 
 async function startLogsCapture() {
   const app = inspector.attachedApp;
   // Capture only ever starts scoped to an app: an unscoped capture streams OSLog
   // for the whole simulator, which drowns the viewer in unrelated system noise.
   if (!app) return;
-  logs.entries = [];
-  logs.cursor = null;
   try {
     await api("/api/v1/logs/capture", { method: "POST", body: JSON.stringify({ app }) });
     logs.captureStarted = true;
@@ -241,26 +239,54 @@ async function startLogsCapture() {
   }
 }
 
-async function pollLogs() {
-  if (!logs.captureStarted) { await startLogsCapture(); if (!logs.captureStarted) return; }
-  await loadLaunches();
-  const since = logs.cursor == null ? "" : "&since=" + logs.cursor;
-  const payload = await apiJSON("/api/v1/logs/capture?limit=500" + since);
-  const entries = payload.entries || [];
-  if (payload.cursor != null) logs.cursor = payload.cursor;
-  logs.dropped = payload.droppedCount || 0;
-  if (!entries.length) { if (inspector.tab === "logs") renderLogs(); return; }
-  logs.entries = logs.entries.concat(entries);
-  if (logs.entries.length > LOGS_MAX) logs.entries = logs.entries.slice(logs.entries.length - LOGS_MAX);
+// The server captures once a viewer asks, and a restarted server must be asked
+// again; the stream and the poll share one request in flight.
+let logsCaptureRequest = null;
+function ensureLogsCapture() {
+  if (logs.captureStarted || !inspector.attachedApp) return Promise.resolve();
+  if (!logsCaptureRequest) logsCaptureRequest = startLogsCapture().finally(() => { logsCaptureRequest = null; });
+  return logsCaptureRequest;
+}
+
+// Adds the lines after the cursor; returns how many were new.
+function takeLogLines(entries) {
+  const fresh = linesAfter(entries, logs.cursor);
+  if (!fresh.length) return 0;
+  logs.cursor = fresh[fresh.length - 1].sequence;
+  // In place: on the stream lines come one at a time.
+  logs.entries.push(...fresh);
+  if (logs.entries.length > LOGS_MAX) logs.entries.splice(0, logs.entries.length - LOGS_MAX);
   if (!(logs.follow && logsList.atBottom())) {
-    logs.unseen += entries.length;
+    logs.unseen += fresh.length;
     logsNew.hidden = false;
     logsNew.innerHTML = icon("follow", "ic-sm") + plural(logs.unseen, "new line", "new lines");
   }
-  renderLogs();
+  return fresh.length;
 }
 
-tabHandlers.logs = { show() { renderLogs(); poller.poke("logs"); } };
+// `cleared`: a capture restarted with other settings emptied the server's lines.
+function applyLogsTopic(payload, reset) {
+  if (reset || payload.cleared) { logs.entries = []; logs.unseen = 0; logsNew.hidden = true; }
+  if (reset) logs.cursor = null;
+  if (payload.removedLaunch != null) logs.entries = logs.entries.filter((entry) => String(entry.launchId) !== String(payload.removedLaunch));
+  if (payload.droppedCount != null) logs.dropped = payload.droppedCount;
+  if (payload.entries) takeLogLines(payload.entries);
+  renderSoon(renderLogs);
+}
+
+async function pollLogs() {
+  await ensureLogsCapture();
+  if (!logs.captureStarted) return;
+  await loadLaunches();
+  const since = logs.cursor == null ? "" : "&since=" + logs.cursor;
+  const payload = await apiJSON("/api/v1/logs/capture?limit=500" + since);
+  logs.dropped = payload.droppedCount || 0;
+  const added = takeLogLines(payload.entries || []);
+  if (payload.cursor != null) logs.cursor = Math.max(logs.cursor ?? -1, payload.cursor);
+  if (added || inspector.tab === "logs") renderLogs();
+}
+
+tabHandlers.logs = { show() { renderLogs(); refreshInspector("logs"); ensureLogsCapture().catch(() => renderLogs()); } };
 
 function resetLogs() {
   logs.entries = [];

@@ -58,7 +58,8 @@ are visible side by side, on the same timeline, in a browser tab.
 - Delivered as one Swift string (`Tool/Sources/SimToolWeb/WebViewer.swift`):
   inline HTML/CSS/JS, no build step, no external CDN at runtime, works offline.
 - Video is H.264 over WebCodecs only; no JPEG fallback.
-- Live touch and keys go over one WebSocket; inspectors poll JSON endpoints.
+- Live touch and keys go over one WebSocket; inspector data arrives over one
+  Server-Sent Events stream per page, and polling JSON endpoints is the fallback.
 - Must stay project-agnostic: no product-, company- or app-specific content,
   names or styling in the repository.
 - Dark ("graphite") is the shipped theme; a light theme is specified in

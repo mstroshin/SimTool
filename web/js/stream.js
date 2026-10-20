@@ -13,7 +13,9 @@ const screenState = {
   points: null,     // screen size in points, once known (AX root frame)
   connection: "connecting",  // connecting | live | reconnecting | offline
   attempt: 0,
-  retryAt: 0
+  retryAt: 0,
+  changedAt: 0,     // performance.now() of the last frame that changed the picture
+  stillBytes: Infinity   // the smallest frame so far: what an unchanged screen costs
 };
 const connectionListeners = [];
 function onConnection(listener) { connectionListeners.push(listener); }
@@ -158,6 +160,7 @@ async function runStream() {
     const response = await fetch("/stream.avcc", { signal: controller.signal, cache: "no-store" });
     if (!response.ok || !response.body) throw new Error("the server answered " + response.status);
     const demuxer = new Demuxer();
+    screenState.stillBytes = Infinity;
     const painter = makeFramePainter();
     let timestamp = 0;
     decoder = new VideoDecoder({
@@ -177,6 +180,8 @@ async function runStream() {
           if (decoder.state === "closed") throw new Error("the decoder closed");
           decoder.configure({ codec: avcCodecString(chunk.payload), description: chunk.payload, optimizeForLatency: true, hardwareAcceleration: "prefer-hardware" });
         } else if (decoder.state === "configured") {
+          screenState.stillBytes = Math.min(screenState.stillBytes, chunk.payload.byteLength);
+          if (frameChangesScreen(chunk.type, chunk.payload.byteLength, screenState.stillBytes)) screenState.changedAt = performance.now();
           try {
             decoder.decode(new EncodedVideoChunk({ type: chunk.type === "keyframe" ? "key" : "delta", timestamp, data: chunk.payload }));
             timestamp += 16667;

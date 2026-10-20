@@ -1,0 +1,51 @@
+import Foundation
+import SimToolCore
+import SimToolNetworkLogger
+import SimToolStateLogger
+
+// What each topic of `GET /api/v1/events` carries. A message holds only the
+// fields of what changed; a `snapshot` holds every topic in the same shapes,
+// complete, and replaces what the viewer had.
+
+/// `snapshot`: the whole inspector state as of the event id it carries.
+struct InspectorSnapshotPayload: Encodable {
+    var instance: String
+    var network: NetworkTopicPayload
+    var logs: LogsTopicPayload
+    var state: StateTopicPayload
+    var tests: TestsTopicPayload
+    var launches: AppLaunchesPayload
+}
+
+/// `network`: calls the app reported (a known id replaces its call), the
+/// launch whose calls were deleted, or the mock rules now in force.
+struct NetworkTopicPayload: Encodable {
+    var events: [NetworkLoggerEvent]?
+    var removedLaunch: Int?
+    var mocks: [MockRule]?
+}
+
+/// `logs`: captured lines in sequence order, the launch whose lines were
+/// deleted, or `cleared` when a capture restarted with other settings emptied
+/// the buffer.
+struct LogsTopicPayload: Encodable {
+    var entries: [LogEntry]?
+    var droppedCount: Int?
+    var removedLaunch: Int?
+    var cleared: Bool?
+}
+
+/// `state`: model snapshots in cursor order.
+struct StateTopicPayload: Encodable {
+    var events: [StateLoggerEvent]
+}
+
+/// `tests`: a session that started, stepped or stopped, a deleted session, the
+/// run in progress, or the test files as they read now.
+struct TestsTopicPayload: Encodable {
+    var sessions: [TestSession]?
+    var session: TestSession?
+    var removedSession: String?
+    var definitions: [TestSummary]?
+    var run: TestRunStatusPayload?
+}

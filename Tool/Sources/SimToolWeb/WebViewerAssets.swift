@@ -8,6 +8,7 @@ enum WebViewerAssets {
         "js/ax.js": jsAxJs,
         "js/core.js": jsCoreJs,
         "js/device.js": jsDeviceJs,
+        "js/events.js": jsEventsJs,
         "js/inspector.js": jsInspectorJs,
         "js/keyboard.js": jsKeyboardJs,
         "js/list.js": jsListJs,
@@ -39,6 +40,8 @@ enum WebViewerAssets {
           pick: stored("ax.pick", true),
           hideEmpty: stored("ax.hideEmpty", true),
           updatedAt: 0,
+          readAt: -Infinity,       // performance.now() when the last read began
+          changeSeenAt: null,      // when a change since that read was first noticed
           error: ""
         };
 
@@ -381,10 +384,27 @@ enum WebViewerAssets {
 
         // ---- Loading ----
 
+        // The tree is read again when the picture changed since the last read: once it
+        // has been still for a moment — not in the middle of a transition — or every two
+        // seconds while it keeps moving. An idle page reads nothing. Without a live
+        // screen to go by, or after a failed read, it is read every two seconds.
+        const AX_CHECK_MS = 250;
+        const AX_SETTLE_MS = 300;
+        const AX_REFRESH_MS = 2000;
+        function axTreeStale() {
+          const now = performance.now();
+          if (!ax.tree || ax.error || screenState.connection !== "live") return now - ax.readAt >= AX_REFRESH_MS;
+          if (screenState.changedAt <= ax.readAt) return false;
+          if (ax.changeSeenAt == null) ax.changeSeenAt = now;
+          return now - screenState.changedAt >= AX_SETTLE_MS || now - ax.changeSeenAt >= AX_REFRESH_MS;
+        }
+
         let axFetching = false;
         async function loadAx() {
           if (axFetching) return;
           axFetching = true;
+          ax.readAt = performance.now();
+          ax.changeSeenAt = null;
           try {
             const tree = await apiJSON("/api/v1/ax/tree?raw=1");
             const firstLoad = !ax.tree;
@@ -1309,6 +1329,82 @@ enum WebViewerAssets {
         });
         """#
 
+    static let jsEventsJs = #"""
+        // Inspector data pushed by the server: one Server-Sent Events stream per page
+        // (/api/v1/events) carries Network, Logs, State, Tests and the app launches as
+        // they change, so nothing waits for a poll. It is a connection of its own — the
+        // screen already holds one of the six a browser opens to a server — and not the
+        // input WebSocket, where a burst of log lines would hold up a touch.
+        //
+        // Polling is the fallback: it stands in only while the stream is down (an older
+        // server, a dropped connection), so a page on a live stream sends no requests
+        // while nothing happens. However often an entry arrives — stream, replay after a
+        // reconnect, a poll in between — it is taken once: calls merge by id, logs and
+        // state skip what is at or below their cursor.
+
+        const inspectorEvents = {
+          source: null,
+          polling: typeof EventSource === "undefined",   // the stream is down: polls stand in
+          lastEventId: ""                                // <server instance>:<sequence>
+        };
+
+        function startInspectorEvents() {
+          if (typeof EventSource === "undefined") return;
+          if (inspectorEvents.source && inspectorEvents.source.readyState !== EventSource.CLOSED) return;
+          // The browser resends the last id when it reconnects by itself; a new
+          // EventSource has forgotten it, so the query carries it over.
+          const resume = inspectorEvents.lastEventId ? "?lastEventId=" + encodeURIComponent(inspectorEvents.lastEventId) : "";
+          const source = new EventSource("/api/v1/events" + resume);
+          inspectorEvents.source = source;
+          source.addEventListener("open", () => { inspectorEvents.polling = false; });
+          // Reconnecting, or closed for good by an answer that is not a stream.
+          source.addEventListener("error", () => { inspectorEvents.polling = true; });
+          const on = (name, apply) => source.addEventListener(name, (message) => {
+            apply(JSON.parse(message.data));
+            if (message.lastEventId) inspectorEvents.lastEventId = message.lastEventId;
+          });
+          on("snapshot", applySnapshot);
+          on("network", (payload) => applyNetworkTopic(payload, false));
+          on("logs", (payload) => applyLogsTopic(payload, false));
+          on("state", (payload) => applyStateTopic(payload, false));
+          on("tests", (payload) => applyTestsTopic(payload, false));
+          on("launches", (payload) => { applyLaunchesTopic(payload); renderSoon(renderNetwork); renderSoon(renderLogs); });
+        }
+
+        // Everything the server holds, in place of what the page had: the stream's
+        // first event, and its first again whenever it cannot resume where it left off.
+        function applySnapshot(snapshot) {
+          if (serverInstance && snapshot.instance && snapshot.instance !== serverInstance) forgetServer();
+          if (snapshot.instance) serverInstance = snapshot.instance;
+          applyLaunchesTopic(snapshot.launches || {});
+          applyNetworkTopic(snapshot.network || {}, true);
+          applyLogsTopic(snapshot.logs || {}, true);
+          applyStateTopic(snapshot.state || {}, true);
+          applyTestsTopic(snapshot.tests || {}, true);
+          // A restarted server captures the app's logs once asked again.
+          ensureLogsCapture().catch(() => renderLogs());
+        }
+
+        // A tab shown, a list resumed: polling fetches now; on the stream it is here already.
+        function refreshInspector(name) {
+          if (inspectorEvents.polling) poller.poke(name);
+        }
+
+        // A burst of events renders each list once.
+        const pendingRenders = new Set();
+        let renderTimer = null;
+        function renderSoon(render) {
+          pendingRenders.add(render);
+          if (renderTimer) return;
+          renderTimer = setTimeout(() => {
+            renderTimer = null;
+            const renders = [...pendingRenders];
+            pendingRenders.clear();
+            for (const run of renders) run();
+          }, 30);
+        }
+        """#
+
     static let jsInspectorJs = #"""
         // The inspector frame: tabs, the splitter between the device and the
         // inspector, the filter field every tab shares, app launches, and the
@@ -1551,7 +1647,10 @@ enum WebViewerAssets {
 
         let launchesById = {};
         async function loadLaunches() {
-          const payload = await apiJSON("/api/v1/launches");
+          applyLaunchesTopic(await apiJSON("/api/v1/launches"));
+        }
+
+        function applyLaunchesTopic(payload) {
           const map = {};
           for (const launch of payload.launches || []) map[launch.launchId] = launch;
           launchesById = map;
@@ -2178,6 +2277,19 @@ enum WebViewerAssets {
           return lines.join("\n");
         }
 
+        // Calls pushed by the server joined to the ones held: a known id is replaced
+        // where it stands, a new one goes last, and only the newest `max` are kept —
+        // as many as the server keeps.
+        function mergeNetworkEvents(held, incoming, max) {
+          const merged = held.slice();
+          const index = new Map(merged.map((event, position) => [event.id, position]));
+          for (const event of incoming || []) {
+            if (index.has(event.id)) merged[index.get(event.id)] = event;
+            else { index.set(event.id, merged.length); merged.push(event); }
+          }
+          return merged.length > max ? merged.slice(merged.length - max) : merged;
+        }
+
         // ---- Filters: live text + include/exclude chips ----
 
         // "field:text" scopes a term to one field instead of the whole haystack.
@@ -2255,6 +2367,12 @@ enum WebViewerAssets {
         function logLine(entry) {
           const head = [formatClock(entry.timestamp, true), logLevel(entry), entry.subsystem].filter(Boolean).join(" ");
           return head + ": " + (entry.message || "");
+        }
+
+        // The lines after the cursor: a line the page already has is never added twice,
+        // whichever way — stream, replay or poll — it arrives again.
+        function linesAfter(entries, cursor) {
+          return cursor == null ? (entries || []).slice() : (entries || []).filter((entry) => entry.sequence > cursor);
         }
 
         // ---- State ----
@@ -2380,6 +2498,15 @@ enum WebViewerAssets {
         }
 
         // ---- Accessibility ----
+
+        // Whether a frame of the stream shows the screen changing. A still screen keeps
+        // sending small frames — the same picture encoded again, about 200 bytes on a
+        // phone — so the smallest frame seen is the measure of nothing happening, and a
+        // change costs several times that: a clock tick 600 bytes, a push tens of KB.
+        function frameChangesScreen(type, bytes, stillBytes) {
+          if (type === "keyframe") return true;
+          return bytes > Math.max(400, stillBytes * 2.5);
+        }
 
         function axHasFrame(node) {
           const frame = node.frame;
@@ -2667,15 +2794,13 @@ enum WebViewerAssets {
           if (action.dataset.act === "close") { logsList.select(null); logsList.focus(); }
         });
 
-        // ---- Capture and polling ----
+        // ---- Capture, and lines pushed or polled ----
 
         async function startLogsCapture() {
           const app = inspector.attachedApp;
           // Capture only ever starts scoped to an app: an unscoped capture streams OSLog
           // for the whole simulator, which drowns the viewer in unrelated system noise.
           if (!app) return;
-          logs.entries = [];
-          logs.cursor = null;
           try {
             await api("/api/v1/logs/capture", { method: "POST", body: JSON.stringify({ app }) });
             logs.captureStarted = true;
@@ -2686,26 +2811,54 @@ enum WebViewerAssets {
           }
         }
 
-        async function pollLogs() {
-          if (!logs.captureStarted) { await startLogsCapture(); if (!logs.captureStarted) return; }
-          await loadLaunches();
-          const since = logs.cursor == null ? "" : "&since=" + logs.cursor;
-          const payload = await apiJSON("/api/v1/logs/capture?limit=500" + since);
-          const entries = payload.entries || [];
-          if (payload.cursor != null) logs.cursor = payload.cursor;
-          logs.dropped = payload.droppedCount || 0;
-          if (!entries.length) { if (inspector.tab === "logs") renderLogs(); return; }
-          logs.entries = logs.entries.concat(entries);
-          if (logs.entries.length > LOGS_MAX) logs.entries = logs.entries.slice(logs.entries.length - LOGS_MAX);
+        // The server captures once a viewer asks, and a restarted server must be asked
+        // again; the stream and the poll share one request in flight.
+        let logsCaptureRequest = null;
+        function ensureLogsCapture() {
+          if (logs.captureStarted || !inspector.attachedApp) return Promise.resolve();
+          if (!logsCaptureRequest) logsCaptureRequest = startLogsCapture().finally(() => { logsCaptureRequest = null; });
+          return logsCaptureRequest;
+        }
+
+        // Adds the lines after the cursor; returns how many were new.
+        function takeLogLines(entries) {
+          const fresh = linesAfter(entries, logs.cursor);
+          if (!fresh.length) return 0;
+          logs.cursor = fresh[fresh.length - 1].sequence;
+          // In place: on the stream lines come one at a time.
+          logs.entries.push(...fresh);
+          if (logs.entries.length > LOGS_MAX) logs.entries.splice(0, logs.entries.length - LOGS_MAX);
           if (!(logs.follow && logsList.atBottom())) {
-            logs.unseen += entries.length;
+            logs.unseen += fresh.length;
             logsNew.hidden = false;
             logsNew.innerHTML = icon("follow", "ic-sm") + plural(logs.unseen, "new line", "new lines");
           }
-          renderLogs();
+          return fresh.length;
         }
 
-        tabHandlers.logs = { show() { renderLogs(); poller.poke("logs"); } };
+        // `cleared`: a capture restarted with other settings emptied the server's lines.
+        function applyLogsTopic(payload, reset) {
+          if (reset || payload.cleared) { logs.entries = []; logs.unseen = 0; logsNew.hidden = true; }
+          if (reset) logs.cursor = null;
+          if (payload.removedLaunch != null) logs.entries = logs.entries.filter((entry) => String(entry.launchId) !== String(payload.removedLaunch));
+          if (payload.droppedCount != null) logs.dropped = payload.droppedCount;
+          if (payload.entries) takeLogLines(payload.entries);
+          renderSoon(renderLogs);
+        }
+
+        async function pollLogs() {
+          await ensureLogsCapture();
+          if (!logs.captureStarted) return;
+          await loadLaunches();
+          const since = logs.cursor == null ? "" : "&since=" + logs.cursor;
+          const payload = await apiJSON("/api/v1/logs/capture?limit=500" + since);
+          logs.dropped = payload.droppedCount || 0;
+          const added = takeLogLines(payload.entries || []);
+          if (payload.cursor != null) logs.cursor = Math.max(logs.cursor ?? -1, payload.cursor);
+          if (added || inspector.tab === "logs") renderLogs();
+        }
+
+        tabHandlers.logs = { show() { renderLogs(); refreshInspector("logs"); ensureLogsCapture().catch(() => renderLogs()); } };
 
         function resetLogs() {
           logs.entries = [];
@@ -2718,9 +2871,11 @@ enum WebViewerAssets {
         """#
 
     static let jsMainJs = #"""
-        // Start-up: read /config, start the screen, schedule the polls. A server that
-        // restarts under the page is a new instance: its logs and state restart their
-        // numbering, so the page resets its cursors instead of skipping new entries.
+        // Start-up: read /config, start the screen, open the inspector's event stream
+        // and schedule the polls that stand in for it. A server that restarts under the
+        // page is a new instance: its logs and state restart their numbering, so the
+        // page resets its cursors instead of skipping new entries — whichever of
+        // /config and the stream's snapshot tells it first.
 
         let serverInstance = null;
 
@@ -2747,25 +2902,28 @@ enum WebViewerAssets {
           $("sbVersion").textContent = config.version ? "simtool " + config.version : "";
         }
 
+        // A new server: everything numbered by the old one is stale.
+        function forgetServer() {
+          resetNetwork();
+          resetLogs();
+          resetState();
+          ax.tree = null;
+          networkLastPayload = "";
+          testsLastSessions = "";
+          testsLastDefinitions = "";
+          setMessage("The server restarted — lists were reloaded");
+        }
+
         async function bootstrap() {
           const config = await apiJSON("/config");
           const instance = config.instanceId || null;
-          if (serverInstance && instance && instance !== serverInstance) {
-            // A new server: everything numbered by the old one is stale.
-            resetNetwork();
-            resetLogs();
-            resetState();
-            ax.tree = null;
-            networkLastPayload = "";
-            testsLastSessions = "";
-            testsLastDefinitions = "";
-            setMessage("The server restarted — lists were reloaded");
-          }
+          if (serverInstance && instance && instance !== serverInstance) forgetServer();
           serverInstance = instance;
           applyConfig(config);
           renderNetwork();
           renderLogs();
           renderState();
+          ensureLogsCapture().catch(() => renderLogs());
         }
 
         // The screen's size in points, for the pointer readout and the rulers; the
@@ -2786,15 +2944,20 @@ enum WebViewerAssets {
         const BACKGROUND_MS = 6000;
         const activeTab = (tab) => inspector.open && inspector.tab === tab;
 
-        poller.add("network", () => (activeTab("network") ? ACTIVE_MS : BACKGROUND_MS), loadNetwork);
-        poller.add("logs", () => (activeTab("logs") ? ACTIVE_MS : BACKGROUND_MS), pollLogs, () => !!inspector.attachedApp);
-        poller.add("state", () => (activeTab("state") ? 1000 : BACKGROUND_MS), pollState);
-        poller.add("ax", 2000, loadAx, () => activeTab("ax") && app.dataset.mode !== "replay");
-        poller.add("tests", () => (activeTab("tests") ? ACTIVE_MS : BACKGROUND_MS), loadTests);
+        // Polls stand in for the event stream only while it is down.
+        const polling = () => inspectorEvents.polling;
+        poller.add("network", () => (activeTab("network") ? ACTIVE_MS : BACKGROUND_MS), loadNetwork, polling);
+        poller.add("logs", () => (activeTab("logs") ? ACTIVE_MS : BACKGROUND_MS), pollLogs, () => polling() && !!inspector.attachedApp);
+        poller.add("state", () => (activeTab("state") ? 1000 : BACKGROUND_MS), pollState, polling);
+        poller.add("tests", () => (activeTab("tests") ? ACTIVE_MS : BACKGROUND_MS), loadTests, polling);
+        // The tree is not on the stream: it is read when the screen changed.
+        poller.add("ax", AX_CHECK_MS, loadAx, () => activeTab("ax") && app.dataset.mode !== "replay" && axTreeStale());
 
         onReconnect(async () => {
           try { await bootstrap(); } catch (_) {}
-          for (const name of ["network", "logs", "state", "tests"]) poller.poke(name);
+          // A server that came back may be one that streams, where the last one did not.
+          startInspectorEvents();
+          for (const name of ["network", "logs", "state", "tests"]) refreshInspector(name);
         });
 
         onConnection((state) => {
@@ -2806,6 +2969,7 @@ enum WebViewerAssets {
         setInspectorOpen(inspector.open);
         setTab(inspector.tab);
         updateKeyboardIndicator();
+        startInspectorEvents();
         runStream();
         bootstrap().catch((error) => setMessage("Could not read the server's configuration: " + error.message, "err")).then(loadScreenPoints);
         """#
@@ -2881,9 +3045,9 @@ enum WebViewerAssets {
           networkPause.innerHTML = icon(network.paused ? "play" : "pause");
           networkPause.dataset.tip = network.paused ? "Resume the list" : "Pause the list";
           networkPause.setAttribute("aria-label", networkPause.dataset.tip);
-          renderNetwork();
           // Resuming catches up at once, not when the next request happens to arrive.
-          if (!network.paused) { networkLastPayload = ""; poller.poke("network"); }
+          if (!network.paused) { network.events = networkHeard; networkLastPayload = ""; refreshInspector("network"); }
+          renderNetwork();
         });
         networkClear.addEventListener("click", () => {
           const previous = new Set(network.cleared);
@@ -3140,12 +3304,38 @@ enum WebViewerAssets {
           domEvent.preventDefault();
         });
 
-        // ---- Polling ----
+        // ---- From the server: pushed, or polled while the stream is down ----
+
+        const NETWORK_MAX = 1000;   // as many calls as the server keeps
+        // The server's list as last heard; the table shows it unless paused.
+        let networkHeard = [];
+
+        function showHeardNetwork() {
+          if (network.paused) {
+            const known = new Set(network.events.map((event) => event.id));
+            network.pausedNew = networkHeard.filter((event) => !known.has(event.id)).length;
+          } else {
+            network.events = networkHeard;
+          }
+        }
+
+        function applyNetworkTopic(payload, reset) {
+          if (payload.mocks) {
+            const map = {};
+            for (const rule of payload.mocks) map[rule.id] = rule;
+            network.mockRules = map;
+          }
+          if (reset) networkHeard = [];
+          if (payload.removedLaunch != null) networkHeard = networkHeard.filter((event) => String(event.launchId) !== String(payload.removedLaunch));
+          if (payload.events) networkHeard = mergeNetworkEvents(networkHeard, payload.events, NETWORK_MAX);
+          showHeardNetwork();
+          renderSoon(renderNetwork);
+        }
 
         let networkLastPayload = "";
         async function loadNetwork() {
           await loadLaunches();
-          const payload = await apiJSON("/api/v1/network/events?limit=1000");
+          const payload = await apiJSON("/api/v1/network/events?limit=" + NETWORK_MAX);
           const events = payload.events || [];
           const serialized = events.length + ":" + (events.length ? events[events.length - 1].id + (events[events.length - 1].response ? "r" : "") : "") + ":" + Object.keys(launchesById).length;
           try {
@@ -3156,20 +3346,16 @@ enum WebViewerAssets {
           } catch (_) { /* keep the last known rules */ }
           if (serialized === networkLastPayload) return;
           networkLastPayload = serialized;
-          if (network.paused) {
-            const known = new Set(network.events.map((event) => event.id));
-            network.pausedNew = events.filter((event) => !known.has(event.id)).length;
-            renderNetwork();
-            return;
-          }
-          network.events = events;
+          networkHeard = events;
+          showHeardNetwork();
           renderNetwork();
         }
 
-        tabHandlers.network = { show() { renderNetwork(); poller.poke("network"); } };
+        tabHandlers.network = { show() { renderNetwork(); refreshInspector("network"); } };
 
         function resetNetwork() {
           network.events = [];
+          networkHeard = [];
           network.cleared.clear();
           networkLastPayload = "";
           networkList.select(null);
@@ -3506,12 +3692,15 @@ enum WebViewerAssets {
           if (again) again.focus();
         });
 
-        async function pollState() {
-          const since = stateView.cursor == null ? "" : "&since=" + stateView.cursor;
-          const payload = await apiJSON("/api/v1/state/events?limit=500" + since);
-          if (payload.nextCursor != null) stateView.cursor = payload.nextCursor;
-          if (!payload.events || !payload.events.length) return;
-          for (const event of payload.events) {
+        // ---- Snapshots pushed, or polled while the stream is down ----
+
+        // Takes the events after the cursor; true when there was one.
+        function takeStateEvents(events) {
+          let taken = false;
+          for (const event of events || []) {
+            if (stateView.cursor != null && event.cursor != null && event.cursor <= stateView.cursor) continue;
+            if (event.cursor != null) stateView.cursor = event.cursor;
+            taken = true;
             const previous = stateView.latest[event.modelId];
             const diffs = diffStateValues(previous ? previous.snapshot : undefined, event.snapshot, "", []);
             if (previous || event.deallocated) {
@@ -3523,16 +3712,33 @@ enum WebViewerAssets {
             // greyed-out model still shows what it looked like.
             stateView.latest[event.modelId] = event.deallocated && previous ? { ...event, snapshot: previous.snapshot } : event;
           }
-          renderState();
+          return taken;
         }
 
-        tabHandlers.state = { show() { renderState(); poller.poke("state"); } };
+        function applyStateTopic(payload, reset) {
+          if (reset) forgetStateEvents();
+          if (takeStateEvents(payload.events) || reset) renderSoon(renderState);
+        }
 
-        function resetState() {
+        async function pollState() {
+          const since = stateView.cursor == null ? "" : "&since=" + stateView.cursor;
+          const payload = await apiJSON("/api/v1/state/events?limit=500" + since);
+          const taken = takeStateEvents(payload.events);
+          if (payload.nextCursor != null) stateView.cursor = Math.max(stateView.cursor ?? -1, payload.nextCursor);
+          if (taken) renderState();
+        }
+
+        tabHandlers.state = { show() { renderState(); refreshInspector("state"); } };
+
+        function forgetStateEvents() {
           stateView.cursor = null;
           stateView.latest = {};
           stateView.changes = [];
           stateView.lastChange = {};
+        }
+
+        function resetState() {
+          forgetStateEvents();
           renderState();
         }
         """#
@@ -3553,7 +3759,9 @@ enum WebViewerAssets {
           points: null,     // screen size in points, once known (AX root frame)
           connection: "connecting",  // connecting | live | reconnecting | offline
           attempt: 0,
-          retryAt: 0
+          retryAt: 0,
+          changedAt: 0,     // performance.now() of the last frame that changed the picture
+          stillBytes: Infinity   // the smallest frame so far: what an unchanged screen costs
         };
         const connectionListeners = [];
         function onConnection(listener) { connectionListeners.push(listener); }
@@ -3698,6 +3906,7 @@ enum WebViewerAssets {
             const response = await fetch("/stream.avcc", { signal: controller.signal, cache: "no-store" });
             if (!response.ok || !response.body) throw new Error("the server answered " + response.status);
             const demuxer = new Demuxer();
+            screenState.stillBytes = Infinity;
             const painter = makeFramePainter();
             let timestamp = 0;
             decoder = new VideoDecoder({
@@ -3717,6 +3926,8 @@ enum WebViewerAssets {
                   if (decoder.state === "closed") throw new Error("the decoder closed");
                   decoder.configure({ codec: avcCodecString(chunk.payload), description: chunk.payload, optimizeForLatency: true, hardwareAcceleration: "prefer-hardware" });
                 } else if (decoder.state === "configured") {
+                  screenState.stillBytes = Math.min(screenState.stillBytes, chunk.payload.byteLength);
+                  if (frameChangesScreen(chunk.type, chunk.payload.byteLength, screenState.stillBytes)) screenState.changedAt = performance.now();
                   try {
                     decoder.decode(new EncodedVideoChunk({ type: chunk.type === "keyframe" ? "key" : "delta", timestamp, data: chunk.payload }));
                     timestamp += 16667;
@@ -4118,7 +4329,7 @@ enum WebViewerAssets {
             exitReplay();
             toast("Running “" + (test.name || file) + "”" + (tests.recordVideo ? " — recording" : ""), { icon: "play" });
             renderTests();
-            poller.poke("tests");
+            refreshInspector("tests");
           } catch (error) {
             fail("Could not start the test", error);
           }
@@ -4250,14 +4461,28 @@ enum WebViewerAssets {
         let testsLastDefinitions = "";
         async function loadTests() {
           const [sessions, definitions, run] = await Promise.all([apiJSON("/api/v1/tests"), apiJSON("/api/v1/tests/definitions"), apiJSON("/api/v1/tests/run")]);
-          const sessionsKey = JSON.stringify(sessions.sessions || []);
-          const definitionsKey = JSON.stringify([definitions.tests || [], run]);
+          applyTests(sessions.sessions || [], definitions.tests || [], run);
+        }
+
+        // On the stream a message carries what changed — a session, a deleted one, the
+        // run, the test files — and a snapshot carries all of it.
+        function applyTestsTopic(payload, reset) {
+          let sessions = reset ? payload.sessions || [] : tests.sessions;
+          if (payload.session) sessions = [payload.session].concat(sessions.filter((session) => session.id !== payload.session.id));
+          if (payload.removedSession) sessions = sessions.filter((session) => session.id !== payload.removedSession);
+          applyTests(sessions, payload.definitions || tests.definitions, payload.run || tests.run || {});
+        }
+
+        function applyTests(sessionList, definitionList, run) {
+          const sorted = sessionList.slice().sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt));
+          const sessionsKey = JSON.stringify(sorted);
+          const definitionsKey = JSON.stringify([definitionList, run]);
           if (sessionsKey === testsLastSessions && definitionsKey === testsLastDefinitions) return;
           const previous = tests.sessions;
           testsLastSessions = sessionsKey;
           testsLastDefinitions = definitionsKey;
-          tests.sessions = (sessions.sessions || []).slice().sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt));
-          tests.definitions = definitions.tests || [];
+          tests.sessions = sorted;
+          tests.definitions = definitionList;
           const previousRun = tests.run;
           tests.run = run;
           // Follow a run that starts anywhere — here or from a terminal: select its test
@@ -4281,7 +4506,7 @@ enum WebViewerAssets {
           renderTests();
         }
 
-        tabHandlers.tests = { show() { renderTests(); poller.poke("tests"); } };
+        tabHandlers.tests = { show() { renderTests(); refreshInspector("tests"); } };
         """#
 
     static let jsTouchJs = #"""
@@ -5123,6 +5348,7 @@ enum WebViewerAssets {
         {{js/ax.js}}
         {{js/tests.js}}
         {{js/palette.js}}
+        {{js/events.js}}
         {{js/main.js}}</script>
         </body>
         </html>

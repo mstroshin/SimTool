@@ -715,6 +715,7 @@ GET /config
 GET /api/v1/status
 GET /api/v1/devices
 GET /api/v1/metrics
+GET /api/v1/events (Server-Sent Events)
 GET /stream.avcc
 GET /stream.jpeg
 GET /stream.mjpeg
@@ -747,6 +748,16 @@ image pixels, and an 800px screenshot is still perfectly legible.
 The `logs/capture` routes drive a continuous capture (OSLog plus optional
 stdout/`print`) into a bounded buffer that clients poll incrementally by cursor;
 `GET /api/v1/logs` remains the one-shot bounded snapshot.
+
+`/api/v1/events` pushes what the viewer's inspector shows as it changes — one
+Server-Sent Events stream per page, with the topics `network`, `logs`, `state`,
+`tests` and `launches`. It opens with a `snapshot` event holding all of them,
+then sends each change once, with `id: <server instance>:<sequence>`. A client
+that reconnects with `Last-Event-ID` (or `?lastEventId=`) gets the events it
+missed; one whose id is too old, or from a previous run of the server, gets a
+fresh snapshot instead. It is same-origin only: the stream sends no CORS headers.
+The JSON routes above stay, and the viewer falls back to polling them while the
+stream is down.
 
 `POST /api/v1/input` takes an `action` — `tap`, `longPress`, `type`, `paste`,
 `swipe`, `scroll`, `fling`, `drag`, `button`, `shake`, `terminate`, `launch`,

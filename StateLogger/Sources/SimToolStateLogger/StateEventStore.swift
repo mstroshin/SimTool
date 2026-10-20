@@ -21,11 +21,21 @@ public final class StateLoggerEventStore: @unchecked Sendable {
 
     @discardableResult
     public func ingest(_ events: [StateLoggerEvent]) -> StateLoggerIngestionResponse {
+        StateLoggerIngestionResponse(acceptedCount: record(events).count)
+    }
+
+    /// Stores `events` and returns them as stored: each stamped with the cursor
+    /// a reader passes back as `since`.
+    @discardableResult
+    public func record(_ events: [StateLoggerEvent]) -> [StateLoggerEvent] {
         lock.lock()
         defer { lock.unlock() }
+        var recorded: [StateLoggerEvent] = []
+        recorded.reserveCapacity(events.count)
         for var event in events {
             event.cursor = nextCursor
             nextCursor += 1
+            recorded.append(event)
             eventsByModel[event.modelId, default: []].append(event)
             if eventsByModel[event.modelId]!.count > perModelCapacity {
                 eventsByModel[event.modelId]!.removeFirst()
@@ -37,7 +47,7 @@ public final class StateLoggerEventStore: @unchecked Sendable {
                 modelRecency.removeFirst()
             }
         }
-        return StateLoggerIngestionResponse(acceptedCount: events.count)
+        return recorded
     }
 
     public func query(since: Int? = nil, limit: Int = 500) -> StateLoggerEventsPayload {

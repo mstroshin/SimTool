@@ -68,9 +68,9 @@ networkPause.addEventListener("click", () => {
   networkPause.innerHTML = icon(network.paused ? "play" : "pause");
   networkPause.dataset.tip = network.paused ? "Resume the list" : "Pause the list";
   networkPause.setAttribute("aria-label", networkPause.dataset.tip);
-  renderNetwork();
   // Resuming catches up at once, not when the next request happens to arrive.
-  if (!network.paused) { networkLastPayload = ""; poller.poke("network"); }
+  if (!network.paused) { network.events = networkHeard; networkLastPayload = ""; refreshInspector("network"); }
+  renderNetwork();
 });
 networkClear.addEventListener("click", () => {
   const previous = new Set(network.cleared);
@@ -327,12 +327,38 @@ networkView.detail.addEventListener("keydown", (domEvent) => {
   domEvent.preventDefault();
 });
 
-// ---- Polling ----
+// ---- From the server: pushed, or polled while the stream is down ----
+
+const NETWORK_MAX = 1000;   // as many calls as the server keeps
+// The server's list as last heard; the table shows it unless paused.
+let networkHeard = [];
+
+function showHeardNetwork() {
+  if (network.paused) {
+    const known = new Set(network.events.map((event) => event.id));
+    network.pausedNew = networkHeard.filter((event) => !known.has(event.id)).length;
+  } else {
+    network.events = networkHeard;
+  }
+}
+
+function applyNetworkTopic(payload, reset) {
+  if (payload.mocks) {
+    const map = {};
+    for (const rule of payload.mocks) map[rule.id] = rule;
+    network.mockRules = map;
+  }
+  if (reset) networkHeard = [];
+  if (payload.removedLaunch != null) networkHeard = networkHeard.filter((event) => String(event.launchId) !== String(payload.removedLaunch));
+  if (payload.events) networkHeard = mergeNetworkEvents(networkHeard, payload.events, NETWORK_MAX);
+  showHeardNetwork();
+  renderSoon(renderNetwork);
+}
 
 let networkLastPayload = "";
 async function loadNetwork() {
   await loadLaunches();
-  const payload = await apiJSON("/api/v1/network/events?limit=1000");
+  const payload = await apiJSON("/api/v1/network/events?limit=" + NETWORK_MAX);
   const events = payload.events || [];
   const serialized = events.length + ":" + (events.length ? events[events.length - 1].id + (events[events.length - 1].response ? "r" : "") : "") + ":" + Object.keys(launchesById).length;
   try {
@@ -343,20 +369,16 @@ async function loadNetwork() {
   } catch (_) { /* keep the last known rules */ }
   if (serialized === networkLastPayload) return;
   networkLastPayload = serialized;
-  if (network.paused) {
-    const known = new Set(network.events.map((event) => event.id));
-    network.pausedNew = events.filter((event) => !known.has(event.id)).length;
-    renderNetwork();
-    return;
-  }
-  network.events = events;
+  networkHeard = events;
+  showHeardNetwork();
   renderNetwork();
 }
 
-tabHandlers.network = { show() { renderNetwork(); poller.poke("network"); } };
+tabHandlers.network = { show() { renderNetwork(); refreshInspector("network"); } };
 
 function resetNetwork() {
   network.events = [];
+  networkHeard = [];
   network.cleared.clear();
   networkLastPayload = "";
   networkList.select(null);

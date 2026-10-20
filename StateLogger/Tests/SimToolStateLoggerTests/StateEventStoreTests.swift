@@ -31,6 +31,16 @@ final class StateEventStoreTests: XCTestCase {
         XCTAssertEqual(empty.nextCursor, 2)
     }
 
+    // A server pushing what it stored needs the cursors the store stamped.
+    func testRecordReturnsTheEventsAsStored() {
+        let store = StateLoggerEventStore()
+        store.ingest([makeEvent(seq: 0)])
+        let recorded = store.record([makeEvent(seq: 1), makeEvent(seq: 2)])
+        XCTAssertEqual(recorded.map(\.seq), [1, 2])
+        XCTAssertEqual(recorded.map(\.cursor), [1, 2])
+        XCTAssertEqual(store.query(since: 0).events, recorded)
+    }
+
     func testPerModelCapacityEvictsOldestOfThatModel() {
         let store = StateLoggerEventStore(perModelCapacity: 2, maxModels: 50)
         store.ingest([makeEvent(seq: 0), makeEvent(seq: 1), makeEvent(seq: 2)])
