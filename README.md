@@ -784,7 +784,8 @@ HTTP API), `test` (a YAML run) or `viewer` (a person at a SimTool page): every
 input with the path its finger took in screen points, mocks armed and removed,
 test runs and their steps. Each entry carries a `revision` that moves whenever
 it changes (a tap opens, learns where it lands, finishes), so `since` the last
-`revision` returns what changed, once per change; `run` is the test run driving
+`revision` returns what changed, once per change — the same entries the event
+stream's `activity` topic pushes; `run` is the test run driving
 the device, while one is. `simtool input …`, `app launch` and `open` act on the
 simulator in their own process and report themselves to every live server
 streaming that device with `POST /api/v1/activity` — `{"kind", "title",
@@ -808,7 +809,8 @@ stdout/`print`) into a bounded buffer that clients poll incrementally by cursor;
 
 `/api/v1/events` pushes what the viewer's inspector shows as it changes — one
 Server-Sent Events stream per page, with the topics `network`, `logs`, `state`,
-`tests` and `launches`. It opens with a `snapshot` event holding all of them,
+`tests`, `launches` and `activity` (an entry of `/api/v1/activity` each time it
+changes, with the log's `revision`). It opens with a `snapshot` event holding all of them,
 then sends each change once, with `id: <server instance>:<sequence>`. A client
 that reconnects with `Last-Event-ID` (or `?lastEventId=`) gets the events it
 missed; one whose id is too old, or from a previous run of the server, gets a

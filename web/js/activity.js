@@ -11,7 +11,7 @@ const MARK_HOLD_MS = 1600;    // how long a mark stays before it fades
 const activity = {
   entries: [],                 // oldest first
   revision: null,
-  run: null,                   // the test run the server says drives the device
+  run: null,                   // the test run the last poll said drives the device
   drawn: new Set(),            // ids already marked on the screen
   cleared: 0,                  // ids below this are cleared from the list
   who: stored("activity.who", "all"),   // all | agent | test | viewer
@@ -241,8 +241,9 @@ function markFresh(entry) {
 
 // ---- Who drives the device, and the last thing done to it ----
 
+// On the stream the Tests topic keeps the run current; polls bring it with the feed.
 function currentDriver() {
-  return deviceDriver(activity.entries, activity.run, Date.now());
+  return deviceDriver(activity.entries, inspectorEvents.polling ? activity.run : tests.run, Date.now());
 }
 
 function renderDriver() {
@@ -300,30 +301,47 @@ function manualInputAllowed(proceed) {
 
 // ---- Polling ----
 
+// An entry arrives once per change, by the stream, a poll or both, and two of
+// its changes may cross on the way: the higher revision is the one kept.
+// Returns the entries that were news.
 function mergeActivity(entries) {
-  if (!entries.length) return;
+  if (!entries.length) return [];
   const index = new Map(activity.entries.map((entry, position) => [entry.id, position]));
+  const fresh = [];
   for (const entry of entries) {
     const at = index.get(entry.id);
     if (at == null) { index.set(entry.id, activity.entries.length); activity.entries.push(entry); }
-    else activity.entries[at] = entry;
+    else if (activity.entries[at].revision < entry.revision) activity.entries[at] = entry;
+    else continue;
+    fresh.push(entry);
   }
   activity.entries.sort((a, b) => a.id - b.id);
   if (activity.entries.length > ACTIVITY_MAX) activity.entries.splice(0, activity.entries.length - ACTIVITY_MAX);
+  return fresh;
+}
+
+// What arrived — a poll's answer, a stream message, or (`history`) everything
+// the server holds. History is rows, not marks: marks are for what happens
+// while the page watches.
+function takeActivity(entries, revision, history) {
+  const fresh = mergeActivity(entries);
+  if (revision != null) activity.revision = Math.max(activity.revision || 0, revision);
+  for (const entry of fresh) { if (history) activity.drawn.add(entry.id); else markFresh(entry); }
+  renderDriver();
+  if (fresh.length || history) renderSoon(renderActivity);
 }
 
 async function pollActivity() {
-  const since = activity.revision == null ? "" : "?since=" + activity.revision;
-  const payload = await apiJSON("/api/v1/activity" + since);
-  const entries = payload.entries || [];
   const first = activity.revision == null;
-  activity.revision = payload.revision;
+  const payload = await apiJSON("/api/v1/activity" + (first ? "" : "?since=" + activity.revision));
   activity.run = payload.run || null;
-  mergeActivity(entries);
-  // The first answer is history: marks are for what happens while the page watches.
-  for (const entry of entries) { if (first) activity.drawn.add(entry.id); else markFresh(entry); }
-  renderDriver();
-  if (entries.length || first) renderActivity();
+  takeActivity(payload.entries || [], payload.revision, first);
+}
+
+// The stream's `activity` topic; a snapshot replaces the list.
+function applyActivityTopic(payload, reset) {
+  if (reset) { activity.entries = []; activity.revision = null; }
+  takeActivity(payload.entries || [], payload.revision, reset);
 }
 
 tabHandlers.activity = { show() { renderActivity(); poller.poke("activity"); } };

@@ -1,6 +1,6 @@
 // Inspector data pushed by the server: one Server-Sent Events stream per page
-// (/api/v1/events) carries Network, Logs, State, Tests and the app launches as
-// they change, so nothing waits for a poll. It is a connection of its own — the
+// (/api/v1/events) carries Network, Logs, State, Tests, the app launches and
+// what was done to the device as they change, so nothing waits for a poll. It is a connection of its own — the
 // screen already holds one of the six a browser opens to a server — and not the
 // input WebSocket, where a burst of log lines would hold up a touch.
 //
@@ -37,6 +37,7 @@ function startInspectorEvents() {
   on("state", (payload) => applyStateTopic(payload, false));
   on("tests", (payload) => applyTestsTopic(payload, false));
   on("launches", (payload) => { applyLaunchesTopic(payload); renderSoon(renderNetwork); renderSoon(renderLogs); });
+  on("activity", (payload) => applyActivityTopic(payload, false));
 }
 
 // Everything the server holds, in place of what the page had: the stream's
@@ -49,6 +50,7 @@ function applySnapshot(snapshot) {
   applyLogsTopic(snapshot.logs || {}, true);
   applyStateTopic(snapshot.state || {}, true);
   applyTestsTopic(snapshot.tests || {}, true);
+  applyActivityTopic(snapshot.activity || {}, true);
   // A restarted server captures the app's logs once asked again.
   ensureLogsCapture().catch(() => renderLogs());
 }
