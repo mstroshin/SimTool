@@ -4,7 +4,7 @@ import XCTest
 // Contracts of the assembled page: what it talks to, how it is put together,
 // and the promises the redesign made — the structure, not the styling.
 final class WebViewerPageTests: XCTestCase {
-    private let page = WebViewer.html()
+    private let page = WebViewer.pageWithAssets
 
     func testTheInspectorIsATablistWithAPanelPerTab() throws {
         for tab in ["network", "logs", "state", "ax", "tests"] {

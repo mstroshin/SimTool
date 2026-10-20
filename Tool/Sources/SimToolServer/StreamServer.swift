@@ -165,6 +165,15 @@ public final class StreamServer: @unchecked Sendable {
             .ok(.html(WebViewer.html()))
         }
 
+        // The viewer's stylesheets and scripts, as separate files.
+        for path in WebViewer.assetPaths {
+            guard let asset = WebViewer.servedAsset(path) else { continue }
+            let data = Data(asset.contents.utf8)
+            server.GET[WebViewer.assetsPath + path] = { _ in
+                self.dataResponse(data, contentType: asset.contentType)
+            }
+        }
+
         server["/health"] = { _ in
             self.jsonResponse(["status": "ok"])
         }
