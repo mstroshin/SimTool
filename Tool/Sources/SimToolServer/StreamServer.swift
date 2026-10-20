@@ -661,6 +661,12 @@ public final class StreamServer: @unchecked Sendable {
 
     private func wireInspectorEvents() {
         testRuns.onChange = { [weak self] in self?.publishTestRun() }
+        // Outside the hub's lock: the snapshot reads the log under it, so the
+        // log never takes the hub's lock under its own. The viewer keeps the
+        // newer revision of an entry whichever way round two changes arrive.
+        activity.observe { [weak self] entry, revision in
+            self?.inspectorEvents.publish(.activity, ActivityTopicPayload(entries: [entry], revision: revision))
+        }
         let watcher = TestDefinitionsWatcher(root: config.testsRoot) { [weak self] in self?.publishTestDefinitions() }
         watcher.start()
         testDefinitionsWatcher = watcher
@@ -704,7 +710,11 @@ public final class StreamServer: @unchecked Sendable {
             logs: LogsTopicPayload(entries: logs.entries, droppedCount: logs.droppedCount ?? 0),
             state: StateTopicPayload(events: stateLoggerEvents.query(since: nil, limit: .max).events),
             tests: TestsTopicPayload(sessions: testSessions.list().sessions, definitions: testRuns.list().tests, run: testRunStatus()),
-            launches: AppLaunchesPayload(launches: launches.snapshot())
+            launches: AppLaunchesPayload(launches: launches.snapshot()),
+            activity: {
+                let page = activity.query(since: nil)
+                return ActivityTopicPayload(entries: page.entries, revision: page.revision)
+            }()
         )
     }
 

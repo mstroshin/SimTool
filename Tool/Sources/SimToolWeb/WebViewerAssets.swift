@@ -42,7 +42,7 @@ enum WebViewerAssets {
         const activity = {
           entries: [],                 // oldest first
           revision: null,
-          run: null,                   // the test run the server says drives the device
+          run: null,                   // the test run the last poll said drives the device
           drawn: new Set(),            // ids already marked on the screen
           cleared: 0,                  // ids below this are cleared from the list
           who: stored("activity.who", "all"),   // all | agent | test | viewer
@@ -272,8 +272,9 @@ enum WebViewerAssets {
 
         // ---- Who drives the device, and the last thing done to it ----
 
+        // On the stream the Tests topic keeps the run current; polls bring it with the feed.
         function currentDriver() {
-          return deviceDriver(activity.entries, activity.run, Date.now());
+          return deviceDriver(activity.entries, inspectorEvents.polling ? activity.run : tests.run, Date.now());
         }
 
         function renderDriver() {
@@ -331,30 +332,47 @@ enum WebViewerAssets {
 
         // ---- Polling ----
 
+        // An entry arrives once per change, by the stream, a poll or both, and two of
+        // its changes may cross on the way: the higher revision is the one kept.
+        // Returns the entries that were news.
         function mergeActivity(entries) {
-          if (!entries.length) return;
+          if (!entries.length) return [];
           const index = new Map(activity.entries.map((entry, position) => [entry.id, position]));
+          const fresh = [];
           for (const entry of entries) {
             const at = index.get(entry.id);
             if (at == null) { index.set(entry.id, activity.entries.length); activity.entries.push(entry); }
-            else activity.entries[at] = entry;
+            else if (activity.entries[at].revision < entry.revision) activity.entries[at] = entry;
+            else continue;
+            fresh.push(entry);
           }
           activity.entries.sort((a, b) => a.id - b.id);
           if (activity.entries.length > ACTIVITY_MAX) activity.entries.splice(0, activity.entries.length - ACTIVITY_MAX);
+          return fresh;
+        }
+
+        // What arrived — a poll's answer, a stream message, or (`history`) everything
+        // the server holds. History is rows, not marks: marks are for what happens
+        // while the page watches.
+        function takeActivity(entries, revision, history) {
+          const fresh = mergeActivity(entries);
+          if (revision != null) activity.revision = Math.max(activity.revision || 0, revision);
+          for (const entry of fresh) { if (history) activity.drawn.add(entry.id); else markFresh(entry); }
+          renderDriver();
+          if (fresh.length || history) renderSoon(renderActivity);
         }
 
         async function pollActivity() {
-          const since = activity.revision == null ? "" : "?since=" + activity.revision;
-          const payload = await apiJSON("/api/v1/activity" + since);
-          const entries = payload.entries || [];
           const first = activity.revision == null;
-          activity.revision = payload.revision;
+          const payload = await apiJSON("/api/v1/activity" + (first ? "" : "?since=" + activity.revision));
           activity.run = payload.run || null;
-          mergeActivity(entries);
-          // The first answer is history: marks are for what happens while the page watches.
-          for (const entry of entries) { if (first) activity.drawn.add(entry.id); else markFresh(entry); }
-          renderDriver();
-          if (entries.length || first) renderActivity();
+          takeActivity(payload.entries || [], payload.revision, first);
+        }
+
+        // The stream's `activity` topic; a snapshot replaces the list.
+        function applyActivityTopic(payload, reset) {
+          if (reset) { activity.entries = []; activity.revision = null; }
+          takeActivity(payload.entries || [], payload.revision, reset);
         }
 
         tabHandlers.activity = { show() { renderActivity(); poller.poke("activity"); } };
@@ -1682,8 +1700,8 @@ enum WebViewerAssets {
 
     static let jsEventsJs = #"""
         // Inspector data pushed by the server: one Server-Sent Events stream per page
-        // (/api/v1/events) carries Network, Logs, State, Tests and the app launches as
-        // they change, so nothing waits for a poll. It is a connection of its own — the
+        // (/api/v1/events) carries Network, Logs, State, Tests, the app launches and
+        // what was done to the device as they change, so nothing waits for a poll. It is a connection of its own — the
         // screen already holds one of the six a browser opens to a server — and not the
         // input WebSocket, where a burst of log lines would hold up a touch.
         //
@@ -1720,6 +1738,7 @@ enum WebViewerAssets {
           on("state", (payload) => applyStateTopic(payload, false));
           on("tests", (payload) => applyTestsTopic(payload, false));
           on("launches", (payload) => { applyLaunchesTopic(payload); renderSoon(renderNetwork); renderSoon(renderLogs); });
+          on("activity", (payload) => applyActivityTopic(payload, false));
         }
 
         // Everything the server holds, in place of what the page had: the stream's
@@ -1732,6 +1751,7 @@ enum WebViewerAssets {
           applyLogsTopic(snapshot.logs || {}, true);
           applyStateTopic(snapshot.state || {}, true);
           applyTestsTopic(snapshot.tests || {}, true);
+          applyActivityTopic(snapshot.activity || {}, true);
           // A restarted server captures the app's logs once asked again.
           ensureLogsCapture().catch(() => renderLogs());
         }
@@ -3467,15 +3487,15 @@ enum WebViewerAssets {
         poller.add("tests", () => (activeTab("tests") ? ACTIVE_MS : BACKGROUND_MS), loadTests, polling);
         // The tree is not on the stream: it is read when the screen changed.
         poller.add("ax", AX_CHECK_MS, loadAx, () => activeTab("ax") && app.dataset.mode !== "replay" && axTreeStale());
-        // Every tab needs it: the marks on the screen and who drives the device.
-        poller.add("activity", 500, pollActivity);
+        // Every tab needs it — the marks on the screen and who drives the device — so
+        // while the stream is down it is polled quickly.
+        poller.add("activity", 500, pollActivity, polling);
 
         onReconnect(async () => {
           try { await bootstrap(); } catch (_) {}
           // A server that came back may be one that streams, where the last one did not.
           startInspectorEvents();
-          for (const name of ["network", "logs", "state", "tests"]) refreshInspector(name);
-          poller.poke("activity");
+          for (const name of ["network", "logs", "state", "tests", "activity"]) refreshInspector(name);
         });
 
         onConnection((state) => {

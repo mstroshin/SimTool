@@ -80,15 +80,15 @@ poller.add("state", () => (activeTab("state") ? 1000 : BACKGROUND_MS), pollState
 poller.add("tests", () => (activeTab("tests") ? ACTIVE_MS : BACKGROUND_MS), loadTests, polling);
 // The tree is not on the stream: it is read when the screen changed.
 poller.add("ax", AX_CHECK_MS, loadAx, () => activeTab("ax") && app.dataset.mode !== "replay" && axTreeStale());
-// Every tab needs it: the marks on the screen and who drives the device.
-poller.add("activity", 500, pollActivity);
+// Every tab needs it — the marks on the screen and who drives the device — so
+// while the stream is down it is polled quickly.
+poller.add("activity", 500, pollActivity, polling);
 
 onReconnect(async () => {
   try { await bootstrap(); } catch (_) {}
   // A server that came back may be one that streams, where the last one did not.
   startInspectorEvents();
-  for (const name of ["network", "logs", "state", "tests"]) refreshInspector(name);
-  poller.poke("activity");
+  for (const name of ["network", "logs", "state", "tests", "activity"]) refreshInspector(name);
 });
 
 onConnection((state) => {

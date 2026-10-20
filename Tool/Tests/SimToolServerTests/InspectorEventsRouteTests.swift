@@ -38,7 +38,7 @@ final class InspectorEventsRouteTests: XCTestCase {
         XCTAssertEqual(snapshot.name, "snapshot")
         XCTAssertEqual(snapshot.id, "\(instance ?? ""):0")
         XCTAssertEqual(snapshot.json["instance"] as? String, instance)
-        for topic in ["network", "logs", "state", "tests", "launches"] {
+        for topic in ["network", "logs", "state", "tests", "launches", "activity"] {
             XCTAssertNotNil(snapshot.json[topic], "the snapshot holds \(topic)")
         }
 
@@ -102,6 +102,40 @@ final class InspectorEventsRouteTests: XCTestCase {
         XCTAssertEqual(snapshot.name, "snapshot", "the old run's ids mean nothing to the new one")
         XCTAssertEqual(snapshot.json["instance"] as? String, instance)
         XCTAssertEqual(((snapshot.json["network"] as? [String: Any])?["events"] as? [Any])?.count, 0)
+    }
+
+    // What an agent does to the device reaches the viewer the moment the
+    // server hears of it, each change of an entry once.
+    func testWhatIsDoneToTheDeviceIsPushedAsItChanges() async throws {
+        let (server, baseURL) = try startServer()
+        defer { server.stop() }
+        let stream = try await EventStream.open(baseURL)
+        defer { stream.close() }
+        let snapshot = try await stream.next(skipping: [])
+        XCTAssertEqual((snapshot.json["activity"] as? [String: Any])?["revision"] as? Int, 0)
+
+        let opened = try await send("POST", baseURL, "api/v1/activity", #"{"via":"cli","kind":"tap","title":"Tap “General”","gesture":{"from":{"x":201,"y":406},"to":{"x":201,"y":406},"press":0.06,"duration":0.06}}"#)
+        let id = try XCTUnwrap((try JSONSerialization.jsonObject(with: opened) as? [String: Any])?["id"] as? Int)
+        let began = try await stream.next(skipping: [])
+        XCTAssertEqual(began.name, "activity")
+        XCTAssertEqual(began.json["revision"] as? Int, 1)
+        let entry = try XCTUnwrap((began.json["entries"] as? [[String: Any]])?.first)
+        XCTAssertEqual(entry["title"] as? String, "Tap “General”")
+        XCTAssertEqual(entry["status"] as? String, "running")
+        XCTAssertNotNil(entry["gesture"], "the finger's path goes with it, to draw while it moves")
+
+        _ = try await send("POST", baseURL, "api/v1/activity", #"{"id":\#(id),"status":"done"}"#)
+        let finished = try await stream.next(skipping: [])
+        XCTAssertEqual((finished.json["entries"] as? [[String: Any]])?.first?["status"] as? String, "done")
+
+        _ = try await send("DELETE", baseURL, "api/v1/mocks")
+        let draft = MockRuleDraft(match: MockMatch(method: "*/GetPromotions"), response: MockResponse(kind: .error, grpcStatus: "unavailable"))
+        _ = try await send("POST", baseURL, "api/v1/mocks", String(decoding: try JSON.data(draft), as: UTF8.self))
+        let mocks = try await stream.next(skipping: [])
+        XCTAssertEqual(mocks.name, "network", "the rule first, then what it says in the feed")
+        let armed = try await stream.next(skipping: [])
+        XCTAssertEqual(armed.name, "activity")
+        XCTAssertEqual((armed.json["entries"] as? [[String: Any]])?.map { $0["status"] as? String }, ["done"], "a mock armed is one change, sent once")
     }
 
     func testDeletionsMocksAndTestRunsArePushedToo() async throws {
@@ -269,13 +303,15 @@ private final class EventStream: @unchecked Sendable {
         return EventStream(bytes: bytes, response: http)
     }
 
-    /// The next event with data; the retry hint and keep-alive comments are skipped.
-    func next() async throws -> Event {
+    /// The next event with data; the retry hint and keep-alive comments are
+    /// skipped, and so is the activity feed unless asked for — mocks and test
+    /// runs write to it too, between the topics most tests follow.
+    func next(skipping skipped: Set<String> = ["activity"]) async throws -> Event {
         while true {
             if let end = buffer.firstRange(of: Data([0x0A, 0x0A])) {
                 let block = String(decoding: buffer[..<end.lowerBound], as: UTF8.self)
                 buffer.removeSubrange(..<end.upperBound)
-                guard let event = ServerSentEvents.parse(block + "\n\n").first else { continue }
+                guard let event = ServerSentEvents.parse(block + "\n\n").first, !skipped.contains(event.name) else { continue }
                 let json = try JSONSerialization.jsonObject(with: Data(event.data.utf8)) as? [String: Any]
                 return Event(id: event.id, name: event.name, json: try XCTUnwrap(json))
             }

@@ -77,6 +77,9 @@ final class WebViewerPageTests: XCTestCase {
         XCTAssertTrue(page.contains(#"<span class="driver-status" role="status" aria-live="polite"><button class="driver" type="button" id="driverChip""#), "the driver is announced")
         XCTAssertTrue(page.contains(#"id="readLast""#), "the last action stays under the device")
         XCTAssertTrue(page.contains(#""X-SimTool-Source": "viewer""#), "the viewer's own input is told apart from an agent's")
+        XCTAssertTrue(page.contains(#"on("activity", (payload) => applyActivityTopic(payload, false));"#), "activity arrives on the event stream")
+        XCTAssertTrue(page.contains("applyActivityTopic(snapshot.activity || {}, true);"), "the snapshot carries the feed")
+        XCTAssertTrue(page.contains(#"poller.add("activity", 500, pollActivity, polling);"#), "the feed is polled only while the stream is down")
     }
 
     // Input from the page while a test or an agent drives the device asks

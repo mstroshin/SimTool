@@ -15,6 +15,7 @@ struct InspectorSnapshotPayload: Encodable {
     var state: StateTopicPayload
     var tests: TestsTopicPayload
     var launches: AppLaunchesPayload
+    var activity: ActivityTopicPayload
 }
 
 /// `network`: calls the app reported (a known id replaces its call), the
@@ -38,6 +39,14 @@ struct LogsTopicPayload: Encodable {
 /// `state`: model snapshots in cursor order.
 struct StateTopicPayload: Encodable {
     var events: [StateLoggerEvent]
+}
+
+/// `activity`: what was done to the device — an entry each time it opens,
+/// learns where its finger goes or ends — with the log's revision, so a viewer
+/// that falls back to polling asks from where the stream left it.
+struct ActivityTopicPayload: Encodable {
+    var entries: [DeviceActivity]
+    var revision: Int
 }
 
 /// `tests`: a session that started, stepped or stopped, a deleted session, the
