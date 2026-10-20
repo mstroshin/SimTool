@@ -160,6 +160,13 @@ land as a tap. `POST /api/v1/input` takes the same gestures (`scroll`, `fling`,
 `drag`, and `swipe` with `velocity`/`hold`), and YAML tests have `scroll:`,
 `fling:` and `drag:` steps.
 
+A touch fails rather than answering `ok` when iOS has dropped the touch screen
+for the current boot. iOS 26.4 and 27 do that when the simulator's HID daemon
+(dtuhidd) starts before anything has touched the screen; the helper claims the
+screen as it starts, so only a tool that reached the device before SimTool can
+cause it. The error gives the command to reboot the simulator, which brings
+touches back.
+
 `input type` reaches only characters on a US keyboard. For anything else —
 Cyrillic, accents, emoji, several lines — use `input paste`: it puts the text on
 the simulator clipboard and presses ⌘V in the focused field.

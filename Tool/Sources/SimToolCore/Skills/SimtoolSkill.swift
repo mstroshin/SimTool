@@ -288,6 +288,9 @@ extension AgentSkill {
             it) through the accessibility tree; idempotent. Hide it when it covers the
             button you need; `show` fails when no text field is focused — tap one
             first. `keyboard toggle` presses once without checking (Simulator.app's ⌘K).
+          - A touch that fails with "Touches are not reaching simulator …" means iOS
+            dropped the touch screen for this boot; retrying will not help — reboot the
+            simulator with the command the error gives.
         - `simtool ax …` — read the accessibility tree / find an element.
         - `simtool logs …` — OSLog stream; a `--stdout` mode **relaunches** the app to
           attach its console (useful when the app logs richly to stdout — networking,
