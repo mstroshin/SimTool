@@ -271,9 +271,10 @@ inline argv/env), `reset:` (UserDefaults, data container, permission alerts,
 locale) and `mocks:` (backend answers, applied before launch). See
 `simtool test run --help` for the full file format.
 
-When the project config says how to build the app, a run rebuilds and reinstalls
-it first — only when the sources changed, since the checksum cache decides — and
-before the recorder starts, together with `reset:` and `setup:`. So the video
+When the project config says how to build the app, a run rebuilds it for the
+run's simulator and reinstalls it first — only when the sources changed, since
+the checksum cache decides — and before the recorder starts, together with
+`reset:` and `setup:`. So the video
 holds the run itself rather than minutes of an Xcode build, while the staging
 still appears in the timeline and its logs are still captured. `--no-build`
 judges whatever is already installed.
@@ -380,13 +381,30 @@ swift run simtool app build --project MyApp.xcodeproj --scheme MyApp --configura
 swift run simtool app build --device <udid-or-name> --workspace MyApp.xcworkspace --scheme MyApp
 ```
 
+Inside a project with a `.simtool/config.yml`, `app build`, `app launch` and
+`app test` need neither: without `--workspace` or `--project` they build the app
+from the config's `build:` block — the one `run` builds, from the same cache —
+and `--scheme`, `--configuration`, `--derived-data-path`, `--build-setting` and
+`--builder` each override just their key:
+
+```sh
+swift run simtool app launch
+swift run simtool app build --configuration Release --json
+```
+
 Without `--device` the build targets any iOS simulator, so xcodebuild compiles
 every simulator architecture (arm64 and x86_64); with it, only that simulator's —
-noticeably faster. A project that only builds with extra xcodebuild settings —
-say a deployment target its generated dependencies miss — gets them from
-`build.settings` in `.simtool/config.yml` (below) on every build of that
-workspace or project, or per command with repeatable
-`--build-setting KEY=VALUE` on `app build`, `app launch` and `app test`:
+noticeably faster. `app launch`, `run` and `test run` always build for the
+simulator they install on, resolved before the build (`--device`, then
+`simulator:` from the config, then the booted one — `booted` becomes a UDID
+too). The target is not part of the cache key: a build for one simulator, for
+another or for any is reused by all of them.
+
+A project that only builds with extra xcodebuild settings — say a deployment
+target its generated dependencies miss — gets them from `build.settings` in
+`.simtool/config.yml` (below) on every build of that workspace or project, or
+per command with repeatable `--build-setting KEY=VALUE` on `app build`,
+`app launch` and `app test`:
 
 ```sh
 swift run simtool app build --workspace MyApp.xcworkspace --scheme MyApp \
@@ -395,6 +413,44 @@ swift run simtool app build --workspace MyApp.xcworkspace --scheme MyApp \
 
 A flag wins over the config for the same key. Settings are part of the build
 cache key, so a build with other settings never reuses a cached one.
+
+### Building in Xcode over MCP
+
+Xcode 27 offers its build to agents as MCP tools (`xcrun mcpbridge`), and SimTool
+can build through them instead of running xcodebuild: set `builder: xcode-mcp`
+in the config's `build:` block, or pass `--builder xcode-mcp` to `run`,
+`app build` or `app launch` (`--builder xcodebuild` switches back for one
+command). Xcode keeps the workspace loaded between builds and builds into the
+DerivedData its own UI uses, so a build there is often far faster than a cold
+xcodebuild.
+
+```sh
+swift run simtool run --builder xcode-mcp
+swift run simtool app build --workspace MyApp.xcworkspace --scheme MyApp --builder xcode-mcp --json
+```
+
+SimTool opens the workspace or project in Xcode, makes the scheme active,
+selects the simulator's run destination — Xcode lists simulators by name and
+iOS version; without a device, "Any iOS Simulator Device" — builds, and asks
+Xcode where the `.app` landed. The workspace stays open for the next build;
+`xcrun mcp-server stop` closes Xcode's background service and everything it
+opened.
+
+Xcode decides the build itself: the scheme's Run configuration, the project's
+own settings, its own DerivedData. So an Xcode build leaves the config's
+`derivedDataPath` and `settings` out (they still apply to xcodebuild), refuses
+`--derived-data-path` and `--build-setting`, and fails when the scheme's Run
+configuration is not the `configuration` asked for. Its builds get a cache
+entry of their own: switching builders builds once rather than reusing the
+other builder's `.app`.
+
+The first time, Xcode asks you to approve SimTool as an agent and to let it
+open the project's folder — from the Xcode MCP menu bar icon, or with
+`sudo xcrun mcp-server approve <id>` for a request `xcrun mcp-server status`
+lists. A build left waiting fails after about a minute with that hint; approve
+and run it again. Xcode ties the approval to the `simtool` binary: an unsigned
+one, such as a Homebrew build, is trusted for 24 hours at a time and once more
+after each upgrade.
 
 Launch builds only when the build-input checksum changes. If the checksum matches
 the last successful build, SimTool reuses the cached `.app`; if the selected
@@ -623,6 +679,7 @@ build:
   # derivedDataPath: ./DerivedData  # optional
   # settings:                       # optional xcodebuild build settings for every build
   #   MACOSX_DEPLOYMENT_TARGET: "15.0"
+  # builder: xcode-mcp              # optional: build in Xcode over MCP, not xcodebuild
 server:                             # optional viewer settings
   host: 127.0.0.1                   # the address it listens on; 0.0.0.0 opens it to the network
   port: 3200
@@ -673,13 +730,13 @@ Relative `workspace`/`project`/`derivedDataPath` paths resolve against the confi
 file's directory.
 
 `simtool run` reads the config, boots the configured simulator if needed, builds
-(reusing the checksum cache), installs, and launches the app, then starts the
-viewer server and prints its URL (`Open http://…`, or the `url` field with
-`--json`) — handy for scripts that open the page themselves. Pass `--web` to
-also open the browser viewer. It runs in the foreground like `serve` (Ctrl-C
-stops it), or pass `--detach` to leave the viewer server running in the
-background once the app is launched — build and launch still report in the
-foreground, and the printed session (`url` with `--json`) is ready to open.
+for that simulator only (reusing the checksum cache), installs, and launches the
+app, then starts the viewer server and prints its URL (`Open http://…`, or the
+`url` field with `--json`) — handy for scripts that open the page themselves.
+Pass `--web` to also open the browser viewer. It runs in the foreground like
+`serve` (Ctrl-C stops it), or pass `--detach` to leave the viewer server running
+in the background once the app is launched — build and launch still report in
+the foreground, and the printed session (`url` with `--json`) is ready to open.
 
 ```sh
 swift run simtool run            # server only; open the printed URL yourself
@@ -706,8 +763,8 @@ otherwise. This keeps gitignored, generated artifacts — a Tuist-managed
 SPM checkouts — out of the checksum, so they don't spuriously invalidate the
 cache.
 
-`run --force` skips the checksum cache: it always runs xcodebuild and
-reinstalls the app. Use it when a dependency the fingerprint cannot see
+`run --force` skips the checksum cache: it always builds (xcodebuild, or Xcode
+with `xcode-mcp`) and reinstalls the app. Use it when a dependency the fingerprint cannot see
 changed — e.g. a local package outside the project root, or a Tuist binary
 cache that went stale (then regenerate with `tuist generate` first).
 

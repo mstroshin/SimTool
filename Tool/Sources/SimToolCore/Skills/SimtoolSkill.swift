@@ -64,8 +64,11 @@ extension AgentSkill {
         > **Fill this in.** Replace the placeholders with your project's real values, and
         > note the repo root the commands must run from.
 
-        Run from the repo root. Pass these on every `app build` / `app launch` (confirm
-        flag names with `simtool app --help`):
+        Run from the repo root. With a `build:` block in `.simtool/config.yml`,
+        `app build` / `app launch` / `app test` take the workspace, scheme,
+        configuration and DerivedData path from it — pass a flag only to override that
+        one key. Without a config, pass these on every `app build` / `app launch`
+        (confirm flag names with `simtool app --help`):
 
         ```bash
         --workspace MyApp.xcworkspace --scheme MyApp --configuration Debug --derived-data-path DerivedData
@@ -84,10 +87,12 @@ extension AgentSkill {
           **refuses to guess when several simulators are booted and neither was
           given**. That refusal is deliberate: on a machine running parallel checkouts,
           guessing means driving another one's simulator, where the taps land elsewhere
-          and the accessibility tree merely looks stale. `app build` takes `--device`
-          too, to build for that simulator only (faster); without it, it builds for any
-          simulator. `simtool app build/launch` boots nothing itself — boot first
-          (`xcrun simctl boot <udid>` / open Simulator.app). List devices:
+          and the accessibility tree merely looks stale. `app launch`, `run` and
+          `test run` build for the simulator they launch on — its architecture only.
+          `app build` takes `--device` too, to do the same (faster); without it, it
+          builds for any simulator. Either build is reused by the others: the target is
+          not part of the cache key. `simtool app build/launch` boots nothing itself —
+          boot first (`xcrun simctl boot <udid>` / open Simulator.app). List devices:
           `simtool devices --json`.
         - **Build settings**: if the project only builds with extra xcodebuild
           settings (e.g. `MACOSX_DEPLOYMENT_TARGET=15.0` for a macro whose generated
@@ -95,6 +100,13 @@ extension AgentSkill {
           — every `app build` / `app launch` / `app test` / `run` of that workspace
           picks them up — or pass `--build-setting KEY=VALUE` per command. Don't run
           `xcodebuild` by hand to get around a missing setting.
+        - **Building in Xcode**: `builder: xcode-mcp` in the config's `build:` block
+          (or `--builder xcode-mcp` on `run` / `app build` / `app launch`) builds in
+          Xcode over its MCP tools instead of xcodebuild — often much faster, since
+          Xcode keeps the workspace loaded. Xcode builds the scheme's Run configuration
+          with the project's own settings, so `derivedDataPath` / `settings` don't
+          apply. If it fails with "approve", Xcode is waiting for the user to approve
+          `simtool`: ask them to, then rerun — don't fall back to xcodebuild silently.
         - **Launch profiles**: name the argv recipes your tests and runs need in
           `profiles:` in `.simtool/config.yml`, and refer to them by name from a test's
           `launch.profile`. Values may interpolate `${VAR}` from the shell, so accounts
@@ -108,13 +120,17 @@ extension AgentSkill {
               env: { SOME_FLAG: "1" }
           ```
         - **Lifecycle**: a launch is build (cached by source checksum → reuses the `.app`
-          when nothing changed, else `xcodebuild`) → install if needed → **cold** launch
+          when nothing changed, else `xcodebuild` or Xcode) → install if needed → **cold** launch
           (so launch args/env always take effect). Use the force-rebuild flag to bypass a
           valid cache. See `simtool app build --help` / `simtool app launch --help`.
 
         ### Canonical commands
 
         ```bash
+        # With `build:` in .simtool/config.yml: the configured app; a flag overrides its key
+        simtool app build
+        simtool app launch -- <app launch arguments>
+
         # Build only — fastest path for a quick syntax check
         simtool app build \
           --workspace MyApp.xcworkspace --scheme MyApp --configuration Debug \

@@ -15,6 +15,11 @@ public struct ProjectConfig: Codable, Equatable, Sendable {
         /// cannot build without, e.g. a deployment target its generated
         /// dependencies miss.
         public var settings: [String: String]
+        /// Who builds (`builder:`): xcodebuild, or Xcode itself over its MCP
+        /// tools. `derivedDataPath` and `settings` are xcodebuild's alone, so
+        /// an Xcode build leaves them out rather than failing on them — the
+        /// same config can build either way.
+        public var builder: SimulatorAppBuilder
 
         public init(
             workspace: String? = nil,
@@ -22,7 +27,8 @@ public struct ProjectConfig: Codable, Equatable, Sendable {
             scheme: String,
             configuration: String? = nil,
             derivedDataPath: String? = nil,
-            settings: [String: String] = [:]
+            settings: [String: String] = [:],
+            builder: SimulatorAppBuilder = .xcodebuild
         ) {
             self.workspace = workspace
             self.project = project
@@ -30,10 +36,11 @@ public struct ProjectConfig: Codable, Equatable, Sendable {
             self.configuration = configuration
             self.derivedDataPath = derivedDataPath
             self.settings = settings
+            self.builder = builder
         }
 
         private enum CodingKeys: String, CodingKey {
-            case workspace, project, scheme, configuration, derivedDataPath, settings
+            case workspace, project, scheme, configuration, derivedDataPath, settings, builder
         }
 
         public init(from decoder: Decoder) throws {
@@ -44,19 +51,37 @@ public struct ProjectConfig: Codable, Equatable, Sendable {
             configuration = try container.decodeIfPresent(String.self, forKey: .configuration)
             derivedDataPath = try container.decodeIfPresent(String.self, forKey: .derivedDataPath)
             settings = try container.decodeIfPresent([String: String].self, forKey: .settings) ?? [:]
+            builder = try container.decodeIfPresent(SimulatorAppBuilder.self, forKey: .builder) ?? .xcodebuild
         }
 
         /// Maps the config build block onto the shared build selection so build
         /// validation (workspace XOR project, required scheme, default
         /// configuration, path canonicalization) is reused, not reimplemented.
-        public func selection() throws -> SimulatorAppBuildSelection {
-            try SimulatorAppBuildSelection.validated(
+        /// `builder` overrides the configured one, as `--builder` does, and the
+        /// other arguments are flags over their keys — what `simtool app build`,
+        /// `app launch` and `app test` build when no `--workspace` or
+        /// `--project` names another project. Extra `settings` merge over the
+        /// configured ones key by key. Xcode takes neither a DerivedData path
+        /// nor settings, so with `xcode-mcp` the configured ones stay out and
+        /// an explicit one is an error.
+        public func selection(
+            builder: SimulatorAppBuilder? = nil,
+            scheme: String? = nil,
+            configuration: String? = nil,
+            derivedDataPath: String? = nil,
+            settings extraSettings: [String: String] = [:]
+        ) throws -> SimulatorAppBuildSelection {
+            let builder = builder ?? self.builder
+            let usesXcodebuild = builder == .xcodebuild
+            let configuredSettings = usesXcodebuild ? settings : [:]
+            return try SimulatorAppBuildSelection.validated(
                 workspacePath: workspace,
                 projectPath: project,
-                scheme: scheme,
-                configuration: configuration,
-                derivedDataPath: derivedDataPath,
-                buildSettings: settings
+                scheme: scheme ?? self.scheme,
+                configuration: configuration ?? self.configuration,
+                derivedDataPath: derivedDataPath ?? (usesXcodebuild ? self.derivedDataPath : nil),
+                buildSettings: configuredSettings.merging(extraSettings) { _, flag in flag },
+                builder: builder
             )
         }
 
@@ -65,10 +90,20 @@ public struct ProjectConfig: Codable, Equatable, Sendable {
         /// configured app pick them up without repeating them as flags, while
         /// a build of some other project stays untouched.
         public func settings(for selection: SimulatorAppBuildSelection) -> [String: String] {
-            guard !settings.isEmpty, let configured = try? self.selection() else { return [:] }
-            let sameSource = configured.identity.workspacePath == selection.identity.workspacePath
+            guard !settings.isEmpty, describes(selection) else { return [:] }
+            return settings
+        }
+
+        /// The configured builder when `selection` builds this block's
+        /// workspace or project, else nil — as with `settings(for:)`.
+        public func builder(for selection: SimulatorAppBuildSelection) -> SimulatorAppBuilder? {
+            describes(selection) ? builder : nil
+        }
+
+        private func describes(_ selection: SimulatorAppBuildSelection) -> Bool {
+            guard let configured = try? self.selection(builder: .xcodebuild) else { return false }
+            return configured.identity.workspacePath == selection.identity.workspacePath
                 && configured.identity.projectPath == selection.identity.projectPath
-            return sameSource ? settings : [:]
         }
     }
 
@@ -184,8 +219,14 @@ public struct ProjectConfig: Codable, Equatable, Sendable {
         simtoolDirectory.deletingLastPathComponent().resolvingSymlinksInPath().path
     }
 
-    public func buildSelection() throws -> SimulatorAppBuildSelection {
-        try build.selection()
+    public func buildSelection(builder: SimulatorAppBuilder? = nil) throws -> SimulatorAppBuildSelection {
+        try build.selection(builder: builder)
+    }
+
+    /// The configured build, for the simulator it is about to be installed on —
+    /// what `run` and `test run` build. Same cache entry as `buildSelection()`.
+    public func buildSelection(for device: SimulatorDevice, builder: SimulatorAppBuilder? = nil) throws -> SimulatorAppBuildSelection {
+        try buildSelection(builder: builder).targeting(device)
     }
 
     /// Looks up a configured launch profile by name, throwing a clear error that
@@ -289,6 +330,8 @@ public enum ProjectConfigTemplate {
           # derivedDataPath: ./DerivedData  # optional; unset → SimTool-managed build cache
           # settings:                     # optional; xcodebuild build settings the project
           #   MACOSX_DEPLOYMENT_TARGET: "15.0"  # cannot build without, on every build of it
+          # builder: xcode-mcp            # optional; build in Xcode over its MCP tools
+          #                               #   (xcrun mcpbridge) instead of xcodebuild
 
         # deeplinks:                      # optional; open by name with `simtool open <name>`
         #   - name: Home
@@ -399,13 +442,22 @@ public enum ProjectConfigLoader {
         // The config lives at `<project>/.simtool/config.yml`; relative paths
         // resolve against the project root, not the .simtool directory.
         let projectRoot = sourceURL.deletingLastPathComponent().deletingLastPathComponent()
+        var builder = SimulatorAppBuilder.xcodebuild
+        if let rawBuilder = rawBuild.builder?.trimmed, !rawBuilder.isEmpty {
+            guard let parsed = SimulatorAppBuilder(rawValue: rawBuilder) else {
+                let allowed = SimulatorAppBuilder.allCases.map(\.rawValue).joined(separator: ", ")
+                throw SimToolError("Unknown `build.builder` '\(rawBuilder)' in \(fileName). Use one of: \(allowed).")
+            }
+            builder = parsed
+        }
         let build = ProjectConfig.Build(
             workspace: resolvePath(rawBuild.workspace, relativeTo: projectRoot),
             project: resolvePath(rawBuild.project, relativeTo: projectRoot),
             scheme: scheme,
             configuration: rawBuild.configuration?.trimmed,
             derivedDataPath: resolvePath(rawBuild.derivedDataPath, relativeTo: projectRoot),
-            settings: (rawBuild.settings ?? [:]).mapValues(\.text)
+            settings: (rawBuild.settings ?? [:]).mapValues(\.text),
+            builder: builder
         )
         // Reuse the shared build-selection validation (workspace XOR project).
         _ = try build.selection()
@@ -494,6 +546,7 @@ struct RawProjectConfig: Decodable {
         /// Build setting values are text: `15.0` must stay `15.0`, `YES` must
         /// not become a Bool.
         var settings: [String: YAMLScalarText]?
+        var builder: String?
     }
 
     struct RawServer: Decodable {

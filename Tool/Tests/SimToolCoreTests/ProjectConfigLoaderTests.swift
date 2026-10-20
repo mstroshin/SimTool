@@ -190,6 +190,174 @@ final class ProjectConfigLoaderTests: XCTestCase {
         XCTAssertEqual(config.build.settings(for: otherProject), [:])
     }
 
+    func testRunBuildsForTheConfiguredSimulatorOnly() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try writeConfig("""
+        simulator: 5A1C0DE0-0000-4000-8000-00000000BEEF
+        bundleId: com.example.MyApp
+        build:
+          workspace: App.xcworkspace
+          scheme: App
+          configuration: Debug
+          derivedDataPath: DerivedData
+          settings:
+            MACOSX_DEPLOYMENT_TARGET: 15.0
+        """, in: root)
+        let config = try ProjectConfigLoader.load(startDirectory: root)
+        let devices = [
+            SimulatorDevice(udid: "0THER-B00TED", name: "iPhone 16", runtime: "iOS-18", state: "Booted", isAvailable: true),
+            SimulatorDevice(udid: "5A1C0DE0-0000-4000-8000-00000000BEEF", name: "iPhone 17 Pro", runtime: "iOS-26", state: "Shutdown", isAvailable: true),
+        ]
+        // What `run` does: resolve the simulator first, then build for it.
+        let device = try SimulatorDeviceClient.selectDevice(nil, configured: config.simulator, from: devices)
+        let selection = try config.buildSelection(for: device)
+        let derivedData = root.appendingPathComponent("DerivedData").path
+
+        // One architecture, not every simulator's: the build is for this device.
+        XCTAssertEqual(SimulatorAppLifecycleClient.xcodebuildArguments(selection: selection, derivedDataPath: derivedData), [
+            "xcodebuild",
+            "-workspace", root.appendingPathComponent("App.xcworkspace").path,
+            "-scheme", "App",
+            "-configuration", "Debug",
+            "-destination", "platform=iOS Simulator,id=5A1C0DE0-0000-4000-8000-00000000BEEF",
+            "-derivedDataPath", derivedData,
+            "MACOSX_DEPLOYMENT_TARGET=15.0",
+            "build",
+        ])
+        // Locating the built product asks about the same destination.
+        let settingsArguments = SimulatorAppLifecycleClient.xcodebuildArguments(
+            selection: selection, derivedDataPath: derivedData, showBuildSettings: true
+        )
+        XCTAssertTrue(settingsArguments.contains("platform=iOS Simulator,id=5A1C0DE0-0000-4000-8000-00000000BEEF"), "\(settingsArguments)")
+        // The cache entry is the one a build without a device uses.
+        XCTAssertEqual(selection.identity, try config.buildSelection().identity)
+    }
+
+    func testRunOnTheBootedSimulatorBuildsForThatSimulator() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try writeConfig("""
+        simulator: booted
+        bundleId: com.example.MyApp
+        build:
+          project: App.xcodeproj
+          scheme: App
+        """, in: root)
+        let config = try ProjectConfigLoader.load(startDirectory: root)
+        let devices = [
+            SimulatorDevice(udid: "SHUT-DOWN", name: "iPhone 16", runtime: "iOS-18", state: "Shutdown", isAvailable: true),
+            SimulatorDevice(udid: "B00TED-UDID", name: "iPhone 17 Pro", runtime: "iOS-26", state: "Booted", isAvailable: true),
+        ]
+        // `booted` is a selector, not a destination: it resolves to a UDID first.
+        let device = try SimulatorDeviceClient.selectDevice(nil, configured: config.simulator, from: devices)
+        let arguments = SimulatorAppLifecycleClient.xcodebuildArguments(selection: try config.buildSelection(for: device), derivedDataPath: nil)
+
+        let destination = try XCTUnwrap(arguments.firstIndex(of: "-destination"))
+        XCTAssertEqual(arguments[destination + 1], "platform=iOS Simulator,id=B00TED-UDID")
+    }
+
+    func testXcodeBuilderLeavesTheXcodebuildOnlyKeysOut() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try writeConfig("""
+        simulator: booted
+        bundleId: com.example.MyApp
+        build:
+          workspace: App.xcworkspace
+          scheme: App
+          derivedDataPath: DerivedData
+          settings:
+            MACOSX_DEPLOYMENT_TARGET: 15.0
+          builder: xcode-mcp
+        """, in: root)
+        let config = try ProjectConfigLoader.load(startDirectory: root)
+        XCTAssertEqual(config.build.builder, .xcodeMCP)
+
+        // Xcode builds into its own DerivedData with the project's own
+        // settings, so neither reaches its build nor its cache entry.
+        let xcode = try config.buildSelection()
+        XCTAssertEqual(xcode.builder, .xcodeMCP)
+        XCTAssertEqual(xcode.identity.builder, .xcodeMCP)
+        XCTAssertNil(xcode.identity.derivedDataPath)
+        XCTAssertNil(xcode.identity.buildSettings)
+
+        // `--builder xcodebuild` builds the same config the way it always did.
+        let xcodebuild = try config.buildSelection(builder: .xcodebuild)
+        XCTAssertNil(xcodebuild.identity.builder)
+        XCTAssertEqual(xcodebuild.identity.derivedDataPath.map { URL(fileURLWithPath: $0).lastPathComponent }, "DerivedData")
+        XCTAssertEqual(xcodebuild.identity.buildSettings, ["MACOSX_DEPLOYMENT_TARGET=15.0"])
+
+        // Like `settings`, the builder applies to builds of the configured source only.
+        let sameWorkspace = try SimulatorAppBuildSelection.validated(
+            workspacePath: root.appendingPathComponent("App.xcworkspace").path, projectPath: nil, scheme: "OtherScheme"
+        )
+        let otherProject = try SimulatorAppBuildSelection.validated(
+            workspacePath: nil, projectPath: root.appendingPathComponent("App.xcodeproj").path, scheme: "App"
+        )
+        XCTAssertEqual(config.build.builder(for: sameWorkspace), .xcodeMCP)
+        XCTAssertNil(config.build.builder(for: otherProject))
+    }
+
+    func testFlagsOverrideTheConfiguredBuildKeyByKey() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try writeConfig("""
+        simulator: booted
+        bundleId: com.example.MyApp
+        build:
+          workspace: App.xcworkspace
+          scheme: App
+          configuration: Beta
+          derivedDataPath: DerivedData
+          settings:
+            MACOSX_DEPLOYMENT_TARGET: 15.0
+            SWIFT_VERSION: 6
+        """, in: root)
+        let build = try ProjectConfigLoader.load(startDirectory: root).build
+
+        // No flags: the configured build as it stands, the one `run` makes.
+        let configured = try build.selection()
+        XCTAssertEqual(configured.identity.workspacePath.map { URL(fileURLWithPath: $0).lastPathComponent }, "App.xcworkspace")
+        XCTAssertEqual(configured.identity.scheme, "App")
+        XCTAssertEqual(configured.identity.configuration, "Beta")
+        XCTAssertEqual(configured.identity.derivedDataPath.map { URL(fileURLWithPath: $0).lastPathComponent }, "DerivedData")
+        XCTAssertEqual(configured.identity.buildSettings, ["MACOSX_DEPLOYMENT_TARGET=15.0", "SWIFT_VERSION=6"])
+
+        // Each flag wins over its key; the workspace stays the configured one.
+        let flagged = try build.selection(
+            scheme: "AppDev",
+            configuration: "Debug",
+            derivedDataPath: "/tmp/OtherDerivedData",
+            settings: ["SWIFT_VERSION": "5", "OTHER_SWIFT_FLAGS": "-DPROBE"]
+        )
+        XCTAssertEqual(flagged.identity.workspacePath, configured.identity.workspacePath)
+        XCTAssertEqual(flagged.identity.scheme, "AppDev")
+        XCTAssertEqual(flagged.identity.configuration, "Debug")
+        XCTAssertEqual(flagged.identity.derivedDataPath, "/tmp/OtherDerivedData")
+        XCTAssertEqual(flagged.identity.buildSettings, ["MACOSX_DEPLOYMENT_TARGET=15.0", "OTHER_SWIFT_FLAGS=-DPROBE", "SWIFT_VERSION=5"])
+
+        // Xcode leaves the configured DerivedData and settings out, but an
+        // explicit one is still a mistake to report.
+        let xcode = try build.selection(builder: .xcodeMCP, scheme: "AppDev")
+        XCTAssertEqual(xcode.identity.scheme, "AppDev")
+        XCTAssertNil(xcode.identity.derivedDataPath)
+        XCTAssertNil(xcode.identity.buildSettings)
+        XCTAssertThrowsError(try build.selection(builder: .xcodeMCP, derivedDataPath: "/tmp/OtherDerivedData"))
+        XCTAssertThrowsError(try build.selection(builder: .xcodeMCP, settings: ["SWIFT_VERSION": "5"]))
+    }
+
+    func testUnknownBuilderThrows() throws {
+        try assertLoadThrows("""
+        simulator: booted
+        bundleId: com.example.MyApp
+        build:
+          workspace: App.xcworkspace
+          scheme: App
+          builder: xcode
+        """, contains: "Unknown `build.builder`")
+    }
+
     func testInvalidBuildSettingNameThrows() throws {
         try assertLoadThrows("""
         simulator: iPhone 16 Pro
