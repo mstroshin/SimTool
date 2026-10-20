@@ -63,7 +63,7 @@ Open `http://127.0.0.1:3200` after starting `serve` (the URL is printed on start
 or pass `--web` to open the browser viewer automatically.
 
 The viewer is one window: the device on the left, the inspector on the right
-(**Network**, **Logs**, **State**, **Accessibility**, **Tests**), with a splitter
+(**Network**, **Logs**, **State**, **Accessibility**, **Tests**, **Activity**), with a splitter
 between them that remembers where you leave it; in a narrow pane the inspector
 moves under the device instead of covering it. Under the device are its size in
 points, the frame rate and the pointer's position in points; the status bar at
@@ -71,10 +71,24 @@ the bottom holds the session's facts — connection, device and runtime, UDID
 (click to copy), server, attached app, where the keys go, the simtool version.
 ⇧⌘P opens a command palette with every action and test; the shortcuts follow
 Simulator.app and Xcode — ⇧⌘H Home, ⌘S screenshot, ⌃⌘Z shake, ⌥⌘0 show or hide
-the inspector — and ⌥1–5 switch inspector tabs, `/` filters the current list,
+the inspector — and ⌥1–6 switch inspector tabs, `/` filters the current list,
 ↑/↓ move through it and Shift-F10 opens a row's menu. When the server goes away
 the viewer greys the last frame, says so, stops sending touches and reconnects
 by itself; a restarted server is noticed and its lists are reloaded.
+
+What an agent or a test run does to the device shows as it happens. Every touch
+from `simtool input`, the HTTP API or a YAML step is drawn on the screen in
+course ink — a ring where the finger went down, a stroke to where it lifted, a
+caption naming it (`Tap “General”`, `Scroll up 300 pt`) — and launches, typing,
+mocks armed and test steps caption the top of the screen. The toolbar says who
+is driving: **Test running · step 3 of 7**, or **Agent driving** for half a
+minute after an agent's last action. The last action and how long ago it was
+stay under the device, and **Activity** (⌥6) lists every action with who did it,
+how long it took and whether it failed; a touch's row shows its path in points,
+draws it again on the screen and copies as the `simtool input` command that
+repeats it. A touch, key or button from the page while a test or an agent drives
+the device asks first — **Take over** lets the person act until the next run or
+agent starts — and a touch by hand during a run is itself in the feed.
 
 On the viewer's screen the mouse is a finger: it goes down on press, follows the
 pointer and lifts on release, so holding is a long press, holding and moving

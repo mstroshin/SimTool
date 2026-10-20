@@ -2,7 +2,7 @@
 // inspector, the filter field every tab shares, app launches, and the
 // split detail under each list.
 
-const TABS = ["network", "logs", "state", "ax", "tests"];
+const TABS = ["network", "logs", "state", "ax", "tests", "activity"];
 const inspector = { tab: stored("tab", "network"), open: stored("inspectorOpen", true), attachedApp: "", configKnown: false };
 const tabHandlers = {};   // tab → { show(), hide() }
 
@@ -174,7 +174,8 @@ const FILTER_HELP = {
   logs: '<p><b>Type</b> to filter messages; <b>subsystem:text</b> (or category, process, level, message) matches one field.</p><p><b>Enter</b> keeps it as an include chip; <b>-text Enter</b> excludes.</p><p><b>Select text</b> in a line and right-click to show or hide it.</p>',
   state: '<p><b>Type</b> to filter models by name and their keys and values.</p>',
   ax: '<p><b>Type</b> to filter by identifier, label, role; matches keep their ancestors visible.</p>',
-  tests: '<p><b>Type</b> to filter tests and runs by name, file, reference, verdict.</p>'
+  tests: '<p><b>Type</b> to filter tests and runs by name, file, reference, verdict.</p>',
+  activity: '<p><b>Type</b> to filter actions by what they did — tap, scroll, launch, mock — and who did it.</p><p><b>Enter</b> on an action draws it on the screen again.</p>'
 };
 
 function createFilter(tab, { placeholder, fields, onChange }) {

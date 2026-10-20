@@ -5,6 +5,7 @@
 enum WebViewerAssets {
     /// `web/<path>` → that file's contents, without its final newline.
     static let files: [String: String] = [
+        "js/activity.js": jsActivityJs,
         "js/ax.js": jsAxJs,
         "js/core.js": jsCoreJs,
         "js/device.js": jsDeviceJs,
@@ -23,6 +24,348 @@ enum WebViewerAssets {
         "viewer.css": viewerCss,
         "viewer.html": viewerHtml,
     ]
+
+    static let jsActivityJs = #"""
+        // Activity: what agents, test runs and viewers did to the device — taps,
+        // scrolls, typing, launches, mocks armed, test steps. The server keeps the
+        // record; this page marks each touch on the screen in course ink as it
+        // happens, says in the toolbar who is driving, keeps the last action under the
+        // device, lists everything in the Activity tab, and asks before a person's own
+        // input lands in the middle of someone else's run.
+
+        const ACTIVITY_MAX = 500;
+        const MARK_FRESH_MS = 6000;   // older entries are history, not something to draw
+        const MARK_HOLD_MS = 1600;    // how long a mark stays before it fades
+        const activity = {
+          entries: [],                 // oldest first
+          revision: null,
+          run: null,                   // the test run the server says drives the device
+          drawn: new Set(),            // ids already marked on the screen
+          cleared: 0,                  // ids below this are cleared from the list
+          who: stored("activity.who", "all"),   // all | agent | test | viewer
+          follow: true,
+          selected: null,
+          takenOver: null,             // the driving stretch a person chose to take the device from
+          declinedAt: 0                // when a person last chose not to take over
+        };
+
+        const activityFilter = createFilter("activity", { placeholder: "Filter actions — tap, scroll, launch, mock…", onChange: () => renderActivity() });
+        const activityWho = segmented("Who", [["all", "All"], ["agent", "Agent"], ["test", "Test"], ["viewer", "Viewer"]], () => activity.who, (who) => { activity.who = who; store("activity.who", who); renderActivity(); });
+        const activityFollow = el("button", { class: "toggle toggle-sm", type: "button", "aria-pressed": "true", "data-tip": "Keep the newest action in view", html: icon("follow") + '<span class="toggle-label">Follow</span>' });
+        const activityClear = el("button", { class: "tb-btn", type: "button", "aria-label": "Clear the list", "data-tip": "Clear the list", html: icon("trash") });
+        const activityView = buildListPanel("activity", {
+          listLabel: "Actions on the device",
+          toolbar: [activityFilter.field, activityWho, el("span", { class: "ptool-spacer" }), activityFilter.help, activityFollow, activityClear]
+        });
+
+        const activityList = createList(activityView.list, {
+          header: el("div", { class: "thead act-grid", role: "row", html: '<span class="cell" role="columnheader">Time</span><span class="cell" role="columnheader">Who</span><span class="cell" role="columnheader">Action</span><span class="cell num" role="columnheader">Result</span>' }),
+          key: (entry) => String(entry.id),
+          version: (entry) => entry.revision + "|" + (activityFilter.text || ""),
+          rowClass: (entry) => "act-grid" + (entry.status === "failed" ? " act-failed" : "") + (entry.actor === "viewer" ? " act-viewer" : ""),
+          render: renderActivityRow,
+          empty: () => activityEmpty(),
+          onSelect: (key, entry) => { activity.selected = entry; renderActivityDetail(); },
+          exists: (key) => activity.entries.some((entry) => String(entry.id) === key && entry.id >= activity.cleared),
+          onActivate: (key, entry) => { if (entry && entry.gesture) markActivity(entry, { replay: true }); },
+          onMenu: (key, entry, x, y, row) => openMenu(x, y, activityMenu(entry), row),
+          follow: () => activity.follow
+        });
+
+        function actorTag(entry) {
+          return '<span class="who who-' + escapeHTML(entry.actor) + '">' + escapeHTML(ACTOR_NAMES[entry.actor] || entry.actor) + "</span>";
+        }
+
+        function activityResult(entry) {
+          if (entry.status === "running") return '<span class="verdict v-running"><span class="spinner" aria-hidden="true"></span>Running</span>';
+          if (entry.status === "failed") return '<span class="st st-err" title="' + escapeHTML(entry.error || "Failed") + '">' + icon("warn") + "Failed</span>";
+          const ms = entry.endedAt ? Date.parse(entry.endedAt) - Date.parse(entry.at) : NaN;
+          return '<span class="muted">' + escapeHTML(isFinite(ms) && ms > 0 ? formatDuration(ms) : "—") + "</span>";
+        }
+
+        function renderActivityRow(entry, row) {
+          row.innerHTML =
+            '<span class="cell time" title="' + escapeHTML(entry.at) + '">' + escapeHTML(formatClock(entry.at, true)) + "</span>" +
+            '<span class="cell">' + actorTag(entry) + "</span>" +
+            '<span class="cell name" translate="no"><b>' + markMatches(entry.title, activityFilter.text) + "</b>" +
+              (entry.detail ? "<span>" + escapeHTML(entry.detail) + "</span>" : "") + "</span>" +
+            '<span class="cell num">' + activityResult(entry) + "</span>";
+          row.title = entry.title + (entry.error ? " — " + entry.error : "");
+        }
+
+        function activityEmpty() {
+          const shown = activity.entries.filter((entry) => entry.id >= activity.cleared);
+          if (activity.entries.length && !shown.length) return el("div", { class: "empty", html: "<b>Cleared</b>New actions appear here as they happen." });
+          if (shown.length) {
+            const node = el("div", { class: "empty", html: "<b>No action matches</b>The filter above hides all " + formatCount(shown.length) + ". " });
+            node.append(el("button", { class: "btn btn-sm", type: "button", text: "Show all actions", onclick: () => { activity.who = "all"; store("activity.who", "all"); activityWho.sync(); activityFilter.clear(); } }));
+            return node;
+          }
+          return el("div", { class: "empty", html: "<b>Nothing has acted on the device yet</b>Taps, scrolls, typing and launches from <code>simtool input</code>, the HTTP API and test runs appear here as they happen — and on the screen, in course ink, where the finger went." });
+        }
+
+        function activityVisible() {
+          const query = activityFilter.text, chips = activityFilter.chips;
+          return activity.entries.filter((entry) => {
+            if (entry.id < activity.cleared) return false;
+            if (activity.who !== "all" && entry.actor !== activity.who) return false;
+            if (!query && !chips.length) return true;
+            const hay = [entry.title, entry.detail, entry.kind, ACTOR_NAMES[entry.actor], entry.via, entry.error].filter(Boolean).join(" ").toLowerCase();
+            return matchesFilters(hay, chips, query);
+          });
+        }
+
+        let activityLastFilter = "";
+        function renderActivity() {
+          const filterKey = activity.who + "|" + activityFilter.text + "|" + JSON.stringify(activityFilter.chips);
+          if (filterKey !== activityLastFilter) { activityLastFilter = filterKey; activityList.invalidate(); }
+          const rows = activityVisible();
+          activityList.update(rows);
+          const total = activity.entries.filter((entry) => entry.id >= activity.cleared).length;
+          const failed = activity.entries.filter((entry) => entry.id >= activity.cleared && entry.status === "failed").length;
+          setCount("activity", total, failed);
+          activityView.guide.innerHTML = guideHTML([
+            rows.length ? "<b>" + escapeHTML(formatClock(rows[0].at, true)) + " → " + escapeHTML(formatClock(rows[rows.length - 1].at, true)) + "</b>" : "",
+            formatCount(rows.length) + " of " + plural(total, "action", "actions"),
+            failed ? '<span class="st-err">' + plural(failed, "failed", "failed") + "</span>" : ""
+          ], liveTag(activity.follow ? "following" : "recording"));
+          if (activity.selected) {
+            const fresh = activity.entries.find((entry) => entry.id === activity.selected.id);
+            if (fresh && fresh !== activity.selected) { activity.selected = fresh; renderActivityDetail(); }
+          }
+        }
+
+        function activityMenu(entry) {
+          const command = activityCommand(entry);
+          return [
+            { icon: "pick", label: "Show on the screen", disabled: !entry.gesture || app.dataset.mode === "replay", run: () => markActivity(entry, { replay: true }) },
+            { icon: "terminal", label: "Copy as command", disabled: !command, run: () => copyText(command, "Command copied") },
+            { icon: "copy", label: "Copy the action", run: () => copyText(entry.title + (entry.detail ? " — " + entry.detail : ""), "Copied") },
+            "-",
+            { icon: "filter", label: "Show only " + (ACTOR_NAMES[entry.actor] || entry.actor), run: () => { activity.who = entry.actor; store("activity.who", entry.actor); activityWho.sync(); renderActivity(); } }
+          ];
+        }
+
+        function renderActivityDetail() {
+          const entry = activity.selected;
+          showDetail(activityView.panel, !!entry);
+          if (!entry) return;
+          const command = activityCommand(entry);
+          const ms = entry.endedAt ? Date.parse(entry.endedAt) - Date.parse(entry.at) : NaN;
+          const gesture = entry.gesture;
+          const point = (p) => Math.round(p.x) + ", " + Math.round(p.y) + " pt";
+          let body = "";
+          if (entry.status === "failed") body += '<div class="callout err">' + icon("warn") + "<div><b>Failed</b>" + (entry.error ? "<br>" + escapeHTML(entry.error) : "") + "</div></div>";
+          // The head names who and how; a touch's own section says where.
+          body += kvHTML({
+            Action: entry.kind,
+            Started: formatClock(entry.at, true),
+            Finished: entry.endedAt ? formatClock(entry.endedAt, true) : "still running",
+            Took: isFinite(ms) ? formatDuration(ms) : "",
+            Detail: gesture ? "" : entry.detail
+          });
+          if (gesture) {
+            body += '<div class="sec">Finger</div>' + kvHTML({
+              Down: point(gesture.from),
+              Up: Math.hypot(gesture.to.x - gesture.from.x, gesture.to.y - gesture.from.y) >= 1 ? point(gesture.to) : "where it went down",
+              Rested: gesture.press ? formatDuration(gesture.press * 1000) : "",
+              "Down for": formatDuration(gesture.duration * 1000),
+              Screen: gesture.screen ? Math.round(gesture.screen.width) + " × " + Math.round(gesture.screen.height) + " pt" : ""
+            });
+          }
+          if (command) body += '<div class="sec">Repeat it</div><div class="snippet"><pre class="code" translate="no">' + escapeHTML(command) + '</pre><button class="tb-btn" type="button" data-act="copy-command" aria-label="Copy the command" data-tip="Copy the command">' + icon("copy", "ic-sm") + "</button></div>";
+          patchPane(activityView.detail, String(entry.id) + "|" + entry.revision,
+            '<div class="dhead">' + actorTag(entry) + '<span class="dtitle ui" translate="no">' + escapeHTML(entry.title) + "</span>" +
+              '<div class="dactions">' + (gesture ? '<button class="btn btn-sm btn-course" type="button" data-act="show">' + icon("pick", "ic-sm") + "Show on the screen</button>" : "") +
+              '<button class="tb-btn" type="button" data-act="close" aria-label="Close the details">' + icon("close") + "</button></div></div>" +
+            '<div class="dmeta"><span>' + escapeHTML(formatClock(entry.at, true)) + "</span>" + (entry.via ? "<span>via " + escapeHTML(entry.via) + "</span>" : "") + "<span>" + activityResult(entry) + "</span></div>" +
+            '<div class="dbody">' + body + "</div>");
+        }
+
+        activityView.detail.addEventListener("click", (event) => {
+          const action = event.target.closest("[data-act]");
+          if (!action || !activity.selected) return;
+          if (action.dataset.act === "show") markActivity(activity.selected, { replay: true });
+          if (action.dataset.act === "copy-command") copyText(activityCommand(activity.selected), "Command copied");
+          if (action.dataset.act === "close") { activityList.select(null); activityList.focus(); }
+        });
+
+        function setActivityFollow(on) {
+          if (activity.follow === on) return;
+          activity.follow = on;
+          activityFollow.setAttribute("aria-pressed", String(on));
+          renderActivity();
+        }
+        activityFollow.addEventListener("click", () => { setActivityFollow(!activity.follow); if (activity.follow) activityList.scrollToEnd(); });
+        activityView.list.addEventListener("scroll", () => {
+          const atBottom = activityList.atBottom();
+          if (atBottom !== activity.follow && activityView.list.scrollHeight > activityView.list.clientHeight) setActivityFollow(atBottom);
+        }, { passive: true });
+        activityClear.addEventListener("click", () => {
+          const previous = activity.cleared;
+          const last = activity.entries[activity.entries.length - 1];
+          activity.cleared = last ? last.id + 1 : 0;
+          activityList.select(null);
+          renderActivity();
+          toast("Activity list cleared", { icon: "trash", duration: 5000, action: { label: "Undo", run: () => { activity.cleared = previous; renderActivity(); } } });
+        });
+
+        // ---- Marks on the screen: where the finger went, in course ink ----
+
+        const activityLayer = $("activityLayer");
+        let activityCaption = null;
+
+        // A touch draws its path and a caption beside it; anything else captions the
+        // top of the screen. A mark comes and goes by timers, so it reads the same
+        // with reduced motion — only the drawing-in is animated.
+        function markActivity(entry, { replay } = {}) {
+          if (app.dataset.mode === "replay") return;
+          const ratios = entry.gesture ? gestureRatios(entry.gesture, screenState.points) : null;
+          const rect = activityLayer.getBoundingClientRect();
+          if (ratios && rect.width) {
+            const mark = el("div", { class: "act-mark" + (entry.status === "failed" ? " failed" : "") });
+            const x1 = ratios.from.x * rect.width, y1 = ratios.from.y * rect.height, x2 = ratios.to.x * rect.width, y2 = ratios.to.y * rect.height;
+            const travel = Math.max(0.3, Math.min(2, entry.gesture.duration - entry.gesture.press)) + "s";
+            if (ratios.moved) {
+              const length = Math.hypot(x2 - x1, y2 - y1);
+              const angle = Math.atan2(y2 - y1, x2 - x1) * 180 / Math.PI;
+              mark.innerHTML = '<svg class="act-path" width="' + rect.width + '" height="' + rect.height + '" viewBox="0 0 ' + rect.width + " " + rect.height + '">' +
+                '<line x1="' + x1 + '" y1="' + y1 + '" x2="' + x2 + '" y2="' + y2 + '" style="stroke-dasharray:' + length + ";stroke-dashoffset:" + length + ";--travel:" + travel + '"/>' +
+                '<path d="M -9 -6 L 0 0 L -9 6" transform="translate(' + x2 + " " + y2 + ") rotate(" + angle + ')" style="--travel:' + travel + '"/></svg>';
+            }
+            mark.append(el("span", { class: "act-ring" + (entry.kind === "long-press" || entry.gesture.press >= 0.5 ? " held" : ""), style: "left:" + x1 + "px;top:" + y1 + "px" }));
+            const caption = el("span", { class: "act-label", text: (replay ? "" : (ACTOR_NAMES[entry.actor] || "") + " · ") + entry.title });
+            // Above the finger unless that would leave the screen; kept inside its sides.
+            caption.style.top = (y1 > 48 ? y1 - 40 : y1 + 26) + "px";
+            caption.style.left = Math.min(Math.max(8, x1 - 60), Math.max(8, rect.width - 168)) + "px";
+            mark.append(caption);
+            activityLayer.append(mark);
+            retire(mark, Math.max(MARK_HOLD_MS, entry.gesture.duration * 1000 + 900));
+            return;
+          }
+          if (activityCaption) activityCaption.remove();
+          const caption = el("div", { class: "act-caption" + (entry.status === "failed" ? " failed" : "") }, el("span", { class: "who who-" + entry.actor, text: ACTOR_NAMES[entry.actor] || entry.actor }), el("span", { text: entry.title }));
+          activityLayer.append(caption);
+          activityCaption = caption;
+          retire(caption, MARK_HOLD_MS + 800, () => { if (activityCaption === caption) activityCaption = null; });
+        }
+
+        function retire(node, after, done) {
+          setTimeout(() => {
+            node.classList.add("fading");
+            setTimeout(() => { node.remove(); if (done) done(); }, 400);
+          }, after);
+        }
+
+        // Marks only what is happening now: an entry seen first in history is a row, not a mark.
+        function markFresh(entry) {
+          if (entry.actor === "viewer" || activity.drawn.has(entry.id)) return;
+          if (Date.now() - Date.parse(entry.at) > MARK_FRESH_MS) { activity.drawn.add(entry.id); return; }
+          // A touch waits for its path; the server learns it a moment after the entry opens.
+          if (["tap", "long-press", "swipe", "drag", "scroll", "fling"].includes(entry.kind) && !entry.gesture && entry.status === "running") return;
+          activity.drawn.add(entry.id);
+          markActivity(entry);
+        }
+
+        // ---- Who drives the device, and the last thing done to it ----
+
+        function currentDriver() {
+          return deviceDriver(activity.entries, activity.run, Date.now());
+        }
+
+        function renderDriver() {
+          const driver = currentDriver();
+          const chip = $("driverChip");
+          app.classList.toggle("driven", !!driver);
+          chip.hidden = !driver;
+          if (driver) {
+            const long = driver.actor === "test"
+              ? "Test running" + (driver.step ? " · step " + driver.step.index + " of " + driver.step.total : "")
+              : "Agent driving";
+            const short = driver.actor === "test" ? (driver.step ? driver.step.index + "/" + driver.step.total : "Test") : "Agent";
+            $("driverLabel").textContent = long;
+            $("driverShort").textContent = short;
+            chip.dataset.tip = driver.actor === "test" ? "“" + driver.title + "” is driving the device" : "Last: " + driver.title + " · " + formatSince(Date.now() - driver.lastAt);
+            chip.setAttribute("aria-label", long + (driver.actor === "test" ? ": " + driver.title : "") + " — show the activity");
+          }
+          const last = [...activity.entries].reverse().find((entry) => entry.actor !== "viewer");
+          const age = last ? Date.now() - Date.parse(last.endedAt || last.at) : Infinity;
+          const cell = $("readLast");
+          cell.hidden = !last || age > 10 * 60 * 1000;
+          if (!cell.hidden) {
+            cell.classList.toggle("recent", last.status === "running" || age < 5000);
+            cell.innerHTML = '<span class="who who-' + escapeHTML(last.actor) + '">' + escapeHTML(ACTOR_NAMES[last.actor] || last.actor) + "</span>" +
+              '<span class="read-title" translate="no">' + escapeHTML(last.title) + "</span>" +
+              "<span>" + escapeHTML(last.status === "running" ? "running" : last.status === "failed" ? "failed · " + formatSince(age) : formatSince(age)) + "</span>";
+          }
+        }
+        setInterval(renderDriver, 1000);
+        $("driverChip").addEventListener("click", () => openTab("activity"));
+        $("readLast").addEventListener("click", () => openTab("activity"));
+
+        // ---- Before a person's input lands in someone else's run ----
+
+        // True when the person may act now. Otherwise asks once per driving stretch
+        // whether to take over, and runs `proceed` (the action that was stopped) on yes.
+        // A no holds for a moment: a trackpad's momentum and a held key keep sending
+        // input after the answer, and none of it should ask again.
+        const DECLINE_QUIET_MS = 1500;
+        function manualInputAllowed(proceed) {
+          const driver = currentDriver();
+          if (!driver || activity.takenOver === driver.key) return true;
+          if (!$("dialogScrim").hidden || Date.now() - activity.declinedAt < DECLINE_QUIET_MS) return false;
+          const text = driver.actor === "test"
+            ? "“" + driver.title + "” is running" + (driver.step ? " at step " + driver.step.index + " of " + driver.step.total : "") + ". A touch, a key or a button now lands in the middle of its steps and can break the run — and the recording shows it."
+            : "An agent acted on it " + formatSince(Date.now() - driver.lastAt) + " (" + driver.title + "). Input from here can change the screen under its next step.";
+          confirmDestructive(driver.actor === "test" ? "A test is driving this device" : "An agent is driving this device", text, "Take over").then((yes) => {
+            if (!yes) { activity.declinedAt = Date.now(); return; }
+            activity.takenOver = driver.key;
+            toast("You have the device until the next run or agent starts", { icon: "check" });
+            if (proceed) proceed();
+          });
+          return false;
+        }
+
+        // ---- Polling ----
+
+        function mergeActivity(entries) {
+          if (!entries.length) return;
+          const index = new Map(activity.entries.map((entry, position) => [entry.id, position]));
+          for (const entry of entries) {
+            const at = index.get(entry.id);
+            if (at == null) { index.set(entry.id, activity.entries.length); activity.entries.push(entry); }
+            else activity.entries[at] = entry;
+          }
+          activity.entries.sort((a, b) => a.id - b.id);
+          if (activity.entries.length > ACTIVITY_MAX) activity.entries.splice(0, activity.entries.length - ACTIVITY_MAX);
+        }
+
+        async function pollActivity() {
+          const since = activity.revision == null ? "" : "?since=" + activity.revision;
+          const payload = await apiJSON("/api/v1/activity" + since);
+          const entries = payload.entries || [];
+          const first = activity.revision == null;
+          activity.revision = payload.revision;
+          activity.run = payload.run || null;
+          mergeActivity(entries);
+          // The first answer is history: marks are for what happens while the page watches.
+          for (const entry of entries) { if (first) activity.drawn.add(entry.id); else markFresh(entry); }
+          renderDriver();
+          if (entries.length || first) renderActivity();
+        }
+
+        tabHandlers.activity = { show() { renderActivity(); poller.poke("activity"); } };
+
+        function resetActivity() {
+          activity.entries = [];
+          activity.revision = null;
+          activity.run = null;
+          activity.cleared = 0;
+          activityList.select(null);
+          renderActivity();
+          renderDriver();
+        }
+        """#
 
     static let jsAxJs = #"""
         // Accessibility: the served AX tree, picking on the screen, and redlines —
@@ -487,8 +830,9 @@ enum WebViewerAssets {
           return (await api(path, options)).json();
         }
 
+        // The header tells the server's activity feed this came from a person at a viewer.
         function postInput(payload) {
-          return api("/api/v1/input", { method: "POST", body: JSON.stringify(payload) });
+          return api("/api/v1/input", { method: "POST", body: JSON.stringify(payload), headers: { "X-SimTool-Source": "viewer" } });
         }
 
         // ---- Status message, toasts, announcements ----
@@ -808,6 +1152,7 @@ enum WebViewerAssets {
         // ---- Toolbar actions: each one confirms what it did ----
 
         async function deviceAction(label, payload, done) {
+          if (!manualInputAllowed(() => deviceAction(label, payload, done))) return;
           try {
             await postInput(payload);
             toast(done || label);
@@ -873,6 +1218,7 @@ enum WebViewerAssets {
         let pasteInFlight = false;
         async function runPaste(label, send, failureHint) {
           if (pasteInFlight) return;
+          if (!manualInputAllowed(() => runPaste(label, send, failureHint))) return;
           pasteInFlight = true;
           setMessage(label);
           try {
@@ -891,7 +1237,7 @@ enum WebViewerAssets {
         }
 
         async function postFile(path, blob) {
-          const headers = { "Content-Type": blob.type || "application/octet-stream" };
+          const headers = { "Content-Type": blob.type || "application/octet-stream", "X-SimTool-Source": "viewer" };
           if (blob.name) headers["X-SimTool-Filename"] = encodeURIComponent(blob.name);
           return (await api(path, { method: "POST", headers, body: blob })).json();
         }
@@ -1079,6 +1425,8 @@ enum WebViewerAssets {
             return;
           }
           if (!canTouch()) return;
+          // A run or an agent is driving: the first touch asks instead of landing.
+          if (!manualInputAllowed()) { event.preventDefault(); return; }
           try { canvas.setPointerCapture(event.pointerId); } catch (_) {}
           event.preventDefault();
           endWheelDrag();
@@ -1160,7 +1508,7 @@ enum WebViewerAssets {
         canvas.addEventListener("wheel", (event) => {
           if (!screenState.width) return;
           event.preventDefault();
-          if (event.ctrlKey || touch || axPickActive() || !canTouch()) return;
+          if (event.ctrlKey || touch || axPickActive() || !canTouch() || (!wheel && !manualInputAllowed())) return;
           const rect = canvas.getBoundingClientRect();
           const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? rect.height : 1;
           const dx = -event.deltaX * unit / rect.width;
@@ -1271,6 +1619,7 @@ enum WebViewerAssets {
             if (!event.repeat) toggleSoftwareKeyboard();
             return;
           }
+          if (!manualInputAllowed()) { keepFromPage(event); return; }
           if (keyboardBridge.keydown(event)) keepFromPage(event);
         }, true);
         window.addEventListener("keyup", (event) => {
@@ -1314,7 +1663,7 @@ enum WebViewerAssets {
         // inspector, the filter field every tab shares, app launches, and the
         // split detail under each list.
 
-        const TABS = ["network", "logs", "state", "ax", "tests"];
+        const TABS = ["network", "logs", "state", "ax", "tests", "activity"];
         const inspector = { tab: stored("tab", "network"), open: stored("inspectorOpen", true), attachedApp: "", configKnown: false };
         const tabHandlers = {};   // tab → { show(), hide() }
 
@@ -1486,7 +1835,8 @@ enum WebViewerAssets {
           logs: '<p><b>Type</b> to filter messages; <b>subsystem:text</b> (or category, process, level, message) matches one field.</p><p><b>Enter</b> keeps it as an include chip; <b>-text Enter</b> excludes.</p><p><b>Select text</b> in a line and right-click to show or hide it.</p>',
           state: '<p><b>Type</b> to filter models by name and their keys and values.</p>',
           ax: '<p><b>Type</b> to filter by identifier, label, role; matches keep their ancestors visible.</p>',
-          tests: '<p><b>Type</b> to filter tests and runs by name, file, reference, verdict.</p>'
+          tests: '<p><b>Type</b> to filter tests and runs by name, file, reference, verdict.</p>',
+          activity: '<p><b>Type</b> to filter actions by what they did — tap, scroll, launch, mock — and who did it.</p><p><b>Enter</b> on an action draws it on the screen again.</p>'
         };
 
         function createFilter(tab, { placeholder, fields, onChange }) {
@@ -2440,6 +2790,79 @@ enum WebViewerAssets {
           }
           return best;
         }
+
+        // ---- Activity: what agents, test runs and viewers did to the device ----
+
+        // "3 s ago" — the feed's age, finer than formatAgo's "just now".
+        function formatSince(milliseconds) {
+          if (!isFinite(milliseconds)) return "";
+          const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+          if (seconds < 1) return "now";
+          if (seconds < 60) return seconds + " s ago";
+          const minutes = Math.floor(seconds / 60);
+          return minutes < 60 ? minutes + " min ago" : Math.floor(minutes / 60) + " h ago";
+        }
+
+        const ACTOR_NAMES = { agent: "Agent", test: "Test", viewer: "Viewer" };
+
+        // How long an agent counts as driving after its last action: long enough to
+        // cover it reading the screen between two taps.
+        const AGENT_DRIVING_MS = 30000;
+
+        // Who drives the device now: the test run the server reports, or an agent that
+        // acted within AGENT_DRIVING_MS, or nobody (null). `key` names one stretch of
+        // driving, so a person who took over is asked again only when a new one starts.
+        function deviceDriver(entries, run, now) {
+          if (run && run.active) {
+            let step = run.totalSteps ? { index: Math.min(run.completedSteps + 1, run.totalSteps), total: run.totalSteps } : null;
+            for (let i = entries.length - 1; i >= 0 && !step; i--) {
+              const parsed = entries[i].kind === "step" ? parseStepText(entries[i].title) : null;
+              if (parsed && parsed.index) step = { index: Math.min(parsed.index + 1, parsed.total), total: parsed.total };
+            }
+            return { actor: "test", key: "test:" + (run.sessionId || run.file || run.name || ""), title: run.name || run.file || "a test", step };
+          }
+          let newest = null, first = null;
+          for (let i = entries.length - 1; i >= 0; i--) {
+            const entry = entries[i];
+            if (entry.actor !== "agent") continue;
+            const end = Date.parse(entry.endedAt || entry.at);
+            if (!newest) {
+              if (entry.status !== "running" && !(now - end < AGENT_DRIVING_MS)) return null;
+              newest = entry;
+            } else if (Date.parse(first.at) - end >= AGENT_DRIVING_MS) {
+              break;
+            }
+            first = entry;
+          }
+          return newest ? { actor: "agent", key: "agent:" + first.id, title: newest.title, lastAt: Date.parse(newest.endedAt || newest.at), entry: newest } : null;
+        }
+
+        // A gesture's ends as fractions of the screen, from the points it was played
+        // in; the server's screen size wins, the page's own (AX) size is the fallback.
+        function gestureRatios(gesture, screenPoints) {
+          const screen = gesture && (gesture.screen || screenPoints);
+          if (!screen || !screen.width || !screen.height) return null;
+          const ratio = (point) => ({ x: Math.min(1, Math.max(0, point.x / screen.width)), y: Math.min(1, Math.max(0, point.y / screen.height)) });
+          const from = ratio(gesture.from), to = ratio(gesture.to);
+          const moved = Math.hypot(gesture.to.x - gesture.from.x, gesture.to.y - gesture.from.y) >= 1;
+          return { from, to, moved };
+        }
+
+        // The CLI command that does what an entry did, for touches with a known path.
+        function activityCommand(entry) {
+          const gesture = entry && entry.gesture;
+          if (!gesture) return "";
+          const round = (value) => Math.round(value);
+          const at = "--x " + round(gesture.from.x) + " --y " + round(gesture.from.y);
+          const path = "--start-x " + round(gesture.from.x) + " --start-y " + round(gesture.from.y) + " --end-x " + round(gesture.to.x) + " --end-y " + round(gesture.to.y);
+          switch (entry.kind) {
+            case "tap": return "simtool input tap " + at;
+            case "long-press": return "simtool input long-press " + at + " --duration " + Math.round(gesture.press * 100) / 100;
+            case "drag": return "simtool input drag " + path;
+            case "swipe": case "scroll": case "fling": return "simtool input swipe " + path + (entry.kind === "fling" ? " --hold 0" : "");
+            default: return "";
+          }
+        }
         """#
 
     static let jsLogsJs = #"""
@@ -2755,6 +3178,7 @@ enum WebViewerAssets {
             resetNetwork();
             resetLogs();
             resetState();
+            resetActivity();
             ax.tree = null;
             networkLastPayload = "";
             testsLastSessions = "";
@@ -2791,10 +3215,12 @@ enum WebViewerAssets {
         poller.add("state", () => (activeTab("state") ? 1000 : BACKGROUND_MS), pollState);
         poller.add("ax", 2000, loadAx, () => activeTab("ax") && app.dataset.mode !== "replay");
         poller.add("tests", () => (activeTab("tests") ? ACTIVE_MS : BACKGROUND_MS), loadTests);
+        // Every tab needs it: the marks on the screen and who drives the device.
+        poller.add("activity", 500, pollActivity);
 
         onReconnect(async () => {
           try { await bootstrap(); } catch (_) {}
-          for (const name of ["network", "logs", "state", "tests"]) poller.poke(name);
+          for (const name of ["network", "logs", "state", "tests", "activity"]) poller.poke(name);
         });
 
         onConnection((state) => {
@@ -3179,7 +3605,7 @@ enum WebViewerAssets {
 
     static let jsPaletteJs = #"""
         // The command palette (⇧⌘P) and the page's keyboard shortcuts. Shortcuts
-        // follow Simulator.app and Xcode where they exist; tabs use ⌥1–5 because
+        // follow Simulator.app and Xcode where they exist; tabs use ⌥1–6 because
         // browsers keep ⌘1–9 for themselves.
 
         function paletteCommands() {
@@ -3203,6 +3629,7 @@ enum WebViewerAssets {
             ["Inspector", "panel", "State", "⌥3", () => openTab("state")],
             ["Inspector", "pick", "Accessibility", "⌥4", () => openTab("ax")],
             ["Inspector", "panel", "Tests", "⌥5", () => openTab("tests")],
+            ["Inspector", "pick", "Activity — what was done to the device", "⌥6", () => openTab("activity")],
             ["Inspector", "search", "Filter the current list", "/", focusFilter],
             ["Network", network.paused ? "play" : "pause", network.paused ? "Resume the request list" : "Pause the request list", "", () => { openTab("network"); networkPause.click(); }],
             ["Network", "trash", "Clear the request list", "", () => { openTab("network"); networkClear.click(); }],
@@ -3230,14 +3657,14 @@ enum WebViewerAssets {
         }
 
         function focusTabList(tab) {
-          const lists = { network: networkList, logs: logsList, ax: axList, tests: tests.view === "history" ? historyList : definitionList };
+          const lists = { network: networkList, logs: logsList, ax: axList, tests: tests.view === "history" ? historyList : definitionList, activity: activityList };
           if (lists[tab]) lists[tab].focus();
           else if (tab === "state") (stateModels.querySelector('[tabindex="0"]') || stateModels).focus();
         }
 
         function focusFilter() {
           if (!inspector.open) setInspectorOpen(true);
-          const filters = { network: networkFilter, logs: logsFilter, state: stateFilter, ax: axFilter, tests: testsFilter };
+          const filters = { network: networkFilter, logs: logsFilter, state: stateFilter, ax: axFilter, tests: testsFilter, activity: activityFilter };
           filters[inspector.tab].focus();
         }
 
@@ -3347,7 +3774,7 @@ enum WebViewerAssets {
           if (event.metaKey && !event.shiftKey && !event.altKey && !event.ctrlKey && event.code === "KeyS") { event.preventDefault(); saveScreenshot(); return; }
           if (event.metaKey && event.ctrlKey && event.code === "KeyZ") { event.preventDefault(); pressShake(); return; }
           if (event.metaKey && event.altKey && event.code === "Digit0") { event.preventDefault(); setInspectorOpen(!inspector.open); return; }
-          if (event.altKey && !meta && /^Digit[1-5]$/.test(event.code)) { event.preventDefault(); openTab(TABS[Number(event.code.slice(5)) - 1]); return; }
+          if (event.altKey && !meta && /^Digit[1-6]$/.test(event.code)) { event.preventDefault(); openTab(TABS[Number(event.code.slice(5)) - 1]); return; }
           if (meta && event.key === "Enter" && inspector.tab === "tests" && tests.view === "tests" && tests.selectedFile) { event.preventDefault(); runTest(tests.selectedFile); return; }
           if (editing || keyboardBridge.enabled) return;
           if (meta && event.code === "KeyF" && inspector.open) { event.preventDefault(); focusFilter(); return; }
@@ -4487,10 +4914,20 @@ enum WebViewerAssets {
         .cmdk:hover { border-color: var(--line-thick); color: var(--ink1); }
         .cmdk kbd { margin-left: auto; }
 
+        /* Who drives the device right now — a test run or an agent — in course ink. */
+        .driver-status { display: contents; }
+        .driver {
+          display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; white-space: nowrap; font-weight: 500;
+          border: 1px solid var(--course-line); border-radius: var(--r-2); background: var(--course-bg); color: var(--course); cursor: pointer;
+        }
+        .driver:hover { border-color: var(--course); }
+        .driver-dot { width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--course); }
+        .driver-short { display: none; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
         /* The toolbar sheds words before it sheds actions: every button keeps its icon, label and
            shortcut tip. These come after the base rules so that they win over them. */
         @container bar (max-width: 1060px) { .cmdk-label, .cmdk kbd { display: none; } .cmdk { min-width: 0; } }
-        @container bar (max-width: 940px) { .toggle-label { display: none; } .tb-app { max-width: 120px; } }
+        @container bar (max-width: 940px) { .toggle-label, .driver-label { display: none; } .driver-short { display: inline; } .tb-app { max-width: 120px; } }
         @container bar (max-width: 820px) { .tb-app, #deviceRuntime, .tb-sep { display: none; } }
         @container bar (max-width: 700px) {
           .brand-name { display: none; }
@@ -4550,6 +4987,29 @@ enum WebViewerAssets {
         .touch-dot.held::after { content: ""; position: absolute; inset: -9px; border-radius: 50%; border: 2px solid var(--course); animation: touch-held .18s var(--ease); }
         @keyframes touch-held { from { transform: scale(.6); opacity: 0; } to { transform: scale(1); opacity: 1; } }
 
+        /* What an agent or a test run did, drawn where the finger went and gone in two
+           seconds: a ring where it went down, a stroke to where it lifted, a caption. */
+        .activity-layer { position: absolute; inset: 0; z-index: 3; overflow: hidden; pointer-events: none; }
+        .app[data-mode="replay"] .activity-layer { display: none; }
+        .act-mark, .act-caption { transition: opacity .4s var(--ease); }
+        .act-mark.fading, .act-caption.fading { opacity: 0; }
+        .act-path { position: absolute; left: 0; top: 0; overflow: visible; }
+        .act-path line { stroke: var(--course); stroke-width: 3; stroke-linecap: round; animation: act-draw var(--travel, .4s) linear forwards; }
+        .act-path path { fill: none; stroke: var(--course); stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; opacity: 0; animation: act-arrive 1ms var(--travel, .4s) forwards; }
+        @keyframes act-draw { to { stroke-dashoffset: 0; } }
+        @keyframes act-arrive { to { opacity: 1; } }
+        .act-ring { position: absolute; width: 34px; height: 34px; margin: -17px 0 0 -17px; border-radius: 50%; border: 2px solid var(--course); background: var(--course-fill); animation: act-ring .3s var(--ease); }
+        .act-ring.held::after { content: ""; position: absolute; inset: -9px; border-radius: 50%; border: 2px solid var(--course); }
+        @keyframes act-ring { from { transform: scale(.4); opacity: 0; } }
+        .act-mark.failed .act-ring { border-color: var(--err); background: var(--err-bg-strong); }
+        .act-label, .act-caption {
+          position: absolute; max-width: 160px; padding: 3px 7px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+          border: 1px solid var(--course-line); border-radius: var(--r-1); background: var(--g2); color: var(--ink1); font: 500 var(--fs-11)/1.3 var(--font-ui);
+        }
+        .act-caption { top: 12%; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 6px; max-width: calc(100% - 32px); }
+        .act-caption span:last-child { overflow: hidden; text-overflow: ellipsis; }
+        .act-caption.failed, .act-mark.failed .act-label { border-color: var(--err-line); }
+
         /* Rulers and redlines (Accessibility) — distances in points. */
         .ruler { position: absolute; display: none; color: var(--ink3); font: var(--fs-11)/1 var(--font-mono); pointer-events: none; }
         .app.ax-pick .ruler { display: block; }
@@ -4592,6 +5052,10 @@ enum WebViewerAssets {
 
         .readout { display: flex; align-items: center; gap: var(--sp-3); height: 28px; padding: 0 var(--sp-3); flex: none; overflow: hidden; white-space: nowrap; border-top: 1px solid var(--line-hair); color: var(--ink3); font-size: var(--fs-11); }
         .readout-ptr { margin-left: auto; color: var(--ink2); }
+        /* The last thing done to the device and how long ago. */
+        .readout-last { display: inline-flex; flex: 0 1 auto; align-items: center; gap: 6px; min-width: 0; overflow: hidden; color: var(--ink3); cursor: pointer; }
+        .readout-last .read-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--ink2); font-family: var(--font-ui); }
+        .readout-last.recent .read-title { color: var(--ink1); }
 
         /* ── Inspector ── */
         .inspector { position: relative; container: insp / inline-size; display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--g1); }
@@ -4872,6 +5336,16 @@ enum WebViewerAssets {
         .evidence li { display: flex; align-items: center; gap: 4px; min-height: 26px; }
         .evidence .mono { min-width: 0; overflow-wrap: anywhere; color: var(--ink2); }
 
+        /* Activity */
+        .act-grid { grid-template-columns: 86px 54px minmax(140px, 1fr) 84px; }
+        @container insp (max-width: 560px) { .act-grid { grid-template-columns: 86px 54px minmax(0, 1fr); } .act-grid > .cell:nth-child(4) { display: none; } }
+        .row.act-failed { background: var(--err-bg); }
+        .row.act-failed:hover { background: var(--err-bg-strong); }
+        .row.act-viewer .name b { color: var(--ink2); }
+        .who { display: inline-flex; align-items: center; flex: none; height: 16px; padding: 0 5px; border-radius: 3px; font: 600 var(--fs-11)/1 var(--font-ui); }
+        .who-agent, .who-test { color: var(--course); background: var(--course-bg); }
+        .who-viewer { color: var(--ink2); background: var(--g3); }
+
         /* No app attached */
         .noapp { flex: 1; overflow: auto; padding: var(--sp-6) var(--sp-5); }
         .noapp h2 { margin: 0 0 var(--sp-2); font-size: var(--fs-15); font-weight: 600; }
@@ -4930,7 +5404,7 @@ enum WebViewerAssets {
           *, *::before, *::after { transition-duration: 0ms !important; animation-duration: 0ms !important; }
           .spinner { border-top-color: var(--course); }
         }
-        .tb-btn, .toggle, .pill, .seg button, .tab, .row, .btn, .cmdk, .levels button, .model, .group-row { transition: background-color var(--dur) var(--ease), color var(--dur) var(--ease), border-color var(--dur) var(--ease); }
+        .tb-btn, .toggle, .pill, .seg button, .tab, .row, .btn, .cmdk, .levels button, .model, .group-row, .driver { transition: background-color var(--dur) var(--ease), color var(--dur) var(--ease), border-color var(--dur) var(--ease); }
         @media (max-width: 720px) {
           .statusbar .sb-cell.opt { display: none; }
         }
@@ -5003,6 +5477,7 @@ enum WebViewerAssets {
               </div>
 
               <div class="tb-group tb-right">
+                <span class="driver-status" role="status" aria-live="polite"><button class="driver" type="button" id="driverChip" hidden data-tip=""><span class="driver-dot" aria-hidden="true"></span><span class="driver-label" id="driverLabel"></span><span class="driver-short" id="driverShort" aria-hidden="true"></span></button></span>
                 <button class="toggle" type="button" id="keyboardToggle" aria-pressed="false" data-tip="Type into the simulator with the Mac keyboard" data-key="⇧⌘K" aria-keyshortcuts="Shift+Meta+K">
                   <svg class="ic" aria-hidden="true"><use href="#i-keyboard"/></svg><span class="toggle-label">Mac keyboard</span>
                 </button>
@@ -5029,6 +5504,7 @@ enum WebViewerAssets {
                       <svg class="redlines" id="redlines" aria-hidden="true"></svg>
                       <div class="redline-labels" id="redlineLabels" aria-hidden="true"></div>
                       <div class="touch-layer" id="touchLayer" aria-hidden="true"></div>
+                      <div class="activity-layer" id="activityLayer" aria-hidden="true"></div>
                       <video class="replay-video" id="replayVideo" playsinline></video>
                       <div class="replay-note" id="replayNote" hidden>The recording is unavailable — the timeline still works.</div>
                       <div class="placeholder" id="placeholder">Connecting to the simulator…</div>
@@ -5056,6 +5532,7 @@ enum WebViewerAssets {
 
                 <div class="readout mono" id="readout" aria-hidden="true">
                   <span id="readSize">—</span><span id="readFps">— fps</span>
+                  <span class="readout-last" id="readLast" title="The last thing done to the device — ⌥6 shows them all" hidden></span>
                   <span class="readout-ptr" id="readPointer"></span>
                 </div>
               </section>
@@ -5069,12 +5546,14 @@ enum WebViewerAssets {
                   <button role="tab" class="tab" type="button" id="tab-state" data-tab="state" aria-controls="panel-state" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+3">State <span class="count" id="count-state"></span></button>
                   <button role="tab" class="tab" type="button" id="tab-ax" data-tab="ax" aria-controls="panel-ax" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+4">Accessibility</button>
                   <button role="tab" class="tab" type="button" id="tab-tests" data-tab="tests" aria-controls="panel-tests" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+5">Tests <span class="count" id="count-tests"></span><span class="count-err" id="err-tests" hidden></span></button>
+                  <button role="tab" class="tab" type="button" id="tab-activity" data-tab="activity" aria-controls="panel-activity" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+6">Activity <span class="count" id="count-activity"></span><span class="count-err" id="err-activity" hidden></span></button>
                 </div>
                 <div class="panel" role="tabpanel" id="panel-network" aria-labelledby="tab-network"></div>
                 <div class="panel" role="tabpanel" id="panel-logs" aria-labelledby="tab-logs" hidden></div>
                 <div class="panel" role="tabpanel" id="panel-state" aria-labelledby="tab-state" hidden></div>
                 <div class="panel" role="tabpanel" id="panel-ax" aria-labelledby="tab-ax" hidden></div>
                 <div class="panel" role="tabpanel" id="panel-tests" aria-labelledby="tab-tests" hidden></div>
+                <div class="panel" role="tabpanel" id="panel-activity" aria-labelledby="tab-activity" hidden></div>
               </section>
             </main>
 
@@ -5122,6 +5601,7 @@ enum WebViewerAssets {
         {{js/state.js}}
         {{js/ax.js}}
         {{js/tests.js}}
+        {{js/activity.js}}
         {{js/palette.js}}
         {{js/main.js}}</script>
         </body>

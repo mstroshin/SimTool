@@ -494,3 +494,76 @@ function axScreenFrame(tree) {
   }
   return best;
 }
+
+// ---- Activity: what agents, test runs and viewers did to the device ----
+
+// "3 s ago" — the feed's age, finer than formatAgo's "just now".
+function formatSince(milliseconds) {
+  if (!isFinite(milliseconds)) return "";
+  const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+  if (seconds < 1) return "now";
+  if (seconds < 60) return seconds + " s ago";
+  const minutes = Math.floor(seconds / 60);
+  return minutes < 60 ? minutes + " min ago" : Math.floor(minutes / 60) + " h ago";
+}
+
+const ACTOR_NAMES = { agent: "Agent", test: "Test", viewer: "Viewer" };
+
+// How long an agent counts as driving after its last action: long enough to
+// cover it reading the screen between two taps.
+const AGENT_DRIVING_MS = 30000;
+
+// Who drives the device now: the test run the server reports, or an agent that
+// acted within AGENT_DRIVING_MS, or nobody (null). `key` names one stretch of
+// driving, so a person who took over is asked again only when a new one starts.
+function deviceDriver(entries, run, now) {
+  if (run && run.active) {
+    let step = run.totalSteps ? { index: Math.min(run.completedSteps + 1, run.totalSteps), total: run.totalSteps } : null;
+    for (let i = entries.length - 1; i >= 0 && !step; i--) {
+      const parsed = entries[i].kind === "step" ? parseStepText(entries[i].title) : null;
+      if (parsed && parsed.index) step = { index: Math.min(parsed.index + 1, parsed.total), total: parsed.total };
+    }
+    return { actor: "test", key: "test:" + (run.sessionId || run.file || run.name || ""), title: run.name || run.file || "a test", step };
+  }
+  let newest = null, first = null;
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (entry.actor !== "agent") continue;
+    const end = Date.parse(entry.endedAt || entry.at);
+    if (!newest) {
+      if (entry.status !== "running" && !(now - end < AGENT_DRIVING_MS)) return null;
+      newest = entry;
+    } else if (Date.parse(first.at) - end >= AGENT_DRIVING_MS) {
+      break;
+    }
+    first = entry;
+  }
+  return newest ? { actor: "agent", key: "agent:" + first.id, title: newest.title, lastAt: Date.parse(newest.endedAt || newest.at), entry: newest } : null;
+}
+
+// A gesture's ends as fractions of the screen, from the points it was played
+// in; the server's screen size wins, the page's own (AX) size is the fallback.
+function gestureRatios(gesture, screenPoints) {
+  const screen = gesture && (gesture.screen || screenPoints);
+  if (!screen || !screen.width || !screen.height) return null;
+  const ratio = (point) => ({ x: Math.min(1, Math.max(0, point.x / screen.width)), y: Math.min(1, Math.max(0, point.y / screen.height)) });
+  const from = ratio(gesture.from), to = ratio(gesture.to);
+  const moved = Math.hypot(gesture.to.x - gesture.from.x, gesture.to.y - gesture.from.y) >= 1;
+  return { from, to, moved };
+}
+
+// The CLI command that does what an entry did, for touches with a known path.
+function activityCommand(entry) {
+  const gesture = entry && entry.gesture;
+  if (!gesture) return "";
+  const round = (value) => Math.round(value);
+  const at = "--x " + round(gesture.from.x) + " --y " + round(gesture.from.y);
+  const path = "--start-x " + round(gesture.from.x) + " --start-y " + round(gesture.from.y) + " --end-x " + round(gesture.to.x) + " --end-y " + round(gesture.to.y);
+  switch (entry.kind) {
+    case "tap": return "simtool input tap " + at;
+    case "long-press": return "simtool input long-press " + at + " --duration " + Math.round(gesture.press * 100) / 100;
+    case "drag": return "simtool input drag " + path;
+    case "swipe": case "scroll": case "fling": return "simtool input swipe " + path + (entry.kind === "fling" ? " --hold 0" : "");
+    default: return "";
+  }
+}

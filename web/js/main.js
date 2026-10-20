@@ -35,6 +35,7 @@ async function bootstrap() {
     resetNetwork();
     resetLogs();
     resetState();
+    resetActivity();
     ax.tree = null;
     networkLastPayload = "";
     testsLastSessions = "";
@@ -71,10 +72,12 @@ poller.add("logs", () => (activeTab("logs") ? ACTIVE_MS : BACKGROUND_MS), pollLo
 poller.add("state", () => (activeTab("state") ? 1000 : BACKGROUND_MS), pollState);
 poller.add("ax", 2000, loadAx, () => activeTab("ax") && app.dataset.mode !== "replay");
 poller.add("tests", () => (activeTab("tests") ? ACTIVE_MS : BACKGROUND_MS), loadTests);
+// Every tab needs it: the marks on the screen and who drives the device.
+poller.add("activity", 500, pollActivity);
 
 onReconnect(async () => {
   try { await bootstrap(); } catch (_) {}
-  for (const name of ["network", "logs", "state", "tests"]) poller.poke(name);
+  for (const name of ["network", "logs", "state", "tests", "activity"]) poller.poke(name);
 });
 
 onConnection((state) => {
