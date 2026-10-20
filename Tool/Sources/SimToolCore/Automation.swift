@@ -98,12 +98,16 @@ public enum SimulatorInputClient {
         velocity: Double? = nil,
         hold: Double? = nil
     ) async throws -> ProcessOutput {
-        let from = TouchPoint(x: startX, y: startY), to = TouchPoint(x: endX, y: endY)
-        let speed = velocity ?? duration.map { from.distance(to: to) / max(0.017, $0) } ?? TouchStroke.scrollVelocity
-        return try await perform(
-            TouchStroke(from: from, to: to, velocity: speed, hold: hold ?? TouchStroke.scrollHold),
+        try await perform(
+            swipeStroke(from: TouchPoint(x: startX, y: startY), to: TouchPoint(x: endX, y: endY), duration: duration, velocity: velocity, hold: hold),
             deviceUDID: deviceUDID
         )
+    }
+
+    /// The stroke `swipe` plays.
+    public static func swipeStroke(from: TouchPoint, to: TouchPoint, duration: Double? = nil, velocity: Double? = nil, hold: Double? = nil) -> TouchStroke {
+        let speed = velocity ?? duration.map { from.distance(to: to) / max(0.017, $0) } ?? TouchStroke.scrollVelocity
+        return TouchStroke(from: from, to: to, velocity: speed, hold: hold ?? TouchStroke.scrollHold)
     }
 
     /// Press until the item lifts (0.8 s), carry it at 300 pt/s, rest 0.5 s,
@@ -139,9 +143,20 @@ public enum SimulatorInputClient {
         x: Double? = nil,
         y: Double? = nil
     ) async throws -> ProcessOutput {
+        try await perform(try await scrollStroke(deviceUDID: deviceUDID, direction: direction, distance: distance, x: x, y: y), deviceUDID: deviceUDID)
+    }
+
+    /// The stroke `scroll` plays.
+    public static func scrollStroke(
+        deviceUDID: String,
+        direction: TouchDirection,
+        distance: Double? = nil,
+        x: Double? = nil,
+        y: Double? = nil
+    ) async throws -> TouchStroke {
         let screen = try await SimulatorDirectInputClient.shared.screenSize(deviceUDID: deviceUDID)
         let start = try startPoint(x: x, y: y)
-        return try await perform(TouchGeometry.scroll(direction, distance: distance, from: start, on: screen), deviceUDID: deviceUDID)
+        return TouchGeometry.scroll(direction, distance: distance, from: start, on: screen)
     }
 
     /// ~200 points of travel lifted in motion, so the content keeps going.
@@ -152,14 +167,43 @@ public enum SimulatorInputClient {
         x: Double? = nil,
         y: Double? = nil
     ) async throws -> ProcessOutput {
+        try await perform(try await flingStroke(deviceUDID: deviceUDID, direction: direction, velocity: velocity, x: x, y: y), deviceUDID: deviceUDID)
+    }
+
+    /// The stroke `fling` plays.
+    public static func flingStroke(
+        deviceUDID: String,
+        direction: TouchDirection,
+        velocity: Double = TouchStroke.flingVelocity,
+        x: Double? = nil,
+        y: Double? = nil
+    ) async throws -> TouchStroke {
         let screen = try await SimulatorDirectInputClient.shared.screenSize(deviceUDID: deviceUDID)
         let start = try startPoint(x: x, y: y)
-        return try await perform(TouchGeometry.fling(direction, velocity: velocity, from: start, on: screen), deviceUDID: deviceUDID)
+        return TouchGeometry.fling(direction, velocity: velocity, from: start, on: screen)
     }
 
     /// The screen in points.
     public static func screenSize(deviceUDID: String) async throws -> SimulatorScreenSize {
         try await SimulatorDirectInputClient.shared.screenSize(deviceUDID: deviceUDID)
+    }
+
+    /// Where a touch lands: the coordinates, or the frame center of the `id` or
+    /// `label` target. For a caller that has to know before the finger goes down.
+    public static func touchPoint(
+        deviceUDID: String,
+        x: Double?,
+        y: Double?,
+        id: String?,
+        label: String?,
+        action: String
+    ) async throws -> TouchPoint {
+        try await target(deviceUDID: deviceUDID, x: x, y: y, id: id, label: label, action: action)
+    }
+
+    /// Plays a stroke worked out beforehand, the way every touch above does.
+    public static func play(_ stroke: TouchStroke, deviceUDID: String) async throws -> ProcessOutput {
+        try await perform(stroke, deviceUDID: deviceUDID)
     }
 
     private static func perform(_ stroke: TouchStroke, deviceUDID: String) async throws -> ProcessOutput {

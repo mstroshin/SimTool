@@ -732,8 +732,24 @@ POST /api/v1/logs/capture/stop
 GET /api/v1/network?seconds=2&limit=200
 GET /api/v1/mocks
 GET /api/v1/mocks/ack
+GET /api/v1/activity?since=<revision>&limit=200
+POST /api/v1/activity
 GET /api/v1/screenshot?maxDim=800
 ```
+
+`activity` is what was done to the device and by whom — `agent` (the CLI, the
+HTTP API), `test` (a YAML run) or `viewer` (a person at a SimTool page): every
+input with the path its finger took in screen points, mocks armed and removed,
+test runs and their steps. Each entry carries a `revision` that moves whenever
+it changes (a tap opens, learns where it lands, finishes), so `since` the last
+`revision` returns what changed, once per change; `run` is the test run driving
+the device, while one is. `simtool input …`, `app launch` and `open` act on the
+simulator in their own process and report themselves to every live server
+streaming that device with `POST /api/v1/activity` — `{"kind", "title",
+"detail", "gesture"}` opens an entry, `{"id", "status"}` finishes it — best
+effort, never failing the command. A request that sends `X-SimTool-Source:
+viewer` is the viewer's own; an input that names a `target` (a test step's
+element) is called by it in the feed, never aimed by it.
 
 `mocks/ack` reports the server's mock-rule generation and the newest one an app
 has confirmed applying (learned from its poll). A run that declares `mocks:`

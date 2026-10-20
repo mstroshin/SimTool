@@ -37,8 +37,10 @@ public struct SimToolClient: Sendable {
         try await sendJSON(CommandResultPayload.self, path: "input", payload: payload, method: "POST")
     }
 
-    public func tap(x: Double? = nil, y: Double? = nil, id: String? = nil, label: String? = nil) async throws -> CommandResultPayload {
-        try await input(SimulatorInputPayload(action: "tap", x: x, y: y, id: id, label: label))
+    /// `target` names what the tap aims at for the viewer's activity feed; it
+    /// never decides where the tap lands.
+    public func tap(x: Double? = nil, y: Double? = nil, id: String? = nil, label: String? = nil, target: String? = nil) async throws -> CommandResultPayload {
+        try await input(SimulatorInputPayload(action: "tap", x: x, y: y, id: id, label: label, target: target))
     }
 
     public func longPress(
@@ -46,9 +48,10 @@ public struct SimToolClient: Sendable {
         y: Double? = nil,
         id: String? = nil,
         label: String? = nil,
-        duration: Double? = nil
+        duration: Double? = nil,
+        target: String? = nil
     ) async throws -> CommandResultPayload {
-        try await input(SimulatorInputPayload(action: "longPress", x: x, y: y, id: id, label: label, duration: duration))
+        try await input(SimulatorInputPayload(action: "longPress", x: x, y: y, id: id, label: label, duration: duration, target: target))
     }
 
     public func typeText(_ text: String) async throws -> CommandResultPayload {
@@ -107,7 +110,8 @@ public struct SimToolClient: Sendable {
         endY: Double,
         press: Double? = nil,
         velocity: Double? = nil,
-        hold: Double? = nil
+        hold: Double? = nil,
+        target: String? = nil
     ) async throws -> CommandResultPayload {
         try await input(SimulatorInputPayload(
             action: "drag",
@@ -117,19 +121,20 @@ public struct SimToolClient: Sendable {
             endY: endY,
             velocity: velocity,
             hold: hold,
-            press: press
+            press: press,
+            target: target
         ))
     }
 
     /// Moves the content `distance` points (half the screen by default) and
     /// leaves it there; `direction` is the way the finger moves.
-    public func scroll(direction: TouchDirection, distance: Double? = nil, x: Double? = nil, y: Double? = nil) async throws -> CommandResultPayload {
-        try await input(SimulatorInputPayload(action: "scroll", x: x, y: y, direction: direction.rawValue, distance: distance))
+    public func scroll(direction: TouchDirection, distance: Double? = nil, x: Double? = nil, y: Double? = nil, target: String? = nil) async throws -> CommandResultPayload {
+        try await input(SimulatorInputPayload(action: "scroll", x: x, y: y, direction: direction.rawValue, distance: distance, target: target))
     }
 
     /// ~200 points lifted in motion at `velocity` points per second.
-    public func fling(direction: TouchDirection, velocity: Double? = nil, x: Double? = nil, y: Double? = nil) async throws -> CommandResultPayload {
-        try await input(SimulatorInputPayload(action: "fling", x: x, y: y, velocity: velocity, direction: direction.rawValue))
+    public func fling(direction: TouchDirection, velocity: Double? = nil, x: Double? = nil, y: Double? = nil, target: String? = nil) async throws -> CommandResultPayload {
+        try await input(SimulatorInputPayload(action: "fling", x: x, y: y, velocity: velocity, direction: direction.rawValue, target: target))
     }
 
     public func button(_ name: String) async throws -> CommandResultPayload {
