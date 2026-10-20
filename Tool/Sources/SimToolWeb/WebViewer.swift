@@ -28,11 +28,11 @@ public enum WebViewer {
 
     /// The live-touch channel, kept apart from the page script so it can be
     /// exercised on its own.
-    static var touchScript: String { asset("touch.js") }
+    static var touchScript: String { asset("js/touch.js") }
 
     /// The Mac keyboard bridge, kept apart from the page script so it can be
     /// exercised on its own.
-    static var keyboardScript: String { asset("keyboard.js") }
+    static var keyboardScript: String { asset("js/keyboard.js") }
 
     static func asset(_ path: String) -> String {
         guard let contents = WebViewerAssets.files[path] else {

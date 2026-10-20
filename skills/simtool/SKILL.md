@@ -276,8 +276,8 @@ frame is usually the splash — capture again to see the settled screen.
     text field changed and no keyboard is up: tap the field first. `paste
     --image <file>` pastes an image the same way; only fields that take images
     react. For a photo picker, put the image in the library instead: `xcrun
-    simctl addmedia <udid> <file>…` (or right-click the viewer's screen › Add to
-    Photos).
+    simctl addmedia <udid> <file>…` (or right-click the viewer's screen › Add
+    files to Photos…).
   - `keyboard show|hide` — the software keyboard, confirmed on screen (or off
     it) through the accessibility tree; idempotent. Hide it when it covers the
     button you need; `show` fails when no text field is focused — tap one
@@ -316,7 +316,8 @@ polls the server (~2s) and applies rules on the fly — no relaunch. Flag syntax
   cases, or mirror a real response's shape.
 - **Unary only** — streaming RPCs and plain HTTP are not mocked yet.
 - Needs an app linked against a SimTool version that exposes the mock store.
-- Mocked calls show a 🎭 badge in the viewer's Network tab.
+- Mocked calls carry a **Mock** tag in the viewer's Network tab, and **Copy as
+  YAML mock** on any call gives a `mocks:` entry that answers it the same way.
 - **For a test, declare the rules in the test's `mocks:` block instead.** Rules
   set from the CLI live outside the test, so a scenario that needs a specific
   backend answer only reproduces on the machine where someone typed them. Use
@@ -392,10 +393,11 @@ changes produce no event. Likewise, state that never lands in a tracked property
 invisible here — grab it from OSLog.
 
 ### Live browser viewer
-`simtool serve` opens a viewer (stream + Logs + Network panels; the mouse on
-the screen is a live finger — hold, drag, wheel-scroll, Option for pinch); scoping
-`--app <bundle>` captures that app's OSLog **and** stdout and auto-opens the Logs
-panel. `simtool run` reads `.simtool/config.yml` and does build → launch → viewer
+`simtool serve` opens a viewer: the device beside an inspector (Network, Logs,
+State, Accessibility, Tests; ⇧⌘P lists every action). The mouse on the screen is
+a live finger — hold, drag, wheel-scroll, Option for pinch; the Accessibility tab
+picks elements and copies them as YAML steps. Scoping `--app <bundle>` captures
+that app's OSLog **and** stdout from the start. `simtool run` reads `.simtool/config.yml` and does build → launch → viewer
 in one step. Flags: `simtool serve --help` / `simtool run --help`.
 
 ## Workflow

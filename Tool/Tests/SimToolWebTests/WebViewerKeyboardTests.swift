@@ -5,22 +5,19 @@ import XCTest
 final class WebViewerKeyboardTests: XCTestCase {
     func testToolbarHasTheSoftwareKeyboardButtonAndTheKeyboardToggle() throws {
         let html = WebViewer.html()
-        XCTAssertTrue(html.contains(">⌨️<"), "missing the software keyboard button")
+        XCTAssertTrue(html.contains(#"id="softKeyboardButton" aria-label="Show or hide the software keyboard""#), "missing the software keyboard button")
         XCTAssertTrue(html.contains("action: \"software-keyboard\""), "the button must toggle the software keyboard")
-        XCTAssertTrue(html.contains(#"<button id="keyboardToggle" class="inspect-toggle" type="button" aria-pressed="false""#), "the keyboard toggle must look and behave like Inspect")
-        XCTAssertTrue(html.contains("keyboardToggle.setAttribute(\"aria-pressed\", String(on))"))
+        XCTAssertTrue(html.contains(#"id="keyboardToggle" aria-pressed="false""#), "the keyboard toggle must say whether it is on")
+        XCTAssertTrue(html.contains("$(\"keyboardToggle\").setAttribute(\"aria-pressed\", String(on))"))
         XCTAssertTrue(html.contains("action: \"hardware-keyboard\", enabled: on"), "the toggle connects the hardware keyboard as Simulator.app does")
-        // Keyboard sits right before Inspect.
-        let keyboard = try XCTUnwrap(html.range(of: "id=\"keyboardToggle\""))
-        let inspect = try XCTUnwrap(html.range(of: "id=\"inspectToggle\""))
-        XCTAssertFalse(html[keyboard.upperBound..<inspect.lowerBound].contains("<button id="))
     }
 
     func testTheScreenShowsWhereTheKeysGo() {
         let html = WebViewer.html()
-        XCTAssertTrue(html.contains(".surface.kbd-capture {"), "missing the ring around the screen")
-        XCTAssertTrue(html.contains(".surface.kbd-capture.kbd-paused {"), "missing the paused ring")
-        XCTAssertTrue(html.contains("id=\"kbdBadge\""), "missing the status bar badge")
+        XCTAssertTrue(html.contains(".app.keys-on .screen {"), "missing the ring around the screen")
+        XCTAssertTrue(html.contains(".app.keys-on.keys-paused .screen {"), "missing the paused ring")
+        XCTAssertTrue(html.contains("id=\"sbKeys\""), "missing the status bar cell")
+        XCTAssertTrue(html.contains("Keys → device · ⇧⌘K releases"), "the way out of the mode must be on screen")
     }
 
     func testThePageKeepsItsOwnKeysAndTheModeChord() throws {

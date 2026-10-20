@@ -25,7 +25,7 @@ final class WebViewerTouchTests: XCTestCase {
     func testCanvasStreamsTheFingerInsteadOfPostingTapsAndSwipes() {
         let html = WebViewer.html()
         XCTAssertTrue(html.contains("/api/v1/input/stream"), "the canvas must stream over the live-touch socket")
-        XCTAssertTrue(html.contains("id=\"touchOverlay\""), "missing touch indicator layer")
+        XCTAssertTrue(html.contains("id=\"touchLayer\""), "missing touch indicator layer")
         XCTAssertTrue(html.contains("\"wheel\""), "wheel/trackpad scrolling must drive a finger")
         XCTAssertTrue(html.contains("lostpointercapture"), "a lost capture must lift the finger")
         XCTAssertTrue(html.contains("visibilitychange"), "a hidden tab must lift the finger")

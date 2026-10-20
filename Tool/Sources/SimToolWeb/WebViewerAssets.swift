@@ -5,14 +5,1607 @@
 enum WebViewerAssets {
     /// `web/<path>` → that file's contents, without its final newline.
     static let files: [String: String] = [
-        "keyboard.js": keyboardJs,
-        "touch.js": touchJs,
+        "js/ax.js": jsAxJs,
+        "js/core.js": jsCoreJs,
+        "js/device.js": jsDeviceJs,
+        "js/inspector.js": jsInspectorJs,
+        "js/keyboard.js": jsKeyboardJs,
+        "js/list.js": jsListJs,
+        "js/logic.js": jsLogicJs,
+        "js/logs.js": jsLogsJs,
+        "js/main.js": jsMainJs,
+        "js/network.js": jsNetworkJs,
+        "js/palette.js": jsPaletteJs,
+        "js/state.js": jsStateJs,
+        "js/stream.js": jsStreamJs,
+        "js/tests.js": jsTestsJs,
+        "js/touch.js": jsTouchJs,
         "viewer.css": viewerCss,
         "viewer.html": viewerHtml,
-        "viewer.js": viewerJs,
     ]
 
-    static let keyboardJs = #"""
+    static let jsAxJs = #"""
+        // Accessibility: the served AX tree, picking on the screen, and redlines —
+        // the picked element's frame with its distances to the screen edges and to the
+        // element under the pointer, in points: the same numbers a YAML step or
+        // `simtool input tap --x/--y` uses.
+
+        const ax = {
+          tree: null,
+          nodes: new Map(),        // key → node (with _key, _parent, _depth)
+          expanded: new Set(),
+          selected: null,
+          hover: null,
+          pick: stored("ax.pick", true),
+          hideEmpty: stored("ax.hideEmpty", true),
+          updatedAt: 0,
+          error: ""
+        };
+
+        const axFilter = createFilter("ax", { placeholder: "Filter identifier, label, role", onChange: () => renderAx() });
+        const axPickButton = el("button", { class: "toggle toggle-sm", type: "button", "aria-pressed": String(ax.pick), "data-tip": "Pick an element on the screen", "data-key": "P", html: icon("pick") + '<span class="toggle-label">Pick</span>' });
+        const axHideEmptyButton = pillToggle("Hide empty groups", () => ax.hideEmpty, () => { ax.hideEmpty = !ax.hideEmpty; store("ax.hideEmpty", ax.hideEmpty); renderAx(); }, "Fold containers that have no identifier, label or value");
+        const axRefresh = el("button", { class: "tb-btn", type: "button", "aria-label": "Refresh the tree", "data-tip": "Refresh the tree", html: icon("relaunch") });
+        const axStatus = el("span", { class: "muted small mono ptool-note" });
+
+        const axView = buildListPanel("ax", {
+          listRole: "tree",
+          listLabel: "Accessibility tree",
+          toolbar: [axPickButton, axFilter.field, axHideEmptyButton, el("span", { class: "ptool-spacer" }), axStatus, axRefresh]
+        });
+
+        axPickButton.addEventListener("click", () => setAxPick(!ax.pick));
+        axRefresh.addEventListener("click", () => poller.poke("ax"));
+
+        function setAxPick(on) {
+          ax.pick = on;
+          store("ax.pick", on);
+          axPickButton.setAttribute("aria-pressed", String(on));
+          updateAxMode();
+        }
+
+        // Picking happens on the live screen, with the Accessibility tab in view.
+        function axPickActive() {
+          return ax.pick && inspector.open && inspector.tab === "ax" && app.dataset.mode !== "replay" && !!ax.tree;
+        }
+
+        function updateAxMode() {
+          app.classList.toggle("ax-pick", axPickActive());
+          drawRulers();
+          drawRedlines();
+        }
+
+        // ---- Tree ----
+
+        function indexAx(tree) {
+          const nodes = new Map();
+          const walk = (node, parent, depth, path) => {
+            // Keys stay stable across refreshes as long as the element keeps its place.
+            const key = node.id || path;
+            node._key = key;
+            node._parent = parent;
+            node._depth = depth;
+            nodes.set(key, node);
+            (node.children || []).forEach((child, index) => walk(child, key, depth + 1, path + "/" + index));
+          };
+          (tree.roots || []).forEach((root, index) => walk(root, null, 0, String(index)));
+          ax.nodes = nodes;
+          const screen = axScreenFrame(tree);
+          if (screen) {
+            screenState.points = { width: screen.width, height: screen.height, x: screen.x, y: screen.y };
+            updateReadoutSize();
+          }
+        }
+
+        // Rows to show: with "hide empty groups", an anonymous container with exactly
+        // one child is skipped and its child takes its place.
+        function axVisibleRows() {
+          if (!ax.tree) return [];
+          const query = axFilter.text;
+          const chips = axFilter.chips;
+          let keep = null;
+          if (query || chips.length) {
+            keep = new Set();
+            for (const node of ax.nodes.values()) {
+              const hay = [node.accessibilityIdentifier, node.label, node.value, node.title, node.role, node.roleDescription, node.type].filter(Boolean).join(" ").toLowerCase();
+              if (!matchesFilters(hay, chips, query)) continue;
+              for (let key = node._key; key != null && !keep.has(key); key = ax.nodes.get(key)._parent) keep.add(key);
+            }
+          }
+          const rows = [];
+          const walk = (node, depth, folded) => {
+            if (keep && !keep.has(node._key)) return;
+            const children = node.children || [];
+            // An anonymous element with nothing inside says nothing at all.
+            if (ax.hideEmpty && axIsAnonymous(node) && !children.length && node._depth > 0) return;
+            if (ax.hideEmpty && axIsAnonymous(node) && children.length === 1 && node._depth > 0) {
+              walk(children[0], depth, folded + 1);
+              return;
+            }
+            const expanded = keep ? true : ax.expanded.has(node._key);
+            rows.push({ node, depth, folded, expanded, hasChildren: children.length > 0 });
+            if (expanded) for (const child of children) walk(child, depth + 1, 0);
+          };
+          for (const root of ax.tree.roots || []) walk(root, 0, 0);
+          return rows;
+        }
+
+        const axList = createList(axView.list, {
+          rowRole: "treeitem",
+          key: (row) => row.node._key,
+          version: (row) => [row.depth, row.folded, row.expanded, row.hasChildren, axTitle(row.node), row.node.label, frameText(row.node)].join("|"),
+          rowClass: () => "tree-grid",
+          render: renderAxRow,
+          empty: () => el("div", { class: "empty", html: ax.error ? "<b>No accessibility tree</b>" + escapeHTML(ax.error) : ax.tree ? "<b>No element matches</b>Clear the filter to see the whole tree." : "<b>Reading the accessibility tree…</b>" }),
+          onSelect: (key) => { ax.selected = key; renderAxDetail(); drawRedlines(); },
+          onMenu: (key, row, x, y, element) => openMenu(x, y, axMenuItems(row.node), element),
+          onActivate: (key, row) => toggleAxNode(row)
+        });
+        axView.list.addEventListener("keydown", (event) => {
+          const row = axList.selectedItem;
+          if (!row || event.target.closest("input")) return;
+          if (event.key === "ArrowRight" && row.hasChildren && !row.expanded) { event.preventDefault(); toggleAxNode(row); }
+          else if (event.key === "ArrowLeft" && row.expanded) { event.preventDefault(); toggleAxNode(row); }
+          else if (event.key === "ArrowLeft" && row.node._parent != null) { event.preventDefault(); axList.select(row.node._parent, { focus: true }); }
+        });
+        axView.list.addEventListener("click", (event) => {
+          const twisty = event.target.closest(".twisty");
+          if (!twisty) return;
+          const key = twisty.closest(".row").dataset.key;
+          const row = axList.visibleItems.find((candidate) => candidate.node._key === key);
+          if (row) toggleAxNode(row);
+        });
+        axView.list.addEventListener("mouseover", (event) => {
+          const element = event.target.closest(".row[data-key]");
+          const key = element ? element.dataset.key : null;
+          if (key !== ax.hover) { ax.hover = key; drawRedlines(); }
+        });
+        axView.list.addEventListener("mouseleave", () => { ax.hover = null; drawRedlines(); });
+
+        function toggleAxNode(row) {
+          if (!row.hasChildren) return;
+          if (ax.expanded.has(row.node._key)) ax.expanded.delete(row.node._key); else ax.expanded.add(row.node._key);
+          renderAx();
+        }
+
+        function frameText(node) {
+          return node.frame ? Math.round(node.frame.width) + "×" + Math.round(node.frame.height) : "";
+        }
+
+        function renderAxRow(row, element) {
+          const node = row.node;
+          element.setAttribute("aria-level", String(row.depth + 1));
+          if (row.hasChildren) element.setAttribute("aria-expanded", String(row.expanded)); else element.removeAttribute("aria-expanded");
+          const label = node.label && node.label.trim() && node.label.trim() !== node.accessibilityIdentifier ? node.label.trim() : "";
+          element.innerHTML =
+            '<span class="trow-main" style="padding-left:' + (row.depth * 14) + 'px">' +
+              '<span class="twisty" aria-hidden="true">' + (row.hasChildren ? icon(row.expanded ? "chev-d" : "chev-r") : "") + "</span>" +
+              '<span class="role">' + escapeHTML(axRoleName(node)) + "</span>" +
+              (node.accessibilityIdentifier ? '<span class="ax-id" translate="no">' + escapeHTML(node.accessibilityIdentifier) + "</span>" : "") +
+              (label ? '<span class="ax-label" translate="no">“' + escapeHTML(label) + "”</span>" : "") +
+              (!node.accessibilityIdentifier && !label && node.value ? '<span class="ax-label" translate="no">' + escapeHTML(node.value) + "</span>" : "") +
+              (row.folded ? '<span class="collapsed-run">' + plural(row.folded, "empty group", "empty groups") + " folded</span>" : "") +
+            "</span>" +
+            '<span class="ax-frame">' + escapeHTML(frameText(node)) + "</span>";
+        }
+
+        function renderAx() {
+          axList.update(axVisibleRows());
+          const age = ax.updatedAt ? Math.round((Date.now() - ax.updatedAt) / 1000) : null;
+          axStatus.textContent = ax.error ? "error" : ax.tree ? plural(ax.tree.nodeCount || ax.nodes.size, "node", "nodes") + " · " + (age < 2 ? "just now" : age + " s ago") : "";
+          axView.guide.innerHTML = guideHTML([
+            ax.pick ? "Pick: click an element on the screen" : "Picking is off — press P",
+            ax.selected && ax.nodes.get(ax.selected) ? "<b>" + escapeHTML(axTitle(ax.nodes.get(ax.selected))) + "</b>" : ""
+          ], "");
+          renderAxDetail();
+          drawRedlines();
+        }
+
+        // ---- Selected element ----
+
+        function axPath(node) {
+          const path = [];
+          for (let key = node._parent; key != null; key = ax.nodes.get(key)._parent) {
+            const parent = ax.nodes.get(key);
+            if (!axIsAnonymous(parent)) path.unshift(axTitle(parent));
+          }
+          return path;
+        }
+
+        function axCopyPayload(node) {
+          return {
+            accessibilityIdentifier: node.accessibilityIdentifier ?? null, label: node.label ?? null, value: node.value ?? null,
+            title: node.title ?? null, role: node.role ?? null, roleDescription: node.roleDescription ?? null, type: node.type ?? null,
+            enabled: node.enabled ?? null, pid: node.pid ?? null, frame: node.frame ?? null, ancestorPath: axPath(node), raw: node.raw ?? null
+          };
+        }
+
+        function axMenuItems(node) {
+          return [
+            { icon: "copy", label: "Copy as YAML step", run: () => copyText(axYamlStep(node), "YAML step copied") },
+            { icon: "terminal", label: "Copy CLI command", run: () => copyText(axCliCommand(node), "Command copied") },
+            { icon: "copy", label: "Copy JSON", run: () => copyText(JSON.stringify(axCopyPayload(node), null, 2), "Element copied") }
+          ];
+        }
+
+        function renderAxDetail() {
+          const node = ax.selected ? ax.nodes.get(ax.selected) : null;
+          showDetail(axView.panel, !!node);
+          if (!node) return;
+          const frame = node.frame || {};
+          const yaml = axYamlStep(node);
+          const cli = axCliCommand(node);
+          // The tree refreshes every two seconds; the detail changes only with the element.
+          patchPane(axView.detail, node._key,
+            '<div class="dhead"><span class="role">' + escapeHTML(axRoleName(node)) + '</span><span class="dtitle" translate="no">' + escapeHTML(axTitle(node)) + "</span>" +
+              '<div class="dactions"><button class="btn btn-sm" type="button" data-act="json">' + icon("copy", "ic-sm") + "Copy JSON</button>" +
+              '<button class="tb-btn" type="button" data-act="close" aria-label="Close the details">' + icon("close") + "</button></div></div>" +
+            '<div class="dmeta"><span translate="no">' + escapeHTML(axPath(node).join(" › ") || "—") + "</span></div>" +
+            '<div class="dbody">' + kvHTML({
+              Role: node.roleDescription ? axRoleName(node) + " (" + node.roleDescription + ")" : axRoleName(node),
+              Identifier: node.accessibilityIdentifier || "—",
+              Label: node.label || "—",
+              Value: node.value || "—",
+              Frame: node.frame ? "x " + Math.round(frame.x) + "  y " + Math.round(frame.y) + "  w " + Math.round(frame.width) + "  h " + Math.round(frame.height) + " pt" : "—",
+              Enabled: node.enabled == null ? "—" : String(node.enabled)
+            }) +
+              '<div class="sec">Use in a test</div>' +
+              '<div class="snippet"><pre class="code" translate="no">' + escapeHTML(yaml) + '</pre><button class="btn btn-sm" type="button" data-act="yaml">' + icon("copy", "ic-sm") + "YAML step</button></div>" +
+              '<div class="snippet"><pre class="code" translate="no">' + escapeHTML(cli) + '</pre><button class="btn btn-sm" type="button" data-act="cli">' + icon("copy", "ic-sm") + "CLI</button></div>" +
+              (axSelector(node) ? "" : '<p class="muted small">This element has no identifier or label, so the step taps its centre. Giving it an accessibilityIdentifier makes the test survive layout changes.</p>') +
+            "</div>");
+        }
+
+        axView.detail.addEventListener("click", (event) => {
+          const action = event.target.closest("[data-act]");
+          const node = ax.selected ? ax.nodes.get(ax.selected) : null;
+          if (!action || !node) return;
+          if (action.dataset.act === "json") copyText(JSON.stringify(axCopyPayload(node), null, 2), "Element copied");
+          if (action.dataset.act === "yaml") copyText(axYamlStep(node), "YAML step copied");
+          if (action.dataset.act === "cli") copyText(axCliCommand(node), "Command copied");
+          if (action.dataset.act === "close") { axList.select(null); axList.focus(); }
+        });
+
+        function selectAxNode(key) {
+          // Reveal it: expand its ancestors, then select.
+          for (let parent = ax.nodes.get(key)._parent; parent != null; parent = ax.nodes.get(parent)._parent) ax.expanded.add(parent);
+          renderAx();
+          axList.select(key, { scroll: true });
+        }
+
+        // ---- Picking on the screen ----
+
+        function axPointAt(clientX, clientY) {
+          const screen = screenState.points;
+          if (!screen) return null;
+          const rect = canvas.getBoundingClientRect();
+          return { x: screen.x + ((clientX - rect.left) / rect.width) * screen.width, y: screen.y + ((clientY - rect.top) / rect.height) * screen.height };
+        }
+
+        // The element under a point: the smallest framed node containing it, then
+        // walked up to the nearest one a test can name — an anonymous group is
+        // rarely what a person meant to pick.
+        function axHitTest(clientX, clientY) {
+          const point = axPointAt(clientX, clientY);
+          if (!point) return null;
+          let best = null, bestArea = Infinity;
+          for (const node of ax.nodes.values()) {
+            if (!axHasFrame(node)) continue;
+            const frame = node.frame;
+            if (frame.width > screenState.points.width * 1.05 || frame.height > screenState.points.height * 1.05) continue;
+            if (point.x < frame.x || point.x > frame.x + frame.width || point.y < frame.y || point.y > frame.y + frame.height) continue;
+            const area = frame.width * frame.height;
+            // <= so that among coincident frames the deepest, last-walked node wins.
+            if (area <= bestArea) { bestArea = area; best = node; }
+          }
+          for (let node = best; node; node = node._parent != null ? ax.nodes.get(node._parent) : null) {
+            if (!axIsAnonymous(node)) return node;
+          }
+          return best;
+        }
+
+        function axHoverAt(clientX, clientY) {
+          const node = clientX == null ? null : axHitTest(clientX, clientY);
+          const key = node ? node._key : null;
+          if (key !== ax.hover) { ax.hover = key; drawRedlines(); }
+        }
+
+        function axPickAt(clientX, clientY) {
+          const node = axHitTest(clientX, clientY);
+          if (node) selectAxNode(node._key);
+        }
+
+        function axMenuAt(clientX, clientY) {
+          const node = axHitTest(clientX, clientY);
+          if (!node) return;
+          selectAxNode(node._key);
+          openMenu(clientX, clientY, axMenuItems(node), canvas);
+        }
+
+        // ---- Rulers and redlines ----
+
+        function drawRulers() {
+          const screen = screenState.points;
+          const rulerX = $("rulerX"), rulerY = $("rulerY");
+          if (!screen || !axPickActive()) { rulerX.innerHTML = ""; rulerY.innerHTML = ""; return; }
+          const device = $("device").getBoundingClientRect();
+          const stepX = device.width * 50 / screen.width, stepY = device.height * 50 / screen.height;
+          $("device").style.setProperty("--tick-x", stepX + "px");
+          $("device").style.setProperty("--tick-y", stepY + "px");
+          const marks = (size) => Array.from({ length: Math.floor(size / 100) + 1 }, (_, index) => index * 100);
+          rulerX.innerHTML = marks(screen.width).map((value) => '<span style="left:' + (value / screen.width * 100) + '%">' + value + "</span>").join("");
+          rulerY.innerHTML = marks(screen.height).map((value) => '<span style="top:' + (value / screen.height * 100) + '%">' + value + "</span>").join("");
+        }
+
+        function drawRedlines() {
+          const svg = $("redlines"), labels = $("redlineLabels");
+          const screen = screenState.points;
+          if (!screen || !axPickActive()) { svg.innerHTML = ""; labels.innerHTML = ""; return; }
+          svg.setAttribute("viewBox", screen.x + " " + screen.y + " " + screen.width + " " + screen.height);
+          svg.setAttribute("preserveAspectRatio", "none");
+          const selected = ax.selected ? ax.nodes.get(ax.selected) : null;
+          const hover = ax.hover && ax.hover !== ax.selected ? ax.nodes.get(ax.hover) : null;
+          const rect = (node, cls) => {
+            const f = node.frame;
+            return '<rect class="' + cls + '" x="' + f.x + '" y="' + f.y + '" width="' + f.width + '" height="' + f.height + '"/>';
+          };
+          let shapes = "";
+          let text = "";
+          // Every element a test can name, faintly: what there is to pick.
+          for (const node of ax.nodes.values()) {
+            if (!axHasFrame(node) || axIsAnonymous(node) || node._depth === 0) continue;
+            if (node.frame.width > screen.width * 1.05 || node.frame.height > screen.height * 1.05) continue;
+            shapes += rect(node, "ghost");
+          }
+          if (hover && axHasFrame(hover)) shapes += rect(hover, "hover");
+          const place = (x, y, value, cls) => {
+            text += '<span class="rl' + (cls ? " " + cls : "") + '" style="left:' + ((x - screen.x) / screen.width * 100) + "%;top:" + ((y - screen.y) / screen.height * 100) + '%">' + escapeHTML(value) + "</span>";
+          };
+          if (selected && axHasFrame(selected)) {
+            const { x, y, width, height } = selected.frame;
+            const right = screen.x + screen.width, midY = y + height / 2;
+            shapes += rect(selected, "box");
+            if (x > screen.x) { shapes += '<line class="dim" x1="' + screen.x + '" y1="' + midY + '" x2="' + x + '" y2="' + midY + '"/>'; place((screen.x + x) / 2, midY, Math.round(x - screen.x)); }
+            if (x + width < right) { shapes += '<line class="dim" x1="' + (x + width) + '" y1="' + midY + '" x2="' + right + '" y2="' + midY + '"/>'; place((x + width + right) / 2, midY, Math.round(right - x - width)); }
+            // Vertical distance to the element under the pointer, when it is above or below.
+            if (hover && axHasFrame(hover)) {
+              const h = hover.frame, column = x + width * 0.72;
+              if (h.y + h.height <= y) { shapes += '<line class="dim" x1="' + column + '" y1="' + (h.y + h.height) + '" x2="' + column + '" y2="' + y + '"/>'; place(column, (h.y + h.height + y) / 2, Math.round(y - h.y - h.height)); }
+              else if (h.y >= y + height) { shapes += '<line class="dim" x1="' + column + '" y1="' + (y + height) + '" x2="' + column + '" y2="' + h.y + '"/>'; place(column, (y + height + h.y) / 2, Math.round(h.y - y - height)); }
+            }
+            place(x + width / 2, y + height + 4, Math.round(width) + " × " + Math.round(height), "rl-size");
+          }
+          svg.innerHTML = shapes;
+          labels.innerHTML = text;
+        }
+
+        // ---- Loading ----
+
+        let axFetching = false;
+        async function loadAx() {
+          if (axFetching) return;
+          axFetching = true;
+          try {
+            const tree = await apiJSON("/api/v1/ax/tree?raw=1");
+            const firstLoad = !ax.tree;
+            ax.tree = tree;
+            ax.error = "";
+            ax.updatedAt = Date.now();
+            indexAx(tree);
+            if (firstLoad) {
+              // Open the tree down to the first elements that say something.
+              for (const node of ax.nodes.values()) {
+                if (node._depth < 2 || (axIsAnonymous(node) && (node.children || []).length)) ax.expanded.add(node._key);
+              }
+            }
+            if (ax.selected && !ax.nodes.has(ax.selected)) ax.selected = null;
+            updateAxMode();
+            if (inspector.tab === "ax") renderAx();
+          } catch (error) {
+            ax.error = "The tree could not be read: " + error.message + ". Accessibility needs AXe — `simtool doctor` checks it.";
+            if (inspector.tab === "ax") renderAx();
+            throw error;
+          } finally {
+            axFetching = false;
+          }
+        }
+
+        tabHandlers.ax = {
+          show() { renderAx(); updateAxMode(); poller.poke("ax"); },
+          hide() { ax.hover = null; updateAxMode(); }
+        };
+
+        // The status line ages between refreshes.
+        setInterval(() => { if (inspector.tab === "ax" && ax.tree && !ax.error) {
+          const age = Math.round((Date.now() - ax.updatedAt) / 1000);
+          axStatus.textContent = plural(ax.tree.nodeCount || ax.nodes.size, "node", "nodes") + " · " + (age < 2 ? "just now" : age + " s ago");
+        } }, 1000);
+        """#
+
+    static let jsCoreJs = #"""
+        // Page plumbing shared by every part of the viewer: elements, icons, the
+        // status message, toasts, copying, menus, dialogs, stored preferences and the
+        // one scheduler that polls the server.
+
+        const $ = (id) => document.getElementById(id);
+        const app = $("app");
+
+        function escapeHTML(value) {
+          return String(value == null ? "" : value).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+        }
+
+        function icon(name, extraClass) {
+          return '<svg class="ic' + (extraClass ? " " + extraClass : "") + '" aria-hidden="true"><use href="#i-' + name + '"/></svg>';
+        }
+
+        // el("div", { class: "x", onclick: fn }, child, "text") — small, explicit DOM building.
+        function el(tag, attributes, ...children) {
+          const node = document.createElement(tag);
+          for (const [name, value] of Object.entries(attributes || {})) {
+            if (value == null || value === false) continue;
+            if (name.startsWith("on") && typeof value === "function") node.addEventListener(name.slice(2), value);
+            else if (name === "html") node.innerHTML = value;
+            else if (name === "text") node.textContent = value;
+            else node.setAttribute(name, value === true ? "" : String(value));
+          }
+          for (const child of children) {
+            if (child == null || child === false) continue;
+            node.append(child instanceof Node ? child : document.createTextNode(String(child)));
+          }
+          return node;
+        }
+
+        // ---- Stored preferences (per browser; the page works without them) ----
+
+        function stored(key, fallback) {
+          try {
+            const raw = localStorage.getItem("simtool." + key);
+            return raw == null ? fallback : JSON.parse(raw);
+          } catch (_) { return fallback; }
+        }
+
+        function store(key, value) {
+          try { localStorage.setItem("simtool." + key, JSON.stringify(value)); } catch (_) {}
+        }
+
+        // ---- Server ----
+
+        async function api(path, options = {}) {
+          const headers = new Headers(options.headers || {});
+          if (options.body && typeof options.body === "string" && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+          const response = await fetch(path, { ...options, headers });
+          if (!response.ok) {
+            // The server explains failures in {"error": …}; that beats a bare status line.
+            let detail = "";
+            try { detail = (await response.json()).error || ""; } catch (_) {}
+            throw new Error(detail || response.status + " " + response.statusText);
+          }
+          return response;
+        }
+
+        async function apiJSON(path, options) {
+          return (await api(path, options)).json();
+        }
+
+        function postInput(payload) {
+          return api("/api/v1/input", { method: "POST", body: JSON.stringify(payload) });
+        }
+
+        // ---- Status message, toasts, announcements ----
+
+        let messageTimer = null;
+        function setMessage(text, kind) {
+          const cell = $("sbMessage");
+          cell.textContent = text || "";
+          cell.classList.toggle("sb-err", kind === "err");
+          clearTimeout(messageTimer);
+          if (text && kind !== "sticky") messageTimer = setTimeout(() => { if (cell.textContent === text) cell.textContent = ""; }, 8000);
+        }
+
+        let toastTimer = null;
+        function toast(text, options = {}) {
+          const node = $("toast");
+          node.innerHTML = "";
+          node.className = "toast" + (options.error ? " err" : "");
+          node.append(el("span", { html: icon(options.error ? "warn" : options.icon || "check") }), el("span", { text }));
+          if (options.action) {
+            node.append(el("button", { type: "button", text: options.action.label, onclick: () => { node.hidden = true; options.action.run(); } }));
+          }
+          node.hidden = false;
+          clearTimeout(toastTimer);
+          toastTimer = setTimeout(() => { node.hidden = true; if (options.onExpire) options.onExpire(); }, options.duration || 2600);
+          if (options.error) setMessage(text, "err");
+        }
+
+        function fail(what, error) {
+          toast(what + ": " + (error && error.message ? error.message : error), { error: true, duration: 5000 });
+        }
+
+        async function copyText(text, label) {
+          try {
+            await navigator.clipboard.writeText(text);
+          } catch (_) {
+            const area = el("textarea", {});
+            area.value = text;
+            document.body.append(area);
+            area.select();
+            try { document.execCommand("copy"); } catch (_) {}
+            area.remove();
+          }
+          toast(label || "Copied", { icon: "copy" });
+        }
+
+        // ---- Menus (APG menu: arrows move, Enter runs, Esc returns focus) ----
+
+        let menuOpener = null;
+        // items: [{ icon, label, kbd, run, tone: "course"|"danger", disabled }] or "-" for a rule.
+        function openMenu(x, y, items, opener) {
+          const menu = $("menu");
+          menu.innerHTML = "";
+          for (const item of items) {
+            if (item === "-") { menu.append(el("hr", { role: "separator" })); continue; }
+            const button = el("button", { type: "button", role: "menuitem", tabindex: "-1", class: item.tone ? "m-" + item.tone : null, disabled: item.disabled },
+              el("span", { html: icon(item.icon || "chev-r") }), el("span", { text: item.label }), item.kbd ? el("kbd", { text: item.kbd }) : null);
+            button.addEventListener("click", () => { closeMenu(); item.run(); });
+            menu.append(button);
+          }
+          menu.hidden = false;
+          const rect = menu.getBoundingClientRect();
+          menu.style.left = Math.max(6, Math.min(x, innerWidth - rect.width - 6)) + "px";
+          menu.style.top = Math.max(6, Math.min(y, innerHeight - rect.height - 6)) + "px";
+          menuOpener = opener || document.activeElement;
+          const first = menu.querySelector("button:not([disabled])");
+          if (first) first.focus();
+        }
+
+        function closeMenu(restoreFocus) {
+          const menu = $("menu");
+          if (menu.hidden) return false;
+          menu.hidden = true;
+          if (restoreFocus && menuOpener && menuOpener.focus) menuOpener.focus();
+          menuOpener = null;
+          return true;
+        }
+
+        $("menu").addEventListener("keydown", (event) => {
+          const items = [...$("menu").querySelectorAll("button:not([disabled])")];
+          const index = items.indexOf(document.activeElement);
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            const next = items[(index + (event.key === "ArrowDown" ? 1 : items.length - 1)) % items.length];
+            if (next) next.focus();
+          } else if (event.key === "Home" || event.key === "End") {
+            event.preventDefault();
+            const next = event.key === "Home" ? items[0] : items[items.length - 1];
+            if (next) next.focus();
+          } else if (event.key === "Escape" || event.key === "Tab") {
+            event.preventDefault();
+            closeMenu(true);
+          }
+        });
+
+        // A menu for an element that has focus but no pointer: below it.
+        function openMenuAt(element, items) {
+          const rect = element.getBoundingClientRect();
+          openMenu(rect.left + 16, rect.bottom, items, element);
+        }
+
+        // ---- Popover (help) ----
+
+        function openPopover(anchor, html) {
+          const popover = $("popover");
+          popover.innerHTML = html;
+          popover.hidden = false;
+          const rect = anchor.getBoundingClientRect();
+          const box = popover.getBoundingClientRect();
+          popover.style.left = Math.max(6, Math.min(rect.left, innerWidth - box.width - 6)) + "px";
+          popover.style.top = Math.min(rect.bottom + 6, innerHeight - box.height - 6) + "px";
+          anchor.setAttribute("aria-expanded", "true");
+          popover.dataset.anchor = anchor.id || "";
+        }
+
+        function closePopover() {
+          const popover = $("popover");
+          if (popover.hidden) return false;
+          popover.hidden = true;
+          const anchor = popover.dataset.anchor && $(popover.dataset.anchor);
+          if (anchor) anchor.setAttribute("aria-expanded", "false");
+          return true;
+        }
+
+        // ---- Confirmation for what cannot be undone ----
+
+        let dialogResolve = null;
+        function confirmDestructive(title, text, confirmLabel) {
+          $("dialogTitle").textContent = title;
+          $("dialogText").textContent = text;
+          $("dialogConfirm").textContent = confirmLabel || "Delete";
+          $("dialogScrim").hidden = false;
+          const opener = document.activeElement;
+          $("dialogCancel").focus();
+          return new Promise((resolve) => {
+            dialogResolve = (answer) => {
+              $("dialogScrim").hidden = true;
+              dialogResolve = null;
+              if (opener && opener.focus) opener.focus();
+              resolve(answer);
+            };
+          });
+        }
+        $("dialogCancel").addEventListener("click", () => dialogResolve && dialogResolve(false));
+        $("dialogConfirm").addEventListener("click", () => dialogResolve && dialogResolve(true));
+        $("dialogScrim").addEventListener("keydown", (event) => {
+          if (event.key === "Escape") { event.preventDefault(); dialogResolve && dialogResolve(false); }
+          if (event.key === "Tab") {
+            // Keep focus inside the dialog.
+            const buttons = [$("dialogCancel"), $("dialogConfirm")];
+            const index = buttons.indexOf(document.activeElement);
+            event.preventDefault();
+            buttons[(index + 1) % 2].focus();
+          }
+        });
+
+        // ---- One scheduler for every poll ----
+        // Tasks run on their own interval while their `when()` holds; nothing runs on a
+        // hidden tab. A failing task backs off (up to 8×) instead of hammering a server
+        // that is down, and reports to `onHealth` so the page can say so.
+
+        function createPoller(onHealth) {
+          const tasks = [];
+          let timer = null;
+          let failures = 0;
+
+          function due(task, now) {
+            return task.when() && !task.running && now >= task.nextAt;
+          }
+
+          async function run(task) {
+            task.running = true;
+            try {
+              await task.fn();
+              task.backoff = 1;
+              if (failures) { failures = 0; onHealth(true); }
+            } catch (error) {
+              task.backoff = Math.min(8, task.backoff * 2);
+              failures += 1;
+              onHealth(false, error);
+            } finally {
+              task.running = false;
+              const interval = typeof task.interval === "function" ? task.interval() : task.interval;
+              task.nextAt = performance.now() + interval * task.backoff;
+            }
+          }
+
+          function tick() {
+            timer = null;
+            if (document.hidden) return;
+            const now = performance.now();
+            for (const task of tasks) if (due(task, now)) run(task);
+            timer = setTimeout(tick, 250);
+          }
+
+          document.addEventListener("visibilitychange", () => {
+            if (!document.hidden && !timer) tick();
+          });
+
+          return {
+            add(name, interval, fn, when) {
+              tasks.push({ name, interval, fn, when: when || (() => true), nextAt: 0, backoff: 1, running: false });
+              if (!timer && !document.hidden) timer = setTimeout(tick, 0);
+            },
+            // Run a task now (a user action changed what it would fetch).
+            poke(name) {
+              const task = tasks.find((candidate) => candidate.name === name);
+              if (task && !task.running) run(task);
+            }
+          };
+        }
+
+        // ---- Resizable split handles (pointer + keyboard) ----
+
+        // value() → the share, 0–100, of the pane the handle sizes: what a screen reader announces.
+        function wireSplitter(handle, { axis, onMove, onEnd, step, value }) {
+          let drag = false;
+          handle.setAttribute("aria-valuemin", "0");
+          handle.setAttribute("aria-valuemax", "100");
+          const announce = () => { if (value) handle.setAttribute("aria-valuenow", String(Math.round(value()))); };
+          handle.syncValue = announce;
+          handle.addEventListener("pointerdown", (event) => {
+            drag = true;
+            handle.classList.add("active");
+            try { handle.setPointerCapture(event.pointerId); } catch (_) {}
+            event.preventDefault();
+          });
+          handle.addEventListener("pointermove", (event) => { if (drag) onMove(axis === "x" ? event.clientX : event.clientY, event); });
+          const end = (event) => {
+            if (!drag) return;
+            drag = false;
+            handle.classList.remove("active");
+            try { handle.releasePointerCapture(event.pointerId); } catch (_) {}
+            if (onEnd) onEnd();
+            announce();
+          };
+          handle.addEventListener("pointerup", end);
+          handle.addEventListener("pointercancel", end);
+          handle.addEventListener("keydown", (event) => {
+            const direction = { ArrowLeft: -1, ArrowUp: -1, ArrowRight: 1, ArrowDown: 1 }[event.key];
+            if (!direction) return;
+            event.preventDefault();
+            step(direction, event.shiftKey ? 80 : 20);
+            if (onEnd) onEnd();
+            announce();
+          });
+        }
+
+        // JSON with keys and literals told apart; everything escaped first.
+        function highlightJSON(text) {
+          if (!text) return '<span class="muted">No body</span>';
+          let pretty = String(text);
+          try { pretty = JSON.stringify(JSON.parse(text), null, 2); } catch (_) { return escapeHTML(text); }
+          return escapeHTML(pretty)
+            .replace(/(&quot;(?:[^&]|&(?!quot;))*?&quot;)(\s*:)/g, '<span class="j-key">$1</span>$2')
+            .replace(/(:\s*)(&quot;(?:[^&]|&(?!quot;))*?&quot;)/g, '$1<span class="j-str">$2</span>')
+            .replace(/(:\s*|^\s*|\[\s*|,\s*)(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)(?=\s*[,\]}\n]|$)/gm, '$1<span class="j-num">$2</span>')
+            .replace(/(:\s*|^\s*|\[\s*|,\s*)(true|false|null)(?=\s*[,\]}\n]|$)/gm, '$1<span class="j-lit">$2</span>');
+        }
+
+        function kvHTML(entries) {
+          const pairs = Object.entries(entries || {}).filter(([, value]) => value != null && value !== "");
+          if (!pairs.length) return '<p class="muted small">None</p>';
+          return '<dl class="kv">' + pairs.map(([key, value]) => "<dt>" + escapeHTML(key) + "</dt><dd>" + escapeHTML(value) + "</dd>").join("") + "</dl>";
+        }
+
+        // Text a person selected inside an element, if any.
+        function selectionInside(element) {
+          const selection = window.getSelection();
+          if (!selection || selection.isCollapsed) return "";
+          return element.contains(selection.anchorNode) ? selection.toString() : "";
+        }
+
+        function hasTextSelection() {
+          const selection = window.getSelection();
+          return !!selection && !selection.isCollapsed;
+        }
+
+        // Fills a pane that polling keeps re-rendering. `key` names what the pane
+        // shows: a new key always renders, from the top. For the same key the markup
+        // is swapped only when it changed and never under text the person selected in
+        // it; the focused control and the scroll position survive the swap.
+        const PANE_FOCUS_KEYS = ["path", "offset", "dtab", "act"];
+        function patchPane(node, key, html) {
+          const same = node.paneKey === key;
+          if (same && node.paneHTML === html) return false;
+          if (same && selectionInside(node)) return false;
+          const active = document.activeElement;
+          let focus = null;
+          if (same && active && node.contains(active)) {
+            const name = PANE_FOCUS_KEYS.find((candidate) => active.dataset[candidate] != null);
+            if (name) focus = "[data-" + name + '="' + CSS.escape(active.dataset[name]) + '"]';
+          }
+          const scroll = same ? node.scrollTop : 0;
+          const scrolls = same ? [...node.querySelectorAll(".dbody")].map((element) => element.scrollTop) : [];
+          node.innerHTML = html;
+          node.paneKey = key;
+          node.paneHTML = html;
+          node.scrollTop = scroll;
+          node.querySelectorAll(".dbody").forEach((element, index) => { if (scrolls[index]) element.scrollTop = scrolls[index]; });
+          if (focus) { const again = node.querySelector(focus); if (again) again.focus({ preventScroll: true }); }
+          return true;
+        }
+
+        function isEditableTarget(target) {
+          const element = target instanceof Element ? target : target && target.parentElement;
+          return !!(element && element.closest("input, textarea, select, [contenteditable]:not([contenteditable='false'])"));
+        }
+        """#
+
+    static let jsDeviceJs = #"""
+        // Everything that acts on the device: the toolbar, the clipboard and Photos,
+        // the live finger on the screen, wheel scrolling, and the Mac keyboard.
+
+        const deviceInfo = { name: "", udid: "", app: "" };
+
+        // ---- Toolbar actions: each one confirms what it did ----
+
+        async function deviceAction(label, payload, done) {
+          try {
+            await postInput(payload);
+            toast(done || label);
+          } catch (error) {
+            fail(label + " failed", error);
+          }
+        }
+
+        function pressHome() { deviceAction("Home", { action: "button", name: "home" }, "Home"); }
+        function pressShake() { deviceAction("Shake", { action: "shake" }, "Shake sent"); }
+        function toggleSoftwareKeyboard() { deviceAction("Software keyboard", { action: "software-keyboard" }, "Software keyboard toggled"); }
+
+        async function terminateApp() {
+          if (!deviceInfo.app) { toast("No app attached — start the server with --app <bundle-id>", { error: true }); return; }
+          deviceAction("Terminate", { action: "terminate" }, deviceInfo.app + " terminated");
+        }
+
+        async function relaunchApp() {
+          if (!deviceInfo.app) { toast("No app attached — start the server with --app <bundle-id>", { error: true }); return; }
+          deviceAction("Relaunch", { action: "launch" }, deviceInfo.app + " relaunched");
+        }
+
+        function screenshotName() {
+          const now = new Date();
+          const date = now.getFullYear() + "-" + pad2(now.getMonth() + 1) + "-" + pad2(now.getDate());
+          const time = pad2(now.getHours()) + "." + pad2(now.getMinutes()) + "." + pad2(now.getSeconds());
+          const device = (deviceInfo.name || "simulator").replace(/[^A-Za-z0-9._-]+/g, "-");
+          return "simtool-" + device + "-" + date + "-" + time + ".png";
+        }
+
+        async function screenshotBlob() {
+          return (await api("/api/v1/screenshot")).blob();
+        }
+
+        async function saveScreenshot() {
+          try {
+            const blob = await screenshotBlob();
+            const url = URL.createObjectURL(blob);
+            const name = screenshotName();
+            const link = el("a", { href: url, download: name });
+            link.click();
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+            toast("Saved " + name, { icon: "camera" });
+          } catch (error) {
+            fail("Screenshot failed", error);
+          }
+        }
+
+        async function copyScreenshot() {
+          try {
+            if (!window.ClipboardItem || !navigator.clipboard || !navigator.clipboard.write) throw new Error("this browser cannot put images on the clipboard");
+            await navigator.clipboard.write([new ClipboardItem({ "image/png": screenshotBlob() })]);
+            toast("Screenshot copied", { icon: "copy" });
+          } catch (error) {
+            fail("Copy screenshot failed", error);
+          }
+        }
+
+        // ---- Mac clipboard → simulator ----
+        // The server puts the text or image on the simulator's clipboard and presses
+        // ⌘V there, so any text arrives intact (typing reaches only US-keyboard characters).
+
+        let pasteInFlight = false;
+        async function runPaste(label, send, failureHint) {
+          if (pasteInFlight) return;
+          pasteInFlight = true;
+          setMessage(label);
+          try {
+            const result = await send();
+            toast(result && result.stdout ? result.stdout : "Pasted", { icon: "paste" });
+          } catch (error) {
+            fail("Paste failed", { message: error.message + (failureHint || "") });
+          } finally {
+            pasteInFlight = false;
+          }
+        }
+
+        function pasteIntoSimulator(text) {
+          if (!text) { toast("The clipboard holds no text or image", { error: true }); return; }
+          runPaste("Pasting…", async () => (await postInput({ action: "paste", text })).json());
+        }
+
+        async function postFile(path, blob) {
+          const headers = { "Content-Type": blob.type || "application/octet-stream" };
+          if (blob.name) headers["X-SimTool-Filename"] = encodeURIComponent(blob.name);
+          return (await api(path, { method: "POST", headers, body: blob })).json();
+        }
+
+        function pasteImageIntoSimulator(image) {
+          runPaste("Pasting image…", () => postFile("/api/v1/input/paste-image", image), " — or add it to Photos from the screen's menu");
+        }
+
+        // Text when the clipboard has some, else its image; null when it holds neither.
+        async function readClipboard() {
+          if (!navigator.clipboard.read) {
+            const text = await navigator.clipboard.readText();
+            return text ? { text } : null;
+          }
+          let image = null;
+          for (const item of await navigator.clipboard.read()) {
+            if (item.types.includes("text/plain")) {
+              const text = await (await item.getType("text/plain")).text();
+              if (text) return { text };
+            }
+            const imageType = item.types.find((type) => type.startsWith("image/"));
+            if (imageType && !image) image = await item.getType(imageType);
+          }
+          return image ? { image } : null;
+        }
+
+        async function pasteFromClipboard() {
+          if (!navigator.clipboard || !(navigator.clipboard.read || navigator.clipboard.readText)) {
+            toast("This page cannot read the clipboard — press ⌘V instead", { error: true });
+            return;
+          }
+          let content;
+          try { content = await readClipboard(); } catch (_) {
+            toast("Clipboard access was denied — press ⌘V instead", { error: true });
+            return;
+          }
+          if (content && content.image) pasteImageIntoSimulator(content.image);
+          else pasteIntoSimulator(content ? content.text : "");
+        }
+
+        // ---- Photos: the clipboard image or files from the Mac, where a photo picker offers them ----
+
+        let photosInFlight = false;
+        async function addToPhotos(files) {
+          if (photosInFlight || !files.length) return;
+          photosInFlight = true;
+          try {
+            for (const [index, file] of files.entries()) {
+              setMessage(files.length > 1 ? "Adding to Photos… " + (index + 1) + "/" + files.length : "Adding to Photos…");
+              await postFile("/api/v1/photos", file);
+            }
+            toast(files.length > 1 ? "Added " + files.length + " files to Photos" : "Added to Photos", { icon: "photo" });
+          } catch (error) {
+            fail("Add to Photos failed", error);
+          } finally {
+            photosInFlight = false;
+          }
+        }
+
+        async function addClipboardImageToPhotos() {
+          let image = null;
+          try {
+            if (navigator.clipboard && navigator.clipboard.read) {
+              for (const item of await navigator.clipboard.read()) {
+                const imageType = item.types.find((type) => type.startsWith("image/"));
+                if (imageType) { image = await item.getType(imageType); break; }
+              }
+            }
+          } catch (_) {
+            toast("Clipboard access was denied — use Add files to Photos…", { error: true });
+            return;
+          }
+          if (image) addToPhotos([image]);
+          else toast("The clipboard holds no image — use Add files to Photos…", { error: true });
+        }
+
+        $("photosFile").addEventListener("change", () => {
+          const files = Array.from($("photosFile").files || []);
+          $("photosFile").value = "";
+          addToPhotos(files);
+        });
+
+        function deviceMenuItems() {
+          return [
+            { icon: "paste", label: "Paste", kbd: "⌘V", run: pasteFromClipboard },
+            { icon: "photo", label: "Add clipboard image to Photos", run: addClipboardImageToPhotos },
+            { icon: "photo", label: "Add files to Photos…", run: () => $("photosFile").click() },
+            "-",
+            { icon: "camera", label: "Save screenshot", kbd: "⌘S", run: saveScreenshot },
+            { icon: "copy", label: "Copy screenshot", run: copyScreenshot }
+          ];
+        }
+
+        // ⌘V anywhere on the page outside an editable field pastes into the simulator;
+        // the paste event hands over the clipboard without a permission prompt.
+        document.addEventListener("paste", (event) => {
+          if (isEditableTarget(event.target)) return;
+          event.preventDefault();
+          const data = event.clipboardData;
+          const text = data ? data.getData("text/plain") : "";
+          const image = data ? Array.from(data.files || []).find((file) => file.type.startsWith("image/")) : null;
+          // A Finder copy of an image file brings the file name as its text; the file is what was meant.
+          if (image && (!text || text === image.name)) pasteImageIntoSimulator(image);
+          else pasteIntoSimulator(text);
+        });
+
+        // ---- The live finger ----
+        // Down, every move and up stream to the device as they happen; nothing waits for a reply.
+
+        const touchStream = createTouchStream({
+          url: (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/api/v1/input/stream"
+        });
+        const LONG_PRESS_MS = 500;   // UIKit's long-press delay: the ring says it has passed
+        const HOLD_SLOP_PX = 8;      // CSS px of movement that rules a long press out
+        const WHEEL_IDLE_MS = 100;   // a wheel scroll lifts its finger after this much silence
+        const WHEEL_INSET = 0.08;    // wheel fingers stay this far inside, clear of the edge gestures
+        let touch = null;            // the live finger(s) under the pointer
+        let axPickPointer = null;    // a press in pick mode, which never touches the device
+        let wheel = null;            // the finger a wheel or trackpad scroll is dragging
+
+        const clamp01 = (value) => Math.min(1, Math.max(0, value));
+
+        function canvasRatio(event) {
+          const rect = canvas.getBoundingClientRect();
+          return { x: clamp01((event.clientX - rect.left) / rect.width), y: clamp01((event.clientY - rect.top) / rect.height) };
+        }
+
+        // Alt adds a second finger mirrored through the screen center, so spreading
+        // or circling the pointer pinches or rotates. Alt+Shift keeps the pair's
+        // offset instead: a two-finger pan.
+        function secondFinger(mode, point, offset) {
+          if (mode === "pinch") return { x: clamp01(1 - point.x), y: clamp01(1 - point.y) };
+          if (mode === "pan2") return { x: clamp01(point.x + offset.x), y: clamp01(point.y + offset.y) };
+          return null;
+        }
+
+        const touchDots = [0, 1].map(() => {
+          const dot = el("div", { class: "touch-dot", hidden: true });
+          $("touchLayer").append(dot);
+          return dot;
+        });
+
+        function showDots(first, second, state) {
+          [first, second].forEach((point, index) => {
+            const dot = touchDots[index];
+            if (!point) { dot.hidden = true; return; }
+            dot.hidden = false;
+            dot.className = "touch-dot" + (state ? " " + state : "");
+            dot.style.left = point.x * 100 + "%";
+            dot.style.top = point.y * 100 + "%";
+          });
+        }
+
+        function hideDots() { for (const dot of touchDots) dot.hidden = true; }
+
+        // Touches only go out while the screen is live: clicks on a frozen frame
+        // would land on whatever the device shows now.
+        function canTouch() {
+          if (app.dataset.mode === "replay") return false;
+          if (screenState.connection !== "live") {
+            setMessage("Not connected — touches are not sent until the stream is back", "err");
+            return false;
+          }
+          return screenState.width > 0;
+        }
+
+        function endTouch() {
+          if (!touch) return;
+          const ending = touch;
+          touch = null;
+          clearTimeout(ending.holdTimer);
+          touchStream.up(ending.point, ending.second);
+          hideDots();
+        }
+
+        canvas.addEventListener("pointerdown", (event) => {
+          if (event.button !== 0) return;
+          // A click that dismisses a menu must not also tap the device.
+          if (closeMenu()) { event.preventDefault(); return; }
+          if (keyboardBridge.enabled && isEditableTarget(document.activeElement)) document.activeElement.blur();
+          if (axPickActive()) {
+            try { canvas.setPointerCapture(event.pointerId); } catch (_) {}
+            axPickPointer = event.pointerId;
+            event.preventDefault();
+            return;
+          }
+          if (!canTouch()) return;
+          try { canvas.setPointerCapture(event.pointerId); } catch (_) {}
+          event.preventDefault();
+          endWheelDrag();
+          endTouch();
+          const point = canvasRatio(event);
+          const mode = event.altKey ? (event.shiftKey ? "pan2" : "pinch") : "one";
+          const second = mode === "one" ? null : { x: clamp01(1 - point.x), y: clamp01(1 - point.y) };
+          touch = {
+            pointerId: event.pointerId, mode, point, second,
+            offset: second ? { x: second.x - point.x, y: second.y - point.y } : null,
+            startX: event.clientX, startY: event.clientY, held: false, holdTimer: null
+          };
+          touchStream.down(point, second);
+          showDots(point, second, "");
+          touch.holdTimer = setTimeout(() => {
+            if (!touch) return;
+            touch.held = true;
+            showDots(touch.point, touch.second, "held");
+          }, LONG_PRESS_MS);
+        });
+
+        canvas.addEventListener("pointermove", (event) => {
+          $("readPointer").textContent = pointerReadout(event.clientX, event.clientY);
+          if (axPickActive()) { axHoverAt(event.clientX, event.clientY); return; }
+          if (!touch) {
+            // With Alt held, show where the two fingers would land.
+            if (event.altKey && !wheel && screenState.width) {
+              const point = canvasRatio(event);
+              showDots(point, event.shiftKey ? null : secondFinger("pinch", point), "preview");
+            } else if (!wheel) {
+              hideDots();
+            }
+            return;
+          }
+          if (event.pointerId !== touch.pointerId) return;
+          touch.point = canvasRatio(event);
+          touch.second = secondFinger(touch.mode, touch.point, touch.offset);
+          if (touch.holdTimer && Math.hypot(event.clientX - touch.startX, event.clientY - touch.startY) > HOLD_SLOP_PX) {
+            clearTimeout(touch.holdTimer);
+            touch.holdTimer = null;
+          }
+          touchStream.move(touch.point, touch.second);
+          showDots(touch.point, touch.second, touch.held ? "held" : "");
+        });
+
+        canvas.addEventListener("pointerup", (event) => {
+          try { canvas.releasePointerCapture(event.pointerId); } catch (_) {}
+          if (axPickPointer === event.pointerId) {
+            axPickPointer = null;
+            axPickAt(event.clientX, event.clientY);
+            return;
+          }
+          if (!touch || event.pointerId !== touch.pointerId) return;
+          // The finger lifts where the pointer is now.
+          touch.point = canvasRatio(event);
+          touch.second = secondFinger(touch.mode, touch.point, touch.offset);
+          endTouch();
+        });
+
+        for (const type of ["pointercancel", "lostpointercapture"]) {
+          canvas.addEventListener(type, (event) => {
+            if (axPickPointer === event.pointerId) axPickPointer = null;
+            if (touch && event.pointerId === touch.pointerId) endTouch();
+          });
+        }
+        canvas.addEventListener("pointerleave", () => {
+          $("readPointer").textContent = "";
+          if (!touch && !wheel) hideDots();
+          if (axPickActive()) axHoverAt(null);
+        });
+        // A finger never outlives the page's attention.
+        window.addEventListener("blur", () => { endTouch(); endWheelDrag(); });
+        document.addEventListener("visibilitychange", () => { if (document.hidden) { endTouch(); endWheelDrag(); } });
+
+        // iOS drops synthetic scroll events, so a wheel or trackpad scroll drags a
+        // finger instead: down under the cursor, moved by each (inverted) delta,
+        // put back down near the cursor when it runs into an edge, lifted after
+        // 100 ms of quiet. The trackpad's own momentum carries the content.
+        canvas.addEventListener("wheel", (event) => {
+          if (!screenState.width) return;
+          event.preventDefault();
+          if (event.ctrlKey || touch || axPickActive() || !canTouch()) return;
+          const rect = canvas.getBoundingClientRect();
+          const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? rect.height : 1;
+          const dx = -event.deltaX * unit / rect.width;
+          const dy = -event.deltaY * unit / rect.height;
+          const anchor = () => {
+            const point = canvasRatio(event);
+            return { x: Math.min(1 - WHEEL_INSET, Math.max(WHEEL_INSET, point.x)), y: Math.min(1 - WHEEL_INSET, Math.max(WHEEL_INSET, point.y)) };
+          };
+          if (!wheel) {
+            wheel = { point: anchor(), timer: null };
+            touchStream.down(wheel.point);
+          }
+          let next = { x: wheel.point.x + dx, y: wheel.point.y + dy };
+          const inside = (value) => value >= WHEEL_INSET / 2 && value <= 1 - WHEEL_INSET / 2;
+          if (!inside(next.x) || !inside(next.y)) {
+            touchStream.up(wheel.point);
+            const start = anchor();
+            touchStream.down(start);
+            next = { x: clamp01(start.x + dx), y: clamp01(start.y + dy) };
+          }
+          wheel.point = next;
+          touchStream.move(next);
+          showDots(next, null, "wheel");
+          clearTimeout(wheel.timer);
+          wheel.timer = setTimeout(endWheelDrag, WHEEL_IDLE_MS);
+        }, { passive: false });
+
+        function endWheelDrag() {
+          if (!wheel) return;
+          const ending = wheel;
+          wheel = null;
+          clearTimeout(ending.timer);
+          touchStream.up(ending.point);
+          if (!touch) hideDots();
+        }
+
+        // Right-click on the screen: the element's menu while picking, the clipboard menu otherwise.
+        canvas.addEventListener("contextmenu", (event) => {
+          event.preventDefault();
+          if (axPickActive()) { axMenuAt(event.clientX, event.clientY); return; }
+          openMenu(event.clientX, event.clientY, deviceMenuItems(), canvas);
+        });
+
+        // ---- Mac keyboard → simulator ----
+        // Off, the keyboard is the page's: SimTool's shortcuts and the browser's.
+        // On, keys go to the device, except into SimTool's own text fields, ⇧⌘K
+        // (which turns the mode off — Esc is a key iOS uses), ⌘K (Simulator.app's
+        // Toggle Software Keyboard), ⌘V (the paste event pastes the Mac clipboard
+        // as text), SimTool's own chords, every key while a SimTool menu, dialog or
+        // the palette is open, and Esc while a popover is.
+        const keyboardBridge = createKeyboardBridge({
+          send: (message) => touchStream.key(message),
+          isMac: /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent)
+        });
+        let hardwareKeyboardRequests = Promise.resolve();
+
+        const isKeyboardModeChord = (event) => event.code === "KeyK" && event.shiftKey && (event.metaKey || event.ctrlKey) && !event.altKey;
+        const isSoftKeyboardChord = (event) => event.code === "KeyK" && event.metaKey && !event.shiftKey && !event.ctrlKey && !event.altKey;
+        const isPasteChord = (event) => event.code === "KeyV" && event.metaKey && !event.ctrlKey && !event.altKey;
+
+        function modalOpen() {
+          return !$("menu").hidden || !$("paletteScrim").hidden || !$("dialogScrim").hidden;
+        }
+
+        function popupOpen() {
+          return modalOpen() || !$("popover").hidden;
+        }
+
+        function updateKeyboardIndicator() {
+          const on = keyboardBridge.enabled;
+          const live = on && document.hasFocus() && !isEditableTarget(document.activeElement);
+          $("keyboardToggle").setAttribute("aria-pressed", String(on));
+          app.classList.toggle("keys-on", on);
+          app.classList.toggle("keys-paused", on && !live);
+          $("sbKeys").textContent = !on ? "Keys → page" : live ? "Keys → device · ⇧⌘K releases" : "Keys paused · click the screen";
+        }
+
+        function setKeyboardMode(on) {
+          if (keyboardBridge.enabled === on) return;
+          keyboardBridge.setEnabled(on);
+          updateKeyboardIndicator();
+          // Simulator.app's Connect Hardware Keyboard goes with it, in the order the toggle flips.
+          hardwareKeyboardRequests = hardwareKeyboardRequests.then(async () => {
+            try {
+              await postInput({ action: "hardware-keyboard", enabled: on });
+            } catch (error) {
+              fail("Hardware keyboard " + (on ? "connect" : "disconnect") + " failed", error);
+            }
+          });
+        }
+
+        function keepFromPage(event) { event.preventDefault(); event.stopPropagation(); }
+
+        // Capture phase: ahead of the page's own key handlers.
+        window.addEventListener("keydown", (event) => {
+          if (isKeyboardModeChord(event)) {
+            keepFromPage(event);
+            if (!event.repeat) setKeyboardMode(!keyboardBridge.enabled);
+            return;
+          }
+          if (!keyboardBridge.enabled || isEditableTarget(event.target)) return;
+          if (modalOpen()) return;
+          if (event.code === "Escape" && popupOpen()) return;
+          if (isPasteChord(event)) return;
+          if (isViewerChord(event)) return;
+          if (isSoftKeyboardChord(event)) {
+            keepFromPage(event);
+            if (!event.repeat) toggleSoftwareKeyboard();
+            return;
+          }
+          if (keyboardBridge.keydown(event)) keepFromPage(event);
+        }, true);
+        window.addEventListener("keyup", (event) => {
+          if (event.code === "CapsLock" && isEditableTarget(event.target)) return;
+          if (keyboardBridge.keyup(event)) keepFromPage(event);
+        }, true);
+        window.addEventListener("focus", updateKeyboardIndicator);
+        window.addEventListener("blur", () => { keyboardBridge.releaseAll(); updateKeyboardIndicator(); });
+        document.addEventListener("visibilitychange", () => { if (document.hidden) keyboardBridge.releaseAll(); });
+        document.addEventListener("focusin", (event) => {
+          if (isEditableTarget(event.target)) keyboardBridge.releaseAll();
+          updateKeyboardIndicator();
+        });
+        document.addEventListener("focusout", () => setTimeout(updateKeyboardIndicator, 0));
+
+        // ---- Wiring ----
+
+        $("homeButton").addEventListener("click", pressHome);
+        $("screenshotButton").addEventListener("click", saveScreenshot);
+        $("shakeButton").addEventListener("click", pressShake);
+        $("softKeyboardButton").addEventListener("click", toggleSoftwareKeyboard);
+        $("terminateButton").addEventListener("click", terminateApp);
+        $("relaunchButton").addEventListener("click", relaunchApp);
+        $("keyboardToggle").addEventListener("click", () => setKeyboardMode(!keyboardBridge.enabled));
+        $("sbUdid").addEventListener("click", () => { if (deviceInfo.udid) copyText(deviceInfo.udid, "UDID copied"); });
+
+        // Device actions act on the live device: off while it is unreachable or a recording plays.
+        function updateDeviceButtons() {
+          const usable = screenState.connection === "live" && app.dataset.mode !== "replay";
+          for (const id of ["homeButton", "screenshotButton", "shakeButton", "softKeyboardButton", "terminateButton", "relaunchButton"]) $(id).disabled = !usable;
+        }
+
+        onConnection((state) => {
+          updateDeviceButtons();
+          if (state !== "live") { endTouch(); endWheelDrag(); }
+        });
+        """#
+
+    static let jsInspectorJs = #"""
+        // The inspector frame: tabs, the splitter between the device and the
+        // inspector, the filter field every tab shares, app launches, and the
+        // split detail under each list.
+
+        const TABS = ["network", "logs", "state", "ax", "tests"];
+        const inspector = { tab: stored("tab", "network"), open: stored("inspectorOpen", true), attachedApp: "", configKnown: false };
+        const tabHandlers = {};   // tab → { show(), hide() }
+
+        function setTab(tab, { focus } = {}) {
+          if (!TABS.includes(tab)) tab = "network";
+          const previous = inspector.tab;
+          inspector.tab = tab;
+          store("tab", tab);
+          for (const name of TABS) {
+            const button = $("tab-" + name);
+            const active = name === tab;
+            button.setAttribute("aria-selected", String(active));
+            button.tabIndex = active ? 0 : -1;
+            $("panel-" + name).hidden = !active;
+          }
+          if (focus) $("tab-" + tab).focus();
+          if (previous !== tab && tabHandlers[previous] && tabHandlers[previous].hide) tabHandlers[previous].hide();
+          if (tabHandlers[tab] && tabHandlers[tab].show) tabHandlers[tab].show();
+          closeMenu();
+          closePopover();
+        }
+
+        $("tabs").addEventListener("click", (event) => {
+          const button = event.target.closest("[role=tab]");
+          if (button) setTab(button.dataset.tab);
+        });
+        $("tabs").addEventListener("keydown", (event) => {
+          const index = TABS.indexOf(inspector.tab);
+          let next = null;
+          if (event.key === "ArrowRight") next = TABS[(index + 1) % TABS.length];
+          if (event.key === "ArrowLeft") next = TABS[(index + TABS.length - 1) % TABS.length];
+          if (event.key === "Home") next = TABS[0];
+          if (event.key === "End") next = TABS[TABS.length - 1];
+          if (next) { event.preventDefault(); setTab(next, { focus: true }); }
+        });
+
+        // The tab's mark is red for failures; with none, amber for client-side problems
+        // (Network's 4xx and gRPC client codes) — the colour the rows use.
+        function setCount(tab, count, errors, warnings) {
+          const countNode = $("count-" + tab);
+          if (countNode) countNode.textContent = count ? formatCount(count) : "";
+          const errorNode = $("err-" + tab);
+          if (errorNode) {
+            const shown = errors || warnings || 0;
+            errorNode.hidden = !shown;
+            errorNode.classList.toggle("count-warn", !errors && !!warnings);
+            errorNode.textContent = shown ? formatCount(shown) : "";
+            errorNode.title = errors ? plural(errors, "failure", "failures") : warnings ? plural(warnings, "client error", "client errors") : "";
+          }
+        }
+
+        function setInspectorOpen(open) {
+          inspector.open = open;
+          store("inspectorOpen", open);
+          $("workspace").classList.toggle("no-inspector", !open);
+          $("inspectorToggle").setAttribute("aria-pressed", String(open));
+          if (tabHandlers[inspector.tab]) (open ? tabHandlers[inspector.tab].show : tabHandlers[inspector.tab].hide || (() => {}))();
+          requestAnimationFrame(fitDevice);
+        }
+        $("inspectorToggle").addEventListener("click", () => setInspectorOpen(!inspector.open));
+
+        // ---- Layout: side by side when there is room, stacked in a narrow pane ----
+
+        const STACK_BELOW = 760;
+        function layoutWorkspace() {
+          const workspace = $("workspace");
+          const rect = workspace.getBoundingClientRect();
+          const stacked = rect.width < STACK_BELOW;
+          workspace.classList.toggle("stacked", stacked);
+          $("splitter").setAttribute("aria-orientation", stacked ? "horizontal" : "vertical");
+          if (!stacked) {
+            const saved = stored("stageWidth", null);
+            // By default the stage is as wide as the device needs at full height; the inspector takes the rest.
+            const availableHeight = rect.height - 28 - 40 - (app.dataset.mode === "replay" ? 76 : 0);
+            const aspect = screenState.width ? screenState.width / screenState.height : 402 / 874;
+            const ideal = Math.round(availableHeight * aspect + 120);
+            const width = Math.max(300, Math.min(saved || ideal, rect.width - 380));
+            workspace.style.setProperty("--stage-w", width + "px");
+          } else {
+            const savedHeight = stored("stageHeight", null);
+            workspace.style.setProperty("--stage-h", savedHeight ? Math.max(200, Math.min(savedHeight, rect.height - 200)) + "px" : "45%");
+          }
+          if ($("splitter").syncValue) $("splitter").syncValue();
+        }
+        new ResizeObserver(layoutWorkspace).observe($("workspace"));
+
+        wireSplitter($("splitter"), {
+          axis: "x",
+          onMove(position, event) {
+            const workspace = $("workspace");
+            const rect = workspace.getBoundingClientRect();
+            if (workspace.classList.contains("stacked")) {
+              const height = Math.max(200, Math.min(rect.height - 200, event.clientY - rect.top));
+              workspace.style.setProperty("--stage-h", height + "px");
+              $("splitter").dataset.size = height;
+            } else {
+              const width = Math.max(300, Math.min(rect.width - 380, position - rect.left));
+              workspace.style.setProperty("--stage-w", width + "px");
+              $("splitter").dataset.size = width;
+            }
+          },
+          onEnd() {
+            const size = Number($("splitter").dataset.size);
+            if (size) store($("workspace").classList.contains("stacked") ? "stageHeight" : "stageWidth", size);
+          },
+          step(direction, amount) {
+            const workspace = $("workspace");
+            const stacked = workspace.classList.contains("stacked");
+            const current = stacked ? $("stage").getBoundingClientRect().height : $("stage").getBoundingClientRect().width;
+            const rect = workspace.getBoundingClientRect();
+            const next = current + direction * amount;
+            if (stacked) workspace.style.setProperty("--stage-h", Math.max(200, Math.min(rect.height - 200, next)) + "px");
+            else workspace.style.setProperty("--stage-w", Math.max(300, Math.min(rect.width - 380, next)) + "px");
+            $("splitter").dataset.size = next;
+          },
+          value() {
+            const workspace = $("workspace").getBoundingClientRect(), stage = $("stage").getBoundingClientRect();
+            return $("workspace").classList.contains("stacked") ? stage.height / workspace.height * 100 : stage.width / workspace.width * 100;
+          }
+        });
+        // ---- Split detail under a list ----
+
+        function wireDetailSplit(panel, handle) {
+          wireSplitter(handle, {
+            axis: "y",
+            onMove(position) {
+              const rect = panel.getBoundingClientRect();
+              const height = Math.max(120, Math.min(rect.height - 140, rect.bottom - position));
+              panel.style.setProperty("--detail-h", height + "px");
+            },
+            onEnd() {
+              const height = parseInt(getComputedStyle(panel).getPropertyValue("--detail-h"), 10);
+              if (height) store("detailHeight", height);
+            },
+            step(direction, amount) {
+              const detail = panel.querySelector(".detail");
+              const rect = panel.getBoundingClientRect();
+              const height = Math.max(120, Math.min(rect.height - 140, detail.getBoundingClientRect().height - direction * amount));
+              panel.style.setProperty("--detail-h", height + "px");
+            },
+            value() { return panel.querySelector(".detail").getBoundingClientRect().height / panel.getBoundingClientRect().height * 100; }
+          });
+          const saved = stored("detailHeight", null);
+          if (saved) panel.style.setProperty("--detail-h", saved + "px");
+        }
+
+        // The standard frame of a list tab: toolbar, guide words, list, splitter, detail.
+        function buildListPanel(tab, { toolbar, listRole, listLabel }) {
+          const panel = $("panel-" + tab);
+          const ptool = el("div", { class: "ptool" });
+          for (const node of toolbar) ptool.append(node);
+          const guide = el("div", { class: "guide", "aria-live": "off" });
+          const list = el("div", { class: "list", role: listRole || "listbox", "aria-label": listLabel });
+          const listWrap = el("div", { class: "list-wrap" }, list);
+          const handle = el("div", { class: "hsplit", role: "separator", tabindex: "0", "aria-orientation": "horizontal", "aria-label": "Resize the details" });
+          const detail = el("div", { class: "detail", role: "region", "aria-label": "Details" });
+          panel.append(ptool, guide, listWrap, handle, detail);
+          panel.classList.add("no-detail");
+          wireDetailSplit(panel, handle);
+          return { panel, ptool, guide, list, listWrap, detail };
+        }
+
+        function showDetail(panel, visible) { panel.classList.toggle("no-detail", !visible); }
+
+        // ---- The filter field: live text plus include/exclude chips, per tab ----
+
+        const FILTER_HELP = {
+          network: '<p><b>Type</b> to filter by name, host, path, status.</p><p><b>Enter</b> keeps the text as an include chip — show only matches; <b>-text Enter</b> makes an exclude chip.</p><p><b>Right-click</b> a request to show or hide its path.</p>',
+          logs: '<p><b>Type</b> to filter messages; <b>subsystem:text</b> (or category, process, level, message) matches one field.</p><p><b>Enter</b> keeps it as an include chip; <b>-text Enter</b> excludes.</p><p><b>Select text</b> in a line and right-click to show or hide it.</p>',
+          state: '<p><b>Type</b> to filter models by name and their keys and values.</p>',
+          ax: '<p><b>Type</b> to filter by identifier, label, role; matches keep their ancestors visible.</p>',
+          tests: '<p><b>Type</b> to filter tests and runs by name, file, reference, verdict.</p>'
+        };
+
+        function createFilter(tab, { placeholder, fields, onChange }) {
+          // Earlier viewers kept every tab's chips under one key, simtool.filterChips.
+          const legacy = stored("filterChips", null);
+          const chips = stored("chips." + tab, null) || (legacy && Array.isArray(legacy[tab]) ? legacy[tab] : []);
+          const state = { text: "", chips: chips.filter((chip) => chip && (chip.kind === "include" || chip.kind === "exclude") && typeof chip.term === "string" && chip.term.trim()) };
+          const chipsNode = el("span", { class: "chips" });
+          const input = el("input", { type: "search", placeholder, "aria-label": "Filter " + tab, autocomplete: "off", spellcheck: "false", translate: "no" });
+          const field = el("label", { class: "filter" }, el("span", { html: icon("search", "ic-sm") }), chipsNode, input, el("kbd", { class: "filter-kbd", text: "/" }));
+          const help = el("button", { class: "tb-btn", type: "button", id: "help-" + tab, "aria-label": "Filter help", "aria-expanded": "false", "aria-haspopup": "dialog", html: icon("help") });
+
+          function save() { store("chips." + tab, state.chips); }
+          function renderChips() {
+            chipsNode.innerHTML = "";
+            state.chips.forEach((chip, index) => {
+              const label = (chip.field ? chip.field + ":" : "") + chip.term;
+              const node = el("span", { class: "chip chip-" + chip.kind, title: (chip.kind === "include" ? "Showing only " : "Hiding ") + label },
+                el("span", { text: (chip.kind === "exclude" ? "−" : "") + label }));
+              node.append(el("button", { type: "button", "aria-label": "Remove filter " + label, html: icon("close", "ic-xs"),
+                onclick: (event) => { event.preventDefault(); state.chips.splice(index, 1); save(); renderChips(); onChange(); } }));
+              chipsNode.append(node);
+            });
+          }
+          input.addEventListener("input", () => { state.text = input.value; onChange(); });
+          input.addEventListener("keydown", (event) => {
+            if (event.key === "Enter") {
+              const text = input.value.trim();
+              if (!text) return;
+              event.preventDefault();
+              const kind = text.startsWith("-") ? "exclude" : "include";
+              const parsed = parseFieldTerm(kind === "exclude" ? text.slice(1) : text, fields || null);
+              state.chips = withChip(state.chips, kind, parsed.term, parsed.field);
+              input.value = "";
+              state.text = "";
+              save(); renderChips(); onChange();
+            } else if (event.key === "Backspace" && !input.value && state.chips.length) {
+              state.chips.pop(); save(); renderChips(); onChange();
+            } else if (event.key === "Escape" && input.value) {
+              event.preventDefault(); event.stopPropagation();
+              input.value = ""; state.text = ""; onChange();
+            }
+          });
+          help.addEventListener("click", (event) => {
+            event.stopPropagation();
+            if (!$("popover").hidden && $("popover").dataset.anchor === help.id) closePopover();
+            else openPopover(help, FILTER_HELP[tab]);
+          });
+          renderChips();
+          return {
+            field, help, input,
+            get chips() { return state.chips; },
+            get text() { return state.text.trim().toLowerCase(); },
+            get active() { return state.chips.length + (state.text.trim() ? 1 : 0); },
+            addChip(kind, term, fieldName) { state.chips = withChip(state.chips, kind, term, fieldName); save(); renderChips(); onChange(); },
+            clear() { state.chips = []; state.text = ""; input.value = ""; save(); renderChips(); onChange(); },
+            focus() { input.focus(); input.select(); }
+          };
+        }
+
+        // ---- App launches, shared by Network and Logs ----
+
+        let launchesById = {};
+        async function loadLaunches() {
+          const payload = await apiJSON("/api/v1/launches");
+          const map = {};
+          for (const launch of payload.launches || []) map[launch.launchId] = launch;
+          launchesById = map;
+        }
+
+        function newestLaunchId() {
+          const ids = Object.keys(launchesById).map(Number);
+          return ids.length ? Math.max(...ids) : null;
+        }
+
+        // marks: [{ count, tone: "err" | "warn", one, many }] — shown after the count when non-zero.
+        function launchGroupHTML(launchId, items, collapsed, noun, marks) {
+          const launch = launchesById[launchId];
+          const time = launch ? formatClock(launch.startedAt) : "";
+          const current = Number(launchId) === newestLaunchId();
+          return icon(collapsed ? "chev-r" : "chev-d") +
+            "<b>App launch" + (time ? " " + escapeHTML(time) : "") + "</b>" +
+            (current ? '<span class="gr-now">current</span>' : "") +
+            (launch && launch.pid != null ? "<span>pid " + escapeHTML(launch.pid) + "</span>" : "") +
+            '<span class="gr-meta">' + plural(items.length, noun, noun + "s") +
+            (marks || []).filter((mark) => mark.count).map((mark) => ' · <span class="st-' + mark.tone + '">' + plural(mark.count, mark.one, mark.many) + "</span>").join("") + "</span>";
+        }
+
+        // ---- No app attached: Network, Logs and State need SimTool to launch the app ----
+
+        function noAppPanel(tab) {
+          const port = location.port ? " --port " + location.port : "";
+          const device = deviceInfo.udid ? " --device " + deviceInfo.udid : "";
+          const serveCommand = "simtool serve --app <bundle-id>" + device + port;
+          const what = { network: "requests", logs: "log lines", state: "model state" }[tab];
+          const node = el("div", { class: "noapp" });
+          node.innerHTML = "<h2>No app attached</h2>" +
+            "<p>The " + what + " come from your app, so SimTool has to launch it: that attaches the network and state loggers and scopes log capture to it. Accessibility and Tests work without an attached app.</p>";
+          for (const [title, command] of [["From your project (recommended)", "simtool run --web"], ["Or restart this server for an installed app", serveCommand]]) {
+            const line = el("div", { class: "cmdline" }, el("span", { class: "cmd-title", text: title }), el("code", { text: command, translate: "no" }));
+            line.append(el("button", { class: "btn btn-sm", type: "button", html: icon("copy", "ic-sm") + "Copy", onclick: () => copyText(command, "Command copied") }));
+            node.append(line);
+          }
+          return node;
+        }
+
+        // Guide words: the first and last time in view, how many are shown, and whether the list still moves.
+        function guideHTML(parts, live) {
+          return parts.filter(Boolean).map((part) => "<span>" + part + "</span>").join("") + (live || "");
+        }
+
+        function liveTag(word, paused) {
+          if (screenState.connection === "reconnecting" || screenState.connection === "offline") return '<span class="stale">● server unreachable — showing the last data</span>';
+          if (paused) return '<span class="stale">❚❚ paused</span>';
+          return '<span class="live">● ' + word + "</span>";
+        }
+        """#
+
+    static let jsKeyboardJs = #"""
         // Mac keyboard → simulator. While on, keys reach the device as a hardware
         // keyboard's, by physical key (KeyboardEvent.code): the device's own
         // layout picks the character, as in Simulator.app. The device repeats a
@@ -75,7 +1668,2623 @@ enum WebViewerAssets {
         }
         """#
 
-    static let touchJs = #"""
+    static let jsListJs = #"""
+        // A keyed list: rows are created once per key and updated in place, so focus,
+        // text selection, hover and scroll survive every poll. One row at a time is in
+        // the tab order (roving tabindex); ↑/↓/Home/End move the selection, Enter
+        // activates it, Esc clears it, Shift+F10 or the menu key opens its menu.
+        //
+        // options:
+        //   key(item) → string, version(item) → string (re-render when it changes),
+        //   render(item, row) fills the row element, rowClass(item) → extra classes,
+        //   group(item) → group id or null, renderGroup(id, items, collapsed) → { html, label },
+        //   onSelect(key, item), onActivate(key, item), onMenu(key, item, x, y, row),
+        //   onGroupMenu(id, x, y, button), follow: true (or a function) to stick to the newest row
+        //   while the list sits at its end, header: element kept first (sticky column headers),
+        //   empty() → element shown when no rows, exists(key) → whether a selected row that a
+        //   filter hides still exists (its selection then survives the filter).
+
+        function createList(container, options) {
+          const rows = new Map();     // key → { element, version, item }
+          const groups = new Map();   // group id → button
+          const collapsed = new Set(options.collapsed || []);
+          let items = [];
+          let visible = [];           // items whose rows are shown, in order
+          let selectedKey = null;
+          let emptyNode = null;
+
+          container.setAttribute("tabindex", "-1");
+          if (options.header) container.append(options.header);
+
+          function atBottom() {
+            return container.scrollHeight - container.scrollTop - container.clientHeight <= 24;
+          }
+
+          function rowFor(item) {
+            const key = options.key(item);
+            const version = options.version ? options.version(item) : "";
+            let entry = rows.get(key);
+            if (!entry) {
+              const element = document.createElement("div");
+              element.className = "row";
+              element.setAttribute("role", options.rowRole || "option");
+              element.tabIndex = -1;
+              element.dataset.key = key;
+              entry = { element, version: null, item };
+              rows.set(key, entry);
+            }
+            entry.item = item;
+            if (entry.version !== version) {
+              entry.version = version;
+              entry.element.className = "row " + (options.rowClass ? options.rowClass(item) : "");
+              options.render(item, entry.element);
+            }
+            entry.element.setAttribute("aria-selected", String(key === selectedKey));
+            return entry.element;
+          }
+
+          function groupFor(id, groupItems) {
+            let button = groups.get(id);
+            if (!button) {
+              button = document.createElement("button");
+              button.type = "button";
+              button.className = "group-row";
+              button.dataset.group = id;
+              groups.set(id, button);
+            }
+            const isCollapsed = collapsed.has(id);
+            const rendered = options.renderGroup(id, groupItems, isCollapsed);
+            if (button.dataset.html !== rendered) {
+              button.innerHTML = rendered;
+              button.dataset.html = rendered;
+            }
+            button.setAttribute("aria-expanded", String(!isCollapsed));
+            return button;
+          }
+
+          function update(nextItems) {
+            const follow = (typeof options.follow === "function" ? options.follow() : options.follow) && atBottom();
+            const scrollTop = container.scrollTop;
+            items = nextItems;
+            visible = [];
+            const desired = [];
+            if (options.header) desired.push(options.header);
+            if (!items.length) {
+              emptyNode = options.empty ? options.empty() : null;
+              if (emptyNode) desired.push(emptyNode);
+            } else {
+              let currentGroup;
+              let groupItems = [];
+              for (let index = 0; index < items.length; index++) {
+                const item = items[index];
+                const groupId = options.group ? options.group(item) : null;
+                if (groupId != null && groupId !== currentGroup) {
+                  currentGroup = groupId;
+                  groupItems = items.filter((candidate) => options.group(candidate) === groupId);
+                  desired.push(groupFor(groupId, groupItems));
+                }
+                if (groupId != null && collapsed.has(groupId)) continue;
+                visible.push(item);
+                desired.push(rowFor(item));
+              }
+            }
+            // Reconcile: move only what is out of place, drop what is gone.
+            const keep = new Set(desired);
+            for (const child of [...container.children]) if (!keep.has(child)) child.remove();
+            let cursor = container.firstElementChild;
+            for (const node of desired) {
+              if (node === cursor) { cursor = cursor.nextElementSibling; continue; }
+              container.insertBefore(node, cursor);
+            }
+            const liveKeys = new Set(items.map(options.key));
+            for (const key of [...rows.keys()]) if (!liveKeys.has(key) && key !== selectedKey) rows.delete(key);
+            if (selectedKey != null && !liveKeys.has(selectedKey) && !(options.exists && options.exists(selectedKey))) {
+              rows.delete(selectedKey);
+              selectedKey = null;
+              if (options.onSelect) options.onSelect(null, null);
+            }
+            syncTabStop();
+            if (follow) container.scrollTop = container.scrollHeight;
+            else if (container.scrollTop !== scrollTop) container.scrollTop = scrollTop;
+          }
+
+          function syncTabStop() {
+            const selectedEntry = selectedKey != null && rows.get(selectedKey);
+            const fallback = visible.length ? rows.get(options.key(visible[0])) : null;
+            const stop = (selectedEntry && selectedEntry.element.isConnected) ? selectedEntry.element : fallback && fallback.element;
+            for (const entry of rows.values()) entry.element.tabIndex = entry.element === stop ? 0 : -1;
+            container.tabIndex = stop ? -1 : 0;
+          }
+
+          function select(key, { focus, scroll, quiet } = {}) {
+            const previous = selectedKey != null && rows.get(selectedKey);
+            if (previous) previous.element.setAttribute("aria-selected", "false");
+            selectedKey = key;
+            const entry = key != null && rows.get(key);
+            if (entry) {
+              entry.element.setAttribute("aria-selected", "true");
+              if (scroll !== false) entry.element.scrollIntoView({ block: "nearest" });
+              if (focus) entry.element.focus({ preventScroll: true });
+            }
+            syncTabStop();
+            if (!quiet && options.onSelect) options.onSelect(key, entry ? entry.item : null);
+          }
+
+          function move(delta) {
+            if (!visible.length) return;
+            const keys = visible.map(options.key);
+            let index = keys.indexOf(selectedKey);
+            if (index < 0) index = delta > 0 ? -1 : keys.length;
+            const next = Math.max(0, Math.min(keys.length - 1, index + delta));
+            select(keys[next], { focus: true });
+          }
+
+          container.addEventListener("click", (event) => {
+            const groupButton = event.target.closest(".group-row");
+            if (groupButton && container.contains(groupButton)) {
+              toggleGroup(groupButton.dataset.group);
+              return;
+            }
+            const row = event.target.closest(".row[data-key]");
+            if (!row || !container.contains(row) || hasTextSelection()) return;
+            if (event.target.closest("button, a, input, summary")) return;
+            select(row.dataset.key, { focus: true, scroll: false });
+          });
+
+          container.addEventListener("dblclick", (event) => {
+            const row = event.target.closest(".row[data-key]");
+            if (row && options.onActivate) { const entry = rows.get(row.dataset.key); options.onActivate(row.dataset.key, entry && entry.item); }
+          });
+
+          container.addEventListener("contextmenu", (event) => {
+            const groupButton = event.target.closest(".group-row");
+            if (groupButton && options.onGroupMenu) {
+              event.preventDefault();
+              options.onGroupMenu(groupButton.dataset.group, event.clientX, event.clientY, groupButton);
+              return;
+            }
+            const row = event.target.closest(".row[data-key]");
+            if (!row || !options.onMenu) return;
+            event.preventDefault();
+            if (row.dataset.key !== selectedKey) select(row.dataset.key, { scroll: false });
+            const entry = rows.get(row.dataset.key);
+            options.onMenu(row.dataset.key, entry && entry.item, event.clientX, event.clientY, row);
+          });
+
+          container.addEventListener("keydown", (event) => {
+            if (event.target.closest("input, textarea")) return;
+            const onGroup = event.target.closest && event.target.closest(".group-row");
+            switch (event.key) {
+              case "ArrowDown": event.preventDefault(); move(1); break;
+              case "ArrowUp": event.preventDefault(); move(-1); break;
+              case "PageDown": event.preventDefault(); move(10); break;
+              case "PageUp": event.preventDefault(); move(-10); break;
+              case "Home": event.preventDefault(); move(-Infinity); break;
+              case "End": event.preventDefault(); move(Infinity); break;
+              case "Enter":
+                if (onGroup) return;
+                if (selectedKey != null && options.onActivate) { event.preventDefault(); options.onActivate(selectedKey, rows.get(selectedKey).item); }
+                break;
+              case "Escape":
+                if (selectedKey != null) { event.preventDefault(); event.stopPropagation(); select(null); container.focus(); }
+                break;
+              case "ArrowLeft": case "ArrowRight":
+                if (options.group && selectedKey != null) {
+                  const entry = rows.get(selectedKey);
+                  const id = entry && options.group(entry.item);
+                  if (id != null && (event.key === "ArrowLeft") !== collapsed.has(id)) { event.preventDefault(); toggleGroup(id); }
+                }
+                break;
+              case "ContextMenu": case "F10":
+                if (event.key === "F10" && !event.shiftKey) return;
+                if (selectedKey != null && options.onMenu && rows.get(selectedKey).element.isConnected) {
+                  event.preventDefault();
+                  const entry = rows.get(selectedKey);
+                  const rect = entry.element.getBoundingClientRect();
+                  options.onMenu(selectedKey, entry.item, rect.left + 24, rect.bottom, entry.element);
+                }
+                break;
+            }
+          });
+
+          function toggleGroup(id) {
+            if (collapsed.has(id)) collapsed.delete(id); else collapsed.add(id);
+            if (options.onCollapse) options.onCollapse([...collapsed]);
+            update(items);
+          }
+
+          return {
+            update,
+            select,
+            move,
+            toggleGroup,
+            get selectedKey() { return selectedKey; },
+            get selectedItem() { const entry = selectedKey != null && rows.get(selectedKey); return entry ? entry.item : null; },
+            get visibleItems() { return visible; },
+            rowElement(key) { const entry = rows.get(key); return entry ? entry.element : null; },
+            // Focus without choosing anything: the selected row, or the list itself, where ↓ selects.
+            focus() {
+              const entry = selectedKey != null && rows.get(selectedKey);
+              if (entry && entry.element.isConnected) entry.element.focus();
+              else container.focus();
+            },
+            // Re-render every row (a setting that changes how rows look, not what they hold).
+            invalidate() { for (const entry of rows.values()) entry.version = null; update(items); },
+            scrollToEnd() { container.scrollTop = container.scrollHeight; },
+            atBottom
+          };
+        }
+
+        // Column headers that sort; clicking the sorted column flips the direction.
+        function createSortHeader(className, columns, state, onChange) {
+          const header = el("div", { class: "thead " + className, role: "row" });
+          function render() {
+            header.innerHTML = "";
+            for (const column of columns) {
+              const cell = el("span", { class: "cell " + (column.class || ""), role: "columnheader",
+                "aria-sort": state.key === column.key ? (state.dir > 0 ? "ascending" : "descending") : (column.sort ? "none" : null) });
+              if (column.sort) {
+                const button = el("button", { type: "button", class: state.key === column.key ? "sorted" : null }, column.label);
+                if (state.key === column.key) button.insertAdjacentHTML("beforeend", icon(state.dir > 0 ? "chev-u" : "chev-d", "ic-xs"));
+                button.addEventListener("click", () => {
+                  if (state.key === column.key) state.dir = -state.dir; else { state.key = column.key; state.dir = column.defaultDir || 1; }
+                  render();
+                  onChange();
+                });
+                cell.append(button);
+              } else {
+                cell.textContent = column.label;
+              }
+              header.append(cell);
+            }
+          }
+          render();
+          return header;
+        }
+        """#
+
+    static let jsLogicJs = #"""
+        // Pure viewer logic: no DOM, no network, no timers. Everything here is
+        // exercised on its own in JavaScriptCore (WebViewerLogicTests), so the page
+        // can only disagree with the tests where it touches the browser.
+
+        // ---- Time, sizes, counts ----
+
+        function pad2(value) { return String(value).padStart(2, "0"); }
+
+        // One clock for the whole viewer: local time, HH:MM:SS, milliseconds when asked.
+        // Anything unparseable shows as it came, so a bad timestamp is visible rather than hidden.
+        function formatClock(value, withMilliseconds) {
+          if (value == null || value === "") return "";
+          const date = value instanceof Date ? value : new Date(typeof value === "number" ? value * 1000 : value);
+          if (isNaN(date.getTime())) return String(value);
+          const clock = pad2(date.getHours()) + ":" + pad2(date.getMinutes()) + ":" + pad2(date.getSeconds());
+          return withMilliseconds ? clock + "." + String(date.getMilliseconds()).padStart(3, "0") : clock;
+        }
+
+        // "20 Oct 12:31" — a day no reader can take for a month.
+        function formatDayTime(value) {
+          const date = value instanceof Date ? value : new Date(value);
+          if (isNaN(date.getTime())) return "";
+          const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+          return date.getDate() + " " + months[date.getMonth()] + " " + pad2(date.getHours()) + ":" + pad2(date.getMinutes());
+        }
+
+        function formatAgo(value, now) {
+          const date = value instanceof Date ? value : new Date(value);
+          if (isNaN(date.getTime())) return "";
+          const seconds = Math.max(0, Math.round(((now == null ? Date.now() : now) - date.getTime()) / 1000));
+          if (seconds < 45) return "just now";
+          const minutes = Math.round(seconds / 60);
+          if (minutes < 60) return minutes + " min ago";
+          const hours = Math.round(minutes / 60);
+          if (hours < 24) return hours + " h ago";
+          return formatDayTime(date);
+        }
+
+        function formatDuration(milliseconds) {
+          if (milliseconds == null || !isFinite(milliseconds)) return "—";
+          if (milliseconds < 1000) return Math.round(milliseconds) + " ms";
+          const seconds = milliseconds / 1000;
+          return (seconds < 10 ? seconds.toFixed(2) : seconds < 100 ? seconds.toFixed(1) : Math.round(seconds)) + " s";
+        }
+
+        function formatBytes(bytes) {
+          if (bytes == null || !isFinite(bytes)) return "—";
+          if (bytes < 1024) return bytes + " B";
+          if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " kB";
+          return (bytes / 1024 / 1024).toFixed(1) + " MB";
+        }
+
+        // Seconds as m:ss for recordings.
+        function formatOffset(seconds) {
+          if (!isFinite(seconds) || seconds < 0) seconds = 0;
+          return Math.floor(seconds / 60) + ":" + pad2(Math.floor(seconds % 60));
+        }
+
+        function formatCount(value) {
+          return Number(value || 0).toLocaleString("en-US");
+        }
+
+        function plural(count, one, many) {
+          return formatCount(count) + " " + (count === 1 ? one : many);
+        }
+
+        // "com.apple.CoreSimulator.SimRuntime.iOS-26-4" → "iOS 26.4"
+        function runtimeName(identifier) {
+          if (!identifier) return "";
+          const match = /SimRuntime\.([A-Za-z]+)-(\d+(?:-\d+)*)$/.exec(identifier);
+          if (!match) return identifier;
+          return match[1] + " " + match[2].replace(/-/g, ".");
+        }
+
+        // ---- Network ----
+
+        const GRPC_CODES = ["OK", "CANCELLED", "UNKNOWN", "INVALID_ARGUMENT", "DEADLINE_EXCEEDED", "NOT_FOUND", "ALREADY_EXISTS",
+          "PERMISSION_DENIED", "RESOURCE_EXHAUSTED", "FAILED_PRECONDITION", "ABORTED", "OUT_OF_RANGE", "UNIMPLEMENTED",
+          "INTERNAL", "UNAVAILABLE", "DATA_LOSS", "UNAUTHENTICATED"];
+        // Codes that say the caller asked for something the server would not do — the
+        // app's own problem, not the server's.
+        const GRPC_CLIENT_CODES = [1, 3, 5, 6, 7, 9, 10, 11, 16];
+
+        function grpcCodeName(code) {
+          const number = Number(code);
+          return Number.isInteger(number) && GRPC_CODES[number] ? GRPC_CODES[number] : String(code);
+        }
+
+        // Severity is "ok", "info" (neither good nor bad: redirects, not-modified),
+        // "warn" (the client's request was refused), "err" (the server or transport
+        // failed), or "pending" (no answer yet).
+        function networkStatus(event) {
+          if (event.error) {
+            return { text: "Failed", severity: "err", title: event.error.message || "The request failed" };
+          }
+          const response = event.response;
+          if (event.protocol === "grpc") {
+            if (!response || response.grpcStatusCode == null || response.grpcStatusCode === "") {
+              return { text: "Pending", severity: "pending", title: "No status yet" };
+            }
+            const code = Number(response.grpcStatusCode);
+            const name = grpcCodeName(response.grpcStatusCode);
+            const severity = code === 0 ? "ok" : GRPC_CLIENT_CODES.indexOf(code) >= 0 ? "warn" : "err";
+            const title = response.grpcStatusMessage ? name + " — " + response.grpcStatusMessage : name;
+            return { text: code === 0 ? "OK" : name, severity, title, code };
+          }
+          if (!response || response.statusCode == null) {
+            return { text: "Pending", severity: "pending", title: "No response yet" };
+          }
+          const status = response.statusCode;
+          const severity = status >= 500 ? "err" : status >= 400 ? "warn" : status >= 300 ? "info" : "ok";
+          return { text: String(status), severity, title: "HTTP " + status, code: status };
+        }
+
+        // 4xx, client gRPC codes and failed calls: what the Problems filter keeps.
+        function isNetworkProblem(event) {
+          return ["err", "warn"].includes(networkStatus(event).severity);
+        }
+
+        // The marks a list of calls carries: failures in red, client-side problems
+        // (4xx, UNAUTHENTICATED…) in amber — the colours their rows use.
+        function networkMarks(events) {
+          let failed = 0, problems = 0;
+          for (const event of events) {
+            const severity = networkStatus(event).severity;
+            if (severity === "err") failed++;
+            else if (severity === "warn") problems++;
+          }
+          return [{ count: failed, tone: "err", one: "failed", many: "failed" }, { count: problems, tone: "warn", one: "client error", many: "client errors" }];
+        }
+
+        function requestPath(event) {
+          const request = event.request || {};
+          if (event.protocol === "grpc") {
+            return request.path || "/" + [request.grpcService, request.grpcMethod].filter(Boolean).join("/");
+          }
+          return request.url || request.path || "";
+        }
+
+        function lastPathSegment(rawPath) {
+          if (!rawPath) return "";
+          let path = String(rawPath);
+          const cut = path.search(/[?#]/);
+          if (cut >= 0) path = path.slice(0, cut);
+          const segments = path.replace(/\/+$/, "").split("/").filter(Boolean);
+          return segments.length ? segments[segments.length - 1] : path;
+        }
+
+        // What a row calls a request: the method name for gRPC, the last path segment for HTTP.
+        function requestName(event) {
+          const request = event.request || {};
+          if (event.protocol === "grpc") return request.grpcMethod || lastPathSegment(requestPath(event)) || "call";
+          return lastPathSegment(requestPath(event)) || request.host || "request";
+        }
+
+        // Where it went: the service for gRPC, host + path for HTTP.
+        function requestWhere(event) {
+          const request = event.request || {};
+          if (event.protocol === "grpc") return request.grpcService || request.grpcAuthority || "";
+          const raw = requestPath(event);
+          try {
+            const url = new URL(raw, "http://localhost");
+            return (request.host || url.host) + url.pathname + url.search;
+          } catch (_) {
+            return raw;
+          }
+        }
+
+        // The path a filter chip keeps: no host, no query; gRPC keeps service/method.
+        function chipPathForEvent(event) {
+          const raw = requestPath(event);
+          if (!raw || event.protocol === "grpc") return raw;
+          try { return new URL(raw, "http://localhost").pathname; } catch (_) { return raw; }
+        }
+
+        function networkSize(event) {
+          const response = event.response || {};
+          const size = event.protocol === "grpc" ? response.messageByteCount : response.bodyByteCount;
+          return size == null ? null : size;
+        }
+
+        function networkHaystack(event) {
+          const request = event.request || {};
+          const status = networkStatus(event);
+          return [requestPath(event), request.method, request.host, status.text, status.title, event.protocol,
+            event.mocked ? "mocked " + (event.mockRuleId || "") : ""].filter(Boolean).join(" ").toLowerCase();
+        }
+
+        function shellQuote(value) {
+          return "'" + String(value).replace(/'/g, "'\\''") + "'";
+        }
+
+        function curlCommand(event) {
+          const request = event.request || {};
+          const parts = ["curl"];
+          const method = (request.method || "GET").toUpperCase();
+          if (method !== "GET") parts.push("-X " + method);
+          parts.push(shellQuote(request.url || ("https://" + (request.host || "") + (request.path || ""))));
+          for (const [name, value] of Object.entries(request.headers || {})) parts.push("-H " + shellQuote(name + ": " + value));
+          if (request.bodyPreview) parts.push("--data-raw " + shellQuote(request.bodyPreview));
+          return parts.join(" \\\n  ");
+        }
+
+        function grpcurlCommand(event) {
+          const request = event.request || {};
+          const parts = ["grpcurl"];
+          for (const [name, value] of Object.entries(request.metadata || {})) parts.push("-H " + shellQuote(name + ": " + value));
+          if (request.bodyPreview) parts.push("-d " + shellQuote(request.bodyPreview));
+          parts.push(request.grpcAuthority || request.host || "<host:port>");
+          parts.push((request.grpcService || "") + "/" + (request.grpcMethod || lastPathSegment(requestPath(event))));
+          return parts.join(" \\\n  ");
+        }
+
+        // A `mocks:` entry for a YAML test that answers this request the way it was
+        // answered now — the fastest way from "this call misbehaved" to a test that stages it.
+        function mockYaml(event) {
+          const target = event.protocol === "grpc"
+            ? "*/" + (event.request && event.request.grpcMethod ? event.request.grpcMethod : lastPathSegment(requestPath(event)))
+            : chipPathForEvent(event);
+          const lines = ["mocks:", "  - method: " + JSON.stringify(target)];
+          const status = networkStatus(event);
+          const body = event.response && event.response.bodyPreview;
+          if (event.protocol === "grpc" && status.severity !== "ok" && status.severity !== "pending") {
+            lines.push("    error: " + grpcCodeName(event.response.grpcStatusCode).toLowerCase());
+          } else if (body) {
+            let compact = body;
+            try { compact = JSON.stringify(JSON.parse(body)); } catch (_) { compact = JSON.stringify(body); }
+            lines.push("    body: " + compact);
+          } else {
+            lines.push("    body: {}");
+          }
+          return lines.join("\n");
+        }
+
+        // ---- Filters: live text + include/exclude chips ----
+
+        // "field:text" scopes a term to one field instead of the whole haystack.
+        // Only fields from the allowed list count; anything else (say, an URL's
+        // "https:") stays a plain substring term.
+        function parseFieldTerm(text, allowedFields) {
+          const colon = text.indexOf(":");
+          if (colon > 0 && allowedFields) {
+            const field = text.slice(0, colon).trim().toLowerCase();
+            const term = text.slice(colon + 1).trim();
+            if (term && allowedFields.indexOf(field) >= 0) return { field, term };
+          }
+          return { field: null, term: text };
+        }
+
+        function termMatches(term, field, hay, fields) {
+          const needle = String(term).toLowerCase();
+          if (field) return !!fields && (fields[field] || "").indexOf(needle) >= 0;
+          return hay.indexOf(needle) >= 0;
+        }
+
+        // Exclude chips win over include chips; include chips are OR'd ("show only
+        // these"); the live input text is an extra substring filter on top.
+        function matchesFilters(hay, chips, query, fields, queryField) {
+          for (const chip of chips) {
+            if (chip.kind === "exclude" && termMatches(chip.term, chip.field, hay, fields)) return false;
+          }
+          const includes = chips.filter((chip) => chip.kind === "include");
+          if (includes.length && !includes.some((chip) => termMatches(chip.term, chip.field, hay, fields))) return false;
+          return !query || termMatches(query, queryField, hay, fields);
+        }
+
+        // Adding a chip replaces any chip with the same field+term (either kind),
+        // so an exclude flips an identical include instead of stacking next to it.
+        function chipKey(field, term) {
+          return (field || "") + ":" + String(term).toLowerCase();
+        }
+
+        function withChip(chips, kind, term, field) {
+          const trimmed = String(term).trim();
+          if (!trimmed) return chips;
+          const key = chipKey(field, trimmed);
+          const next = chips.filter((chip) => chipKey(chip.field, chip.term) !== key);
+          next.push(field ? { kind, term: trimmed, field } : { kind, term: trimmed });
+          return next;
+        }
+
+        // ---- Logs ----
+
+        const LOG_LEVELS = ["Debug", "Info", "Default", "Error", "Fault"];
+
+        // Severity comes from the level the log carries — never from words in the
+        // message: "error:0" in an Info line is not an error.
+        function logLevel(entry) {
+          const level = String(entry.level || "").toLowerCase();
+          for (const known of LOG_LEVELS) if (known.toLowerCase() === level) return known;
+          return "Default";
+        }
+
+        function isLogError(entry) {
+          const level = logLevel(entry);
+          return level === "Error" || level === "Fault";
+        }
+
+        function logFields(entry) {
+          return {
+            message: String(entry.message || "").toLowerCase(),
+            subsystem: String(entry.subsystem || "").toLowerCase(),
+            category: String(entry.category || "").toLowerCase(),
+            process: String(entry.process || "").toLowerCase(),
+            level: logLevel(entry).toLowerCase()
+          };
+        }
+
+        function logLine(entry) {
+          const head = [formatClock(entry.timestamp, true), logLevel(entry), entry.subsystem].filter(Boolean).join(" ");
+          return head + ": " + (entry.message || "");
+        }
+
+        // ---- State ----
+
+        // Nested models that are themselves tracked carry this marker in their
+        // snapshot object; the viewer folds their standalone history into the
+        // parent's diff and never renders the key itself.
+        const MODEL_ID_KEY = "$modelId";
+
+        function diffStateValues(prev, next, path, out) {
+          if (JSON.stringify(prev) === JSON.stringify(next)) return out;
+          const isPlainObject = (value) => value && typeof value === "object" && !Array.isArray(value);
+          if (isPlainObject(prev) && isPlainObject(next)) {
+            const keys = Object.keys(prev).concat(Object.keys(next).filter((key) => !(key in prev)));
+            for (const key of keys) {
+              if (key === MODEL_ID_KEY) continue;
+              diffStateValues(prev[key], next[key], path ? path + "." + key : key, out);
+            }
+            return out;
+          }
+          out.push({ path, before: prev, after: next });
+          return out;
+        }
+
+        function collectEmbedded(value, ownerId, out) {
+          if (!value || typeof value !== "object") return;
+          if (Array.isArray(value)) { for (const item of value) collectEmbedded(item, ownerId, out); return; }
+          const marker = value[MODEL_ID_KEY];
+          if (typeof marker === "string" && marker !== ownerId) out[marker] = ownerId;
+          for (const key of Object.keys(value)) if (key !== MODEL_ID_KEY) collectEmbedded(value[key], ownerId, out);
+        }
+
+        // childId → parentId for models embedded (expanded) inside another live
+        // tracked model's snapshot, from { modelId: latestEvent }. A child resurfaces
+        // on its own once its parent deallocates.
+        function embeddedModelIds(latestByModel) {
+          const embedded = {};
+          for (const id of Object.keys(latestByModel)) {
+            const event = latestByModel[id];
+            if (event.deallocated) continue;
+            collectEmbedded(event.snapshot, id, embedded);
+          }
+          return embedded;
+        }
+
+        function stateValueText(value) {
+          return value === undefined ? "—" : JSON.stringify(value);
+        }
+
+        // ---- Tests ----
+
+        const VERDICT_WORDS = {
+          satisfied: { bug: "Bug not reproduced", feature: "Confirmed", none: "Claim holds" },
+          unsatisfied: { bug: "Bug reproduced", feature: "Not confirmed", none: "Claim does not hold" },
+          inconclusive: { bug: "Inconclusive", feature: "Inconclusive", none: "Inconclusive" },
+          infra: { bug: "Infra — cannot be trusted", feature: "Infra — cannot be trusted", none: "Infra — cannot be trusted" }
+        };
+        const STATUS_WORDS = { running: "Running", passed: "Passed", failed: "Failed", interrupted: "Interrupted", stopped: "Stopped" };
+
+        // What a run means, in words: the verdict for kind-aware tests, the bare status otherwise.
+        function outcomeOf(session) {
+          if (session.verdict && VERDICT_WORDS[session.verdict]) {
+            const words = VERDICT_WORDS[session.verdict];
+            return { tone: session.verdict, text: words[session.kind] || words.none };
+          }
+          return { tone: session.status, text: STATUS_WORDS[session.status] || String(session.status || "") };
+        }
+
+        // "✓ 2/5 Wait for label …" → { mark: "passed", index: 2, total: 5, text: "Wait for label …" }
+        function parseStepText(text) {
+          const match = /^([✓✗◼●])\s*(\d+)\/(\d+)\s+(.*)$/.exec(String(text || ""));
+          if (!match) return { mark: "note", text: String(text || "") };
+          const marks = { "✓": "passed", "✗": "failed", "◼": "stopped", "●": "running" };
+          return { mark: marks[match[1]], index: Number(match[2]), total: Number(match[3]), text: match[4] };
+        }
+
+        // Split a step's text into its short heading and the detail after " — ".
+        function splitStep(text) {
+          const t = String(text || "").trim();
+          const dash = t.indexOf(" — ");
+          if (dash < 0) return { head: t, tail: "" };
+          return { head: t.slice(0, dash).trim(), tail: t.slice(dash + 3).trim() };
+        }
+
+        // Video offset of an entry. The raw offset is the wall-clock span since the
+        // recorder started (at − recordingStartedAt, falling back to startedAt), but
+        // simctl's footage runs shorter than wall-clock — recorder startup/stop
+        // latency plus frame-rate drift under load — so a fixed anchor drifts ahead
+        // of the video and late steps can land past its end. When the real video
+        // length is known, scale the wall-clock span onto it; a no-op when the
+        // clocks agree.
+        function entryOffsetSeconds(session, entry) {
+          const base = Date.parse(session.recordingStartedAt || session.startedAt);
+          const at = Date.parse(entry.at);
+          if (!isFinite(base) || !isFinite(at)) return 0;
+          const raw = Math.max(0, (at - base) / 1000);
+          const duration = session.videoDurationSeconds;
+          const end = Date.parse(session.endedAt || "");
+          if (isFinite(duration) && duration > 0 && isFinite(end)) {
+            const span = (end - base) / 1000;
+            if (span > 0) return Math.min(duration, (raw / span) * duration);
+          }
+          return raw;
+        }
+
+        function sessionDurationSeconds(session) {
+          const duration = session.videoDurationSeconds;
+          if (isFinite(duration) && duration > 0) return duration;
+          const base = Date.parse(session.recordingStartedAt || session.startedAt);
+          const end = Date.parse(session.endedAt || "");
+          return isFinite(base) && isFinite(end) ? Math.max(0, (end - base) / 1000) : 0;
+        }
+
+        // The newest finished session of each test file.
+        function lastRunByFile(sessions) {
+          const runs = {};
+          for (const session of sessions) {
+            if (!session.file || session.status === "running") continue;
+            const known = runs[session.file];
+            if (!known || Date.parse(session.startedAt) > Date.parse(known.startedAt)) runs[session.file] = session;
+          }
+          return runs;
+        }
+
+        // ---- Accessibility ----
+
+        function axHasFrame(node) {
+          const frame = node.frame;
+          return !!(frame && frame.width > 0 && frame.height > 0);
+        }
+
+        // An element with nothing to say: no identifier, label, value or title — the
+        // anonymous containers that make AX trees deep without making them informative.
+        function axIsAnonymous(node) {
+          return !node.accessibilityIdentifier && !(node.label && node.label.trim()) && !node.value && !node.title;
+        }
+
+        function axRoleName(node) {
+          const role = String(node.role || node.type || "Element");
+          return role.indexOf("AX") === 0 ? role.slice(2) : role;
+        }
+
+        function axTitle(node) {
+          return node.accessibilityIdentifier || (node.label && node.label.trim()) || node.title || node.value || axRoleName(node);
+        }
+
+        // Test selectors in the order the YAML runner prefers them.
+        function axSelector(node) {
+          if (node.accessibilityIdentifier) return { key: "id", value: node.accessibilityIdentifier };
+          if (node.label && node.label.trim()) return { key: "label", value: node.label.trim() };
+          return null;
+        }
+
+        function axYamlStep(node, action) {
+          const selector = axSelector(node);
+          const verb = action || "tap";
+          if (!selector) {
+            const frame = node.frame || {};
+            return "- " + verb + ": { x: " + Math.round(frame.x + frame.width / 2) + ", y: " + Math.round(frame.y + frame.height / 2) + " }";
+          }
+          return "- " + verb + ": { " + selector.key + ": " + JSON.stringify(selector.value) + " }";
+        }
+
+        function axCliCommand(node) {
+          const selector = axSelector(node);
+          if (!selector) {
+            const frame = node.frame || {};
+            return "simtool input tap --x " + Math.round(frame.x + frame.width / 2) + " --y " + Math.round(frame.y + frame.height / 2);
+          }
+          return "simtool input tap --" + selector.key + " " + shellQuote(selector.value);
+        }
+
+        // Screen reference = the largest-area ROOT frame (the AXApplication, in points).
+        // Only roots are considered: some deep container groups report their frame in
+        // device pixels (e.g. 1206x2622 = 3x), which would otherwise hijack the reference.
+        function axScreenFrame(tree) {
+          let best = null, bestArea = 0;
+          for (const root of (tree && tree.roots) || []) {
+            const frame = root.frame;
+            if (!frame || !frame.width || !frame.height) continue;
+            const area = frame.width * frame.height;
+            if (area > bestArea) { bestArea = area; best = frame; }
+          }
+          return best;
+        }
+        """#
+
+    static let jsLogsJs = #"""
+        // Logs: the attached app's OSLog (and stdout when SimTool launched it),
+        // captured by the server and drained incrementally by cursor.
+
+        const LOGS_MAX = 3000;
+        const LOGS_FILTER_FIELDS = ["message", "subsystem", "category", "process", "level"];
+        const logs = {
+          entries: [],
+          cursor: null,
+          captureStarted: false,
+          dropped: 0,
+          levels: Object.assign({ Debug: true, Info: true, Default: true, Error: true, Fault: true }, stored("logs.levels", {})),
+          follow: true,
+          unseen: 0,
+          cleared: 0,          // sequence below which lines are cleared from view
+          selected: null,
+          status: ""
+        };
+
+        const logsFilter = createFilter("logs", {
+          placeholder: "Filter messages — subsystem:, category:, process:",
+          fields: LOGS_FILTER_FIELDS,
+          onChange: () => renderLogs()
+        });
+
+        const logsLevels = el("div", { class: "levels", role: "group", "aria-label": "Levels" });
+        const logsFollow = el("button", { class: "toggle toggle-sm", type: "button", "aria-pressed": "true", "data-tip": "Keep the newest line in view", html: icon("follow") + '<span class="toggle-label">Follow</span>' });
+        const logsClear = el("button", { class: "tb-btn", type: "button", "aria-label": "Clear the list", "data-tip": "Clear the list", html: icon("trash") });
+        const logsNew = el("button", { class: "newlines", type: "button", hidden: true });
+
+        const logsView = buildListPanel("logs", {
+          listLabel: "Log lines",
+          toolbar: [logsFilter.field, logsLevels, el("span", { class: "ptool-spacer" }), logsFilter.help, logsFollow, logsClear]
+        });
+        logsView.listWrap.append(logsNew);
+
+        const logsList = createList(logsView.list, {
+          header: el("div", { class: "thead log-grid", role: "row", html: '<span class="cell" role="columnheader">Time</span><span class="cell" role="columnheader">Level</span><span class="cell c-ss" role="columnheader">Subsystem</span><span class="cell" role="columnheader">Message</span>' }),
+          key: (entry) => String(entry.sequence),
+          version: (entry) => (logsFilter.text || "") + "|" + (entry.launchId === newestLaunchId() ? 1 : 0),
+          rowClass: (entry) => "log-grid" + (isLogError(entry) ? " lvl-err" : "") + (entry.launchId != null && entry.launchId !== newestLaunchId() ? " retired" : ""),
+          group: (entry) => entry.launchId != null ? String(entry.launchId) : null,
+          renderGroup: (id, items, collapsed) => launchGroupHTML(id, items, collapsed, "line", [{ count: items.filter(isLogError).length, tone: "err", one: "error", many: "errors" }]),
+          render: renderLogRow,
+          empty: () => logsEmpty(),
+          onSelect: (key, entry) => { logs.selected = entry; renderLogDetail(); },
+          exists: (key) => logs.entries.some((entry) => String(entry.sequence) === key && entry.sequence >= logs.cleared),
+          onMenu: (key, entry, x, y, row) => openMenu(x, y, logRowMenu(entry, row), row),
+          onGroupMenu: (id, x, y, button) => openMenu(x, y, launchGroupMenu("logs", id), button),
+          follow: () => logs.follow
+        });
+
+        function markMatches(text, query) {
+          const escaped = escapeHTML(text);
+          if (!query) return escaped;
+          const needle = escapeHTML(query).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          return escaped.replace(new RegExp(needle, "gi"), (match) => "<mark>" + match + "</mark>");
+        }
+
+        function renderLogRow(entry, row) {
+          const level = logLevel(entry);
+          const query = parseFieldTerm(logsFilter.text, LOGS_FILTER_FIELDS);
+          const message = String(entry.message || "").replace(/\s*\n\s*/g, " ⏎ ");
+          row.innerHTML =
+            '<span class="cell time" title="' + escapeHTML(entry.timestamp || "") + '">' + escapeHTML(formatClock(entry.timestamp, true)) + "</span>" +
+            '<span class="cell"><span class="lv lv-' + level.toLowerCase() + '">' + level + "</span></span>" +
+            '<span class="cell ss c-ss" translate="no" title="' + escapeHTML([entry.subsystem, entry.category].filter(Boolean).join(" · ")) + '">' + escapeHTML(entry.subsystem || entry.process || (entry.source === "stdout" ? "stdout" : "—")) + "</span>" +
+            '<span class="cell msg" translate="no">' + markMatches(message, query.field && query.field !== "message" ? "" : query.term) + "</span>";
+        }
+
+        function logsEmpty() {
+          if (!inspector.attachedApp && inspector.configKnown) return noAppPanel("logs");
+          if (logs.entries.length && logs.entries.every((entry) => entry.sequence < logs.cleared)) return el("div", { class: "empty", html: "<b>Cleared</b>New lines appear here as the app logs them." });
+          if (logs.entries.length) {
+            const node = el("div", { class: "empty", html: "<b>No line matches</b>The levels and the filter above hide all " + formatCount(logs.entries.length) + ". " });
+            node.append(el("button", { class: "btn btn-sm", type: "button", text: "Show all lines", onclick: () => {
+              for (const level of LOG_LEVELS) logs.levels[level] = true;
+              store("logs.levels", logs.levels);
+              logsFilter.clear();
+            } }));
+            return node;
+          }
+          return el("div", { class: "empty", html: "<b>Waiting for log lines</b>" + escapeHTML(logs.status || "Capturing " + inspector.attachedApp + "'s OSLog.") });
+        }
+
+        // One button per level, made once: polling updates their counts in place, so
+        // focus stays on the one a person is about to press.
+        const logsLevelButtons = new Map();
+        for (const level of LOG_LEVELS) {
+          const count = el("span", { class: "count" });
+          const button = el("button", { type: "button", "data-level": level },
+            level === "Error" || level === "Fault" ? el("span", { class: "dot dot-err" }) : null, level + " ", count);
+          button.addEventListener("click", () => {
+            logs.levels[level] = logs.levels[level] === false;
+            store("logs.levels", logs.levels);
+            renderLogs();
+          });
+          logsLevels.append(button);
+          logsLevelButtons.set(level, { button, count });
+        }
+
+        function renderLevels() {
+          const counts = {};
+          for (const entry of logs.entries) {
+            if (entry.sequence < logs.cleared) continue;
+            const level = logLevel(entry);
+            counts[level] = (counts[level] || 0) + 1;
+          }
+          for (const [level, { button, count }] of logsLevelButtons) {
+            const shown = logs.levels[level] !== false;
+            button.setAttribute("aria-pressed", String(shown));
+            button.title = (shown ? "Hide " : "Show ") + level + " lines";
+            count.textContent = formatCount(counts[level] || 0);
+          }
+        }
+
+        function logsVisible() {
+          const parsed = parseFieldTerm(logsFilter.text, LOGS_FILTER_FIELDS);
+          const chips = logsFilter.chips;
+          return logs.entries.filter((entry) => {
+            if (entry.sequence < logs.cleared) return false;
+            if (logs.levels[logLevel(entry)] === false) return false;
+            if (!parsed.term && !chips.length) return true;
+            const fields = logFields(entry);
+            const hay = [fields.message, fields.subsystem, fields.category, fields.process, fields.level].join(" ");
+            return matchesFilters(hay, chips, parsed.term, fields, parsed.field);
+          });
+        }
+
+        let logsLastFilter = "";
+        function renderLogs() {
+          const filterKey = logsFilter.text + "|" + JSON.stringify(logsFilter.chips) + "|" + JSON.stringify(logs.levels);
+          if (filterKey !== logsLastFilter) { logsLastFilter = filterKey; logsList.invalidate(); }
+          const rows = logsVisible();
+          // Group by launch rather than arrival order: crash summaries are ingested
+          // during the next launch and would otherwise split their launch in two.
+          rows.sort((a, b) => ((a.launchId ?? -1) - (b.launchId ?? -1)) || (a.sequence - b.sequence));
+          logsList.update(rows);
+          renderLevels();
+          const errors = logs.entries.filter((entry) => entry.sequence >= logs.cleared && isLogError(entry)).length;
+          setCount("logs", logs.entries.filter((entry) => entry.sequence >= logs.cleared).length, errors);
+          const times = rows.length ? [rows[0].timestamp, rows[rows.length - 1].timestamp] : null;
+          logsView.guide.innerHTML = guideHTML([
+            times ? "<b>" + escapeHTML(formatClock(times[0], true)) + " → " + escapeHTML(formatClock(times[1], true)) + "</b>" : "",
+            formatCount(rows.length) + " shown",
+            logs.entries.length >= LOGS_MAX ? "newest " + formatCount(LOGS_MAX) + " kept" : "",
+            logs.dropped ? '<span title="The capture fell behind and skipped lines">' + plural(logs.dropped, "line dropped by the capture", "lines dropped by the capture") + "</span>" : "",
+            inspector.attachedApp ? escapeHTML(inspector.attachedApp) : ""
+          ], liveTag(logs.follow ? "following" : "capturing"));
+        }
+
+        // Follow keeps the newest line in view while the list sits at its end. Scrolling
+        // up to read turns it off — new lines then wait under a "N new lines" button —
+        // and scrolling back to the end turns it on again, as in Console.app.
+        function setLogsFollow(on) {
+          if (logs.follow === on) return;
+          logs.follow = on;
+          logsFollow.setAttribute("aria-pressed", String(on));
+          if (on) { logs.unseen = 0; logsNew.hidden = true; }
+          renderLogs();
+        }
+        logsFollow.addEventListener("click", () => {
+          setLogsFollow(!logs.follow);
+          if (logs.follow) logsList.scrollToEnd();
+        });
+        logsView.list.addEventListener("scroll", () => {
+          const atBottom = logsList.atBottom();
+          if (atBottom) { logs.unseen = 0; logsNew.hidden = true; }
+          // Only a person scrolls the list away from its end; renders keep the position.
+          if (atBottom !== logs.follow && logsView.list.scrollHeight > logsView.list.clientHeight) setLogsFollow(atBottom);
+        }, { passive: true });
+        logsNew.addEventListener("click", () => { logsList.scrollToEnd(); setLogsFollow(true); });
+        logsClear.addEventListener("click", () => {
+          const previous = logs.cleared;
+          const last = logs.entries[logs.entries.length - 1];
+          logs.cleared = last ? last.sequence + 1 : 0;
+          logsList.select(null);
+          renderLogs();
+          toast("Log list cleared", { icon: "trash", duration: 5000, action: { label: "Undo", run: () => { logs.cleared = previous; renderLogs(); } } });
+        });
+
+        function logRowMenu(entry, row) {
+          const selection = selectionInside(logsView.list).replace(/\s+/g, " ").trim();
+          const items = [
+            { icon: "copy", label: "Copy line", run: () => copyText(logLine(entry), "Line copied") },
+            { icon: "copy", label: "Copy message", run: () => copyText(entry.message || "", "Message copied") }
+          ];
+          if (selection) {
+            const short = selection.length > 40 ? selection.slice(0, 39) + "…" : selection;
+            items.push("-",
+              { icon: "copy", label: "Copy selection", run: () => copyText(selection, "Selection copied") },
+              { icon: "filter", label: "Show only “" + short + "”", run: () => logsFilter.addChip("include", selection) },
+              { icon: "close", label: "Hide “" + short + "”", run: () => logsFilter.addChip("exclude", selection) });
+          } else if (entry.subsystem) {
+            items.push("-",
+              { icon: "filter", label: "Show only " + entry.subsystem, run: () => logsFilter.addChip("include", entry.subsystem.toLowerCase(), "subsystem") },
+              { icon: "close", label: "Hide " + entry.subsystem, run: () => logsFilter.addChip("exclude", entry.subsystem.toLowerCase(), "subsystem") });
+          }
+          return items;
+        }
+
+        function renderLogDetail() {
+          const entry = logs.selected;
+          showDetail(logsView.panel, !!entry);
+          if (!entry) return;
+          const level = logLevel(entry);
+          logsView.detail.innerHTML =
+            '<div class="dhead"><span class="lv lv-' + level.toLowerCase() + '">' + level + "</span>" +
+              '<span class="dtitle" translate="no">' + escapeHTML([entry.subsystem, entry.category].filter(Boolean).join(" · ") || entry.process || "(no subsystem)") + "</span>" +
+              '<div class="dactions"><button class="btn btn-sm" type="button" data-act="copy">' + icon("copy", "ic-sm") + "Copy message</button>" +
+              '<button class="tb-btn" type="button" data-act="close" aria-label="Close the details">' + icon("close") + "</button></div></div>" +
+            '<div class="dmeta"><span>' + escapeHTML(formatClock(entry.timestamp, true)) + " local</span>" +
+              (entry.process ? "<span>" + escapeHTML(entry.process) + "</span>" : "") +
+              "<span>" + escapeHTML(entry.source === "stdout" ? "stdout" : "OSLog") + "</span>" +
+              (entry.launchId != null && launchesById[entry.launchId] ? "<span>pid " + escapeHTML(launchesById[entry.launchId].pid) + "</span>" : "") + "</div>" +
+            '<div class="dbody"><pre class="code" translate="no">' + escapeHTML(entry.message || "") + "</pre></div>";
+        }
+
+        logsView.detail.addEventListener("click", (event) => {
+          const action = event.target.closest("[data-act]");
+          if (!action || !logs.selected) return;
+          if (action.dataset.act === "copy") copyText(logs.selected.message || "", "Message copied");
+          if (action.dataset.act === "close") { logsList.select(null); logsList.focus(); }
+        });
+
+        // ---- Capture and polling ----
+
+        async function startLogsCapture() {
+          const app = inspector.attachedApp;
+          // Capture only ever starts scoped to an app: an unscoped capture streams OSLog
+          // for the whole simulator, which drowns the viewer in unrelated system noise.
+          if (!app) return;
+          logs.entries = [];
+          logs.cursor = null;
+          try {
+            await api("/api/v1/logs/capture", { method: "POST", body: JSON.stringify({ app }) });
+            logs.captureStarted = true;
+            logs.status = "Capturing " + app + "'s OSLog.";
+          } catch (error) {
+            logs.status = "Log capture failed: " + error.message;
+            throw error;
+          }
+        }
+
+        async function pollLogs() {
+          if (!logs.captureStarted) { await startLogsCapture(); if (!logs.captureStarted) return; }
+          await loadLaunches();
+          const since = logs.cursor == null ? "" : "&since=" + logs.cursor;
+          const payload = await apiJSON("/api/v1/logs/capture?limit=500" + since);
+          const entries = payload.entries || [];
+          if (payload.cursor != null) logs.cursor = payload.cursor;
+          logs.dropped = payload.droppedCount || 0;
+          if (!entries.length) { if (inspector.tab === "logs") renderLogs(); return; }
+          logs.entries = logs.entries.concat(entries);
+          if (logs.entries.length > LOGS_MAX) logs.entries = logs.entries.slice(logs.entries.length - LOGS_MAX);
+          if (!(logs.follow && logsList.atBottom())) {
+            logs.unseen += entries.length;
+            logsNew.hidden = false;
+            logsNew.innerHTML = icon("follow", "ic-sm") + plural(logs.unseen, "new line", "new lines");
+          }
+          renderLogs();
+        }
+
+        tabHandlers.logs = { show() { renderLogs(); poller.poke("logs"); } };
+
+        function resetLogs() {
+          logs.entries = [];
+          logs.cursor = null;
+          logs.captureStarted = false;
+          logs.cleared = 0;
+          logsList.select(null);
+          renderLogs();
+        }
+        """#
+
+    static let jsMainJs = #"""
+        // Start-up: read /config, start the screen, schedule the polls. A server that
+        // restarts under the page is a new instance: its logs and state restart their
+        // numbering, so the page resets its cursors instead of skipping new entries.
+
+        let serverInstance = null;
+
+        const poller = createPoller((healthy, error) => {
+          if (!healthy && screenState.connection === "live") setMessage("The server did not answer: " + (error && error.message ? error.message : "request failed"), "err");
+        });
+
+        function applyConfig(config) {
+          deviceInfo.name = config.device || "";
+          deviceInfo.udid = config.udid || "";
+          deviceInfo.app = config.logApp || "";
+          inspector.attachedApp = config.logApp || "";
+          inspector.configKnown = true;
+          tests.sessionsPath = config.testSessionsPath || "";
+          $("deviceName").textContent = deviceInfo.name || "Simulator";
+          $("deviceRuntime").textContent = runtimeName(config.runtime);
+          document.title = (deviceInfo.name ? deviceInfo.name + " — " : "") + "SimTool";
+          $("appName").textContent = deviceInfo.app || "No app";
+          $("appName").title = deviceInfo.app ? "App under test: " + deviceInfo.app : "No app attached — start the server with --app <bundle-id>";
+          $("sbDevice").textContent = [deviceInfo.name, runtimeName(config.runtime)].filter(Boolean).join(" · ");
+          $("sbUdid").textContent = deviceInfo.udid ? deviceInfo.udid.slice(0, 4) + "…" + deviceInfo.udid.slice(-4) : "";
+          $("sbServer").textContent = location.host;
+          $("sbApp").textContent = deviceInfo.app || "No app attached";
+          $("sbVersion").textContent = config.version ? "simtool " + config.version : "";
+        }
+
+        async function bootstrap() {
+          const config = await apiJSON("/config");
+          const instance = config.instanceId || null;
+          if (serverInstance && instance && instance !== serverInstance) {
+            // A new server: everything numbered by the old one is stale.
+            resetNetwork();
+            resetLogs();
+            resetState();
+            ax.tree = null;
+            networkLastPayload = "";
+            testsLastSessions = "";
+            testsLastDefinitions = "";
+            setMessage("The server restarted — lists were reloaded");
+          }
+          serverInstance = instance;
+          applyConfig(config);
+          renderNetwork();
+          renderLogs();
+          renderState();
+        }
+
+        // The screen's size in points, for the pointer readout and the rulers; the
+        // Accessibility tab refines it with the full tree.
+        async function loadScreenPoints() {
+          if (screenState.points) return;
+          try {
+            const flat = await apiJSON("/api/v1/ax/tree?format=flat");
+            const root = (flat.nodes || []).find((node) => node.depth === 0 && Array.isArray(node.frame));
+            if (root) {
+              screenState.points = { x: root.frame[0], y: root.frame[1], width: root.frame[2], height: root.frame[3] };
+              updateReadoutSize();
+            }
+          } catch (_) { /* no AXe: the readout stays in pixels */ }
+        }
+
+        const ACTIVE_MS = 1500;
+        const BACKGROUND_MS = 6000;
+        const activeTab = (tab) => inspector.open && inspector.tab === tab;
+
+        poller.add("network", () => (activeTab("network") ? ACTIVE_MS : BACKGROUND_MS), loadNetwork);
+        poller.add("logs", () => (activeTab("logs") ? ACTIVE_MS : BACKGROUND_MS), pollLogs, () => !!inspector.attachedApp);
+        poller.add("state", () => (activeTab("state") ? 1000 : BACKGROUND_MS), pollState);
+        poller.add("ax", 2000, loadAx, () => activeTab("ax") && app.dataset.mode !== "replay");
+        poller.add("tests", () => (activeTab("tests") ? ACTIVE_MS : BACKGROUND_MS), loadTests);
+
+        onReconnect(async () => {
+          try { await bootstrap(); } catch (_) {}
+          for (const name of ["network", "logs", "state", "tests"]) poller.poke(name);
+        });
+
+        onConnection((state) => {
+          // The guide lines say whether the lists are live.
+          renderNetwork();
+          if (inspector.tab === "logs") renderLogs();
+        });
+
+        setInspectorOpen(inspector.open);
+        setTab(inspector.tab);
+        updateKeyboardIndicator();
+        runStream();
+        bootstrap().catch((error) => setMessage("Could not read the server's configuration: " + error.message, "err")).then(loadScreenPoints);
+        """#
+
+    static let jsNetworkJs = #"""
+        // Network: HTTP and gRPC calls the app's logger reported, grouped by app
+        // launch, with the selected call's detail under the list.
+
+        const network = {
+          events: [],
+          mockRules: {},
+          protocol: stored("network.protocol", "all"),   // all | http | grpc
+          failedOnly: stored("network.failed", false),
+          mockedOnly: stored("network.mocked", false),
+          sort: { key: "time", dir: 1 },
+          paused: false,
+          pausedNew: 0,
+          cleared: new Set(),
+          detailTab: "response",
+          selected: null
+        };
+
+        const networkFilter = createFilter("network", {
+          placeholder: "Filter name, host, status — Enter keeps it",
+          onChange: () => renderNetwork()
+        });
+
+        // Pressed states follow the model: sync() re-reads it after a change made elsewhere.
+        function segmented(label, options, current, onPick) {
+          const group = el("div", { class: "seg", role: "group", "aria-label": label });
+          for (const [value, text] of options) {
+            const button = el("button", { type: "button", "data-value": value, text });
+            button.addEventListener("click", () => { onPick(value); group.sync(); });
+            group.append(button);
+          }
+          group.sync = () => { for (const button of group.children) button.setAttribute("aria-pressed", String(current() === button.dataset.value)); };
+          group.sync();
+          return group;
+        }
+
+        function pillToggle(html, pressed, onToggle, title) {
+          const button = el("button", { class: "pill", type: "button", html, title });
+          button.addEventListener("click", () => { onToggle(); button.sync(); });
+          button.sync = () => button.setAttribute("aria-pressed", String(pressed()));
+          button.sync();
+          return button;
+        }
+
+
+
+        const networkPause = el("button", { class: "tb-btn", type: "button", "aria-label": "Pause the list", "aria-pressed": "false", "data-tip": "Pause the list", html: icon("pause") });
+        const networkClear = el("button", { class: "tb-btn", type: "button", "aria-label": "Clear the list", "data-tip": "Clear the list", html: icon("trash") });
+
+        const networkProtocol = segmented("Protocol", [["all", "All"], ["http", "HTTP"], ["grpc", "gRPC"]], () => network.protocol, (value) => { network.protocol = value; store("network.protocol", value); renderNetwork(); });
+        const networkProblems = pillToggle(icon("warn", "ic-sm") + "Problems", () => network.failedOnly, () => { network.failedOnly = !network.failedOnly; store("network.failed", network.failedOnly); renderNetwork(); }, "Only 4xx, 5xx, failed calls and gRPC errors");
+        const networkMocked = pillToggle('<span class="dot dot-course"></span>Mocked', () => network.mockedOnly, () => { network.mockedOnly = !network.mockedOnly; store("network.mocked", network.mockedOnly); renderNetwork(); }, "Only calls a mock answered");
+        const networkView = buildListPanel("network", {
+          listLabel: "Requests",
+          toolbar: [networkFilter.field, networkProtocol, networkProblems, networkMocked, el("span", { class: "ptool-spacer" }), networkFilter.help, networkPause, networkClear]
+        });
+
+        function clearNetworkFilters() {
+          network.protocol = "all"; network.failedOnly = false; network.mockedOnly = false;
+          store("network.protocol", "all"); store("network.failed", false); store("network.mocked", false);
+          networkProtocol.sync(); networkProblems.sync(); networkMocked.sync();
+          networkFilter.clear();
+        }
+
+        networkPause.addEventListener("click", () => {
+          network.paused = !network.paused;
+          network.pausedNew = 0;
+          networkPause.setAttribute("aria-pressed", String(network.paused));
+          networkPause.innerHTML = icon(network.paused ? "play" : "pause");
+          networkPause.dataset.tip = network.paused ? "Resume the list" : "Pause the list";
+          networkPause.setAttribute("aria-label", networkPause.dataset.tip);
+          renderNetwork();
+          // Resuming catches up at once, not when the next request happens to arrive.
+          if (!network.paused) { networkLastPayload = ""; poller.poke("network"); }
+        });
+        networkClear.addEventListener("click", () => {
+          const previous = new Set(network.cleared);
+          for (const event of network.events) network.cleared.add(event.id);
+          networkList.select(null);
+          renderNetwork();
+          toast("Request list cleared", { icon: "trash", duration: 5000, action: { label: "Undo", run: () => { network.cleared = previous; renderNetwork(); } } });
+        });
+
+        // The logger stamps a call when it finishes; the waterfall works its start out from the duration.
+        const NETWORK_COLUMNS = [
+          { key: "time", label: "Finished", sort: true },
+          { key: "method", label: "Method", class: "c-method" },
+          { key: "name", label: "Name", sort: true },
+          { key: "status", label: "Status", sort: true },
+          { key: "size", label: "Size", sort: true, class: "num c-size", defaultDir: -1 },
+          { key: "duration", label: "Duration", sort: true, class: "num", defaultDir: -1 },
+          { key: "wf", label: "Waterfall", class: "c-wf" }
+        ];
+
+        const networkList = createList(networkView.list, {
+          header: createSortHeader("net-grid", NETWORK_COLUMNS, network.sort, () => renderNetwork()),
+          key: (event) => event.id,
+          version: (event) => [event.response ? 1 : 0, event.error ? 1 : 0, event.launchId, event.durationMilliseconds, event._wf, newestLaunchId() === event.launchId].join("|"),
+          rowClass: (event) => "net-grid" + (event.mocked ? " mocked" : "") + (event.launchId != null && event.launchId !== newestLaunchId() ? " retired" : ""),
+          group: (event) => event.launchId != null ? String(event.launchId) : null,
+          collapsed: [],
+          renderGroup: (id, items, collapsed) => launchGroupHTML(id, items, collapsed, "request", networkMarks(items)),
+          render: renderNetworkRow,
+          empty: () => networkEmpty(),
+          onSelect: (key, event) => { network.selected = event; renderNetworkDetail(); },
+          exists: (key) => !network.cleared.has(key) && network.events.some((event) => event.id === key),
+          onActivate: () => { const tab = networkView.detail.querySelector("[role=tab][aria-selected=true]"); if (tab) tab.focus(); },
+          onMenu: (key, event, x, y, row) => openMenu(x, y, networkRowMenu(event), row),
+          onGroupMenu: (id, x, y, button) => openMenu(x, y, launchGroupMenu("network", id), button),
+          follow: true
+        });
+
+        function renderNetworkRow(event, row) {
+          const status = networkStatus(event);
+          const where = requestWhere(event);
+          row.innerHTML =
+            '<span class="cell time">' + escapeHTML(formatClock(event.timestamp, true)) + "</span>" +
+            '<span class="cell method c-method ' + escapeHTML(event.protocol) + '">' + escapeHTML(event.protocol === "grpc" ? "gRPC" : (event.request && event.request.method) || "") + "</span>" +
+            '<span class="cell name" translate="no"><b>' + escapeHTML(requestName(event)) + "</b>" +
+              (event.mocked ? '<span class="tag tag-course" title="' + escapeHTML(event.mockRuleId ? "Answered by mock " + event.mockRuleId : "Answered by a mock") + '">Mock</span>' : "") +
+              "<span>" + escapeHTML(where) + "</span></span>" +
+            '<span class="cell"><span class="st st-' + status.severity + '" title="' + escapeHTML(status.title) + '">' + (status.severity === "err" ? icon("warn") : "") + escapeHTML(status.text) + "</span></span>" +
+            '<span class="cell num c-size">' + escapeHTML(formatBytes(networkSize(event))) + "</span>" +
+            '<span class="cell num">' + escapeHTML(formatDuration(event.durationMilliseconds)) + "</span>" +
+            '<span class="cell c-wf"><span class="wf"><i class="' + status.severity + '" style="' + (event._wf || "") + '"></i></span></span>';
+          row.title = (event.request && (event.request.method || "")) + " " + requestPath(event);
+        }
+
+        function networkEmpty() {
+          if (!inspector.attachedApp && inspector.configKnown && !network.events.length) return noAppPanel("network");
+          if (network.events.length && network.events.every((event) => network.cleared.has(event.id))) {
+            return el("div", { class: "empty", html: "<b>Cleared</b>New requests appear here as the app makes them." });
+          }
+          if (network.events.length) {
+            const node = el("div", { class: "empty", html: "<b>No request matches</b>The filters above hide all " + formatCount(network.events.length) + ". " });
+            node.append(el("button", { class: "btn btn-sm", type: "button", text: "Clear filters", onclick: clearNetworkFilters }));
+            return node;
+          }
+          return el("div", { class: "empty", html: "<b>No requests yet</b>The app's network logger reports each call here as it finishes. Apps launched by <code>simtool run</code> or <code>simtool app launch</code> have it armed; apps that link <code>SimToolNetworkLogger</code> keep reporting after a relaunch." });
+        }
+
+        function networkVisible() {
+          const query = networkFilter.text;
+          const chips = networkFilter.chips;
+          return network.events.filter((event) => {
+            if (network.cleared.has(event.id)) return false;
+            if (network.protocol !== "all" && event.protocol !== network.protocol) return false;
+            if (network.failedOnly && !isNetworkProblem(event)) return false;
+            if (network.mockedOnly && !event.mocked) return false;
+            return (!query && !chips.length) || matchesFilters(networkHaystack(event), chips, query);
+          });
+        }
+
+        function networkSortValue(event, key) {
+          switch (key) {
+            case "name": return requestName(event).toLowerCase();
+            case "status": { const status = networkStatus(event); return (status.severity === "err" ? 3 : status.severity === "warn" ? 2 : status.severity === "info" ? 1 : 0) * 1000 + (Number(status.code) || 0); }
+            case "size": return networkSize(event) || 0;
+            case "duration": return event.durationMilliseconds || 0;
+            default: return Date.parse(event.timestamp) || 0;
+          }
+        }
+
+        function renderNetwork() {
+          const rows = networkVisible();
+          // Grouped by launch, oldest launch first; within a launch, by the chosen column.
+          rows.sort((a, b) => ((a.launchId ?? -1) - (b.launchId ?? -1)) || compareBy(a, b));
+          function compareBy(a, b) {
+            const left = networkSortValue(a, network.sort.key), right = networkSortValue(b, network.sort.key);
+            return (left < right ? -1 : left > right ? 1 : 0) * network.sort.dir || ((Date.parse(a.timestamp) || 0) - (Date.parse(b.timestamp) || 0));
+          }
+          // Waterfall: each call's start and length inside its launch's span.
+          const spans = {};
+          for (const event of rows) {
+            const start = Date.parse(event.timestamp) - (event.durationMilliseconds || 0);
+            const end = Date.parse(event.timestamp);
+            const span = spans[event.launchId] || (spans[event.launchId] = { start, end });
+            span.start = Math.min(span.start, start);
+            span.end = Math.max(span.end, end);
+          }
+          for (const event of rows) {
+            const span = spans[event.launchId];
+            const total = Math.max(1, span.end - span.start);
+            const left = ((Date.parse(event.timestamp) - (event.durationMilliseconds || 0) - span.start) / total) * 100;
+            const width = Math.max(1.5, ((event.durationMilliseconds || 0) / total) * 100);
+            event._wf = "left:" + left.toFixed(1) + "%;width:" + Math.min(width, 100 - left).toFixed(1) + "%";
+          }
+          networkList.update(rows);
+          const shown = rows.length, total = network.events.filter((event) => !network.cleared.has(event.id)).length;
+          const times = rows.map((event) => event.timestamp).filter(Boolean).sort();
+          const hidden = total - shown;
+          networkView.guide.innerHTML = guideHTML([
+            times.length ? "<b>" + escapeHTML(formatClock(times[0], true)) + " → " + escapeHTML(formatClock(times[times.length - 1], true)) + "</b>" : "",
+            formatCount(shown) + " of " + plural(total, "request", "requests"),
+            hidden ? formatCount(hidden) + " hidden by filters" : "",
+            network.paused && network.pausedNew ? plural(network.pausedNew, "new while paused", "new while paused") : ""
+          ], liveTag("capturing", network.paused));
+          const [failed, problems] = networkMarks(network.events.filter((event) => !network.cleared.has(event.id)));
+          setCount("network", total, failed.count, problems.count);
+          if (network.selected) {
+            const fresh = network.events.find((event) => event.id === network.selected.id);
+            if (fresh && fresh !== network.selected) { network.selected = fresh; renderNetworkDetail(); }
+          }
+        }
+
+        function networkRowMenu(event) {
+          const path = chipPathForEvent(event);
+          const short = path.length > 48 ? "…" + path.slice(-47) : path;
+          const body = event.response && event.response.bodyPreview;
+          return [
+            { icon: "copy", label: event.protocol === "grpc" ? "Copy method path" : "Copy URL", run: () => copyText(requestPath(event), "Copied") },
+            { icon: "terminal", label: event.protocol === "grpc" ? "Copy as grpcurl" : "Copy as cURL", run: () => copyText(event.protocol === "grpc" ? grpcurlCommand(event) : curlCommand(event), "Copied as " + (event.protocol === "grpc" ? "grpcurl" : "cURL")) },
+            { icon: "copy", label: "Copy response body", disabled: !body, run: () => copyText(body, "Response body copied") },
+            { icon: "mock", label: "Copy as YAML mock", tone: "course", run: () => copyText(mockYaml(event), "Mock copied — paste it into a test's mocks:") },
+            "-",
+            { icon: "filter", label: "Show only “" + short + "”", disabled: !path, run: () => networkFilter.addChip("include", path) },
+            { icon: "close", label: "Hide “" + short + "”", disabled: !path, run: () => networkFilter.addChip("exclude", path) }
+          ];
+        }
+
+        function launchGroupMenu(kind, launchId) {
+          const list = kind === "network" ? networkList : logsList;
+          const launch = launchesById[launchId];
+          const what = kind === "network" ? "requests" : "log lines";
+          return [
+            { icon: "chev-d", label: "Collapse or expand", run: () => list.toggleGroup(launchId) },
+            "-",
+            { icon: "trash", label: "Delete this launch's " + what + "…", tone: "danger", run: async () => {
+              const when = launch ? " from " + formatClock(launch.startedAt) + (launch.pid != null ? " (pid " + launch.pid + ")" : "") : "";
+              if (!(await confirmDestructive("Delete " + what + "?", "The " + what + " of the app launch" + when + " are removed from this server for everyone viewing it.", "Delete"))) return;
+              try {
+                await api("/api/v1/" + (kind === "network" ? "network" : "logs") + "/launches/" + encodeURIComponent(launchId), { method: "DELETE" });
+                if (kind === "network") { network.events = network.events.filter((event) => String(event.launchId) !== String(launchId)); renderNetwork(); }
+                else { logs.entries = logs.entries.filter((entry) => String(entry.launchId) !== String(launchId)); renderLogs(); }
+                toast("Deleted", { icon: "trash" });
+              } catch (error) {
+                fail("Delete failed", error);
+              }
+            } }
+          ];
+        }
+
+        // ---- Detail ----
+
+        function renderNetworkDetail() {
+          const event = network.selected;
+          showDetail(networkView.panel, !!event);
+          if (!event) return;
+          const status = networkStatus(event);
+          const request = event.request || {};
+          const response = event.response || null;
+          const grpc = event.protocol === "grpc";
+          const tabs = [["headers", "Headers"], ["request", "Request"], ["response", "Response"]].concat(event.mocked ? [["mock", "Mock rule"]] : []);
+          if (!tabs.some(([key]) => key === network.detailTab)) network.detailTab = "response";
+          let body = "";
+          if (status.severity === "err" || status.severity === "warn") {
+            const headline = event.error ? "Request failed" : grpc ? "gRPC " + (response && response.grpcStatusCode) + " " + status.text : "HTTP " + status.text;
+            const detail = event.error ? event.error.message : grpc ? (response && response.grpcStatusMessage) || "" : "";
+            body += '<div class="callout ' + status.severity + '">' + icon("warn") + "<div><b>" + escapeHTML(headline) + "</b>" + (detail ? "<br>" + escapeHTML(detail) : "") + "</div></div>";
+          }
+          if (event.mocked) {
+            body += '<div class="callout course">' + icon("mock") + "<div>Answered by mock <b class=\"mono\">" + escapeHTML(event.mockRuleId || "") + "</b>. The app never reached the server.</div></div>";
+          }
+          if (network.detailTab === "headers") {
+            body += '<div class="sec">General</div>' + kvHTML({
+              [grpc ? "Method" : "URL"]: requestPath(event),
+              ...(grpc ? { Authority: request.grpcAuthority } : { "HTTP method": request.method, Host: request.host }),
+              Status: status.title,
+              Started: event.timestamp ? formatClock(new Date(Date.parse(event.timestamp) - (event.durationMilliseconds || 0)), true) : "",
+              Finished: event.timestamp ? formatClock(event.timestamp, true) + " (" + new Date(event.timestamp).toISOString() + ")" : "",
+              Duration: formatDuration(event.durationMilliseconds),
+              App: event.appBundleID,
+              Launch: event.launchId != null && launchesById[event.launchId] ? "pid " + launchesById[event.launchId].pid : ""
+            }) +
+              '<div class="sec">Request ' + (grpc ? "metadata" : "headers") + "</div>" + kvHTML(grpc ? request.metadata : request.headers) +
+              '<div class="sec">Response ' + (grpc ? "metadata" : "headers") + "</div>" + (response ? kvHTML(grpc ? response.metadata : response.headers) : '<p class="muted small">No response</p>');
+          } else if (network.detailTab === "request") {
+            const size = grpc ? request.messageByteCount : request.bodyByteCount;
+            body += (size != null ? '<p class="muted small">' + escapeHTML(formatBytes(size)) + (request.bodyPreview && size > request.bodyPreview.length ? " — preview shown" : "") + "</p>" : "") +
+              '<pre class="code" translate="no">' + highlightJSON(request.bodyPreview) + "</pre>";
+          } else if (network.detailTab === "response") {
+            if (!response) body += '<p class="muted">No response — the request did not complete.</p>';
+            else {
+              const size = networkSize(event);
+              body += (size != null ? '<p class="muted small">' + escapeHTML(formatBytes(size)) + (response.bodyPreview && size > response.bodyPreview.length ? " — preview shown" : "") + "</p>" : "") +
+                '<pre class="code" translate="no">' + (response.bodyPreview ? highlightJSON(response.bodyPreview) : '<span class="muted">' + (event.mocked ? "The mock returned no body" : "No body") + "</span>") + "</pre>";
+            }
+          } else if (network.detailTab === "mock") {
+            const rule = event.mockRuleId ? network.mockRules[event.mockRuleId] : null;
+            body += rule ? '<pre class="code" translate="no">' + highlightJSON(JSON.stringify(rule)) + "</pre>" : '<p class="muted">The rule ' + escapeHTML(event.mockRuleId || "") + " is no longer active on this server.</p>";
+          }
+          // Polling hands over fresh objects every time; the pane changes only with what it shows.
+          patchPane(networkView.detail, event.id + "|" + network.detailTab,
+            '<div class="dhead"><span class="method ' + escapeHTML(event.protocol) + '">' + (grpc ? "gRPC" : escapeHTML(request.method || "")) + "</span>" +
+              '<span class="dtitle" translate="no" title="' + escapeHTML(requestPath(event)) + '">' + escapeHTML(requestPath(event)) + "</span>" +
+              '<div class="dactions">' +
+                '<button class="btn btn-sm" type="button" data-act="curl">' + icon("terminal", "ic-sm") + "Copy as " + (grpc ? "grpcurl" : "cURL") + "</button>" +
+                '<button class="btn btn-sm btn-course" type="button" data-act="mock" title="A mocks: entry for a YAML test that answers this call the same way">' + icon("mock", "ic-sm") + "Copy as YAML mock</button>" +
+                '<button class="tb-btn" type="button" data-act="close" aria-label="Close the details">' + icon("close") + "</button>" +
+              "</div></div>" +
+            '<div class="dmeta"><span class="st st-' + status.severity + '">' + (status.severity === "err" ? icon("warn") : "") + escapeHTML(status.text) + "</span>" +
+              "<span>Duration <span class=\"mono\">" + escapeHTML(formatDuration(event.durationMilliseconds)) + "</span></span>" +
+              "<span>Size <span class=\"mono\">" + escapeHTML(formatBytes(networkSize(event))) + "</span></span>" +
+              "<span>" + escapeHTML(formatClock(event.timestamp, true)) + "</span></div>" +
+            '<div class="dtabs" role="tablist" aria-label="Request details">' + tabs.map(([key, label]) =>
+              '<button type="button" role="tab" data-dtab="' + key + '" aria-selected="' + (network.detailTab === key) + '" tabindex="' + (network.detailTab === key ? 0 : -1) + '">' + label + "</button>").join("") + "</div>" +
+            '<div class="dbody" role="tabpanel">' + body + "</div>");
+        }
+
+        networkView.detail.addEventListener("click", (domEvent) => {
+          const tab = domEvent.target.closest("[data-dtab]");
+          if (tab) { network.detailTab = tab.dataset.dtab; renderNetworkDetail(); networkView.detail.querySelector('[data-dtab="' + network.detailTab + '"]').focus(); return; }
+          const action = domEvent.target.closest("[data-act]");
+          if (!action || !network.selected) return;
+          const event = network.selected;
+          if (action.dataset.act === "curl") copyText(event.protocol === "grpc" ? grpcurlCommand(event) : curlCommand(event), "Copied as " + (event.protocol === "grpc" ? "grpcurl" : "cURL"));
+          if (action.dataset.act === "mock") copyText(mockYaml(event), "Mock copied — paste it into a test's mocks:");
+          if (action.dataset.act === "close") { networkList.select(null); networkList.focus(); }
+        });
+        networkView.detail.addEventListener("keydown", (domEvent) => {
+          const tab = domEvent.target.closest("[data-dtab]");
+          if (!tab || !["ArrowLeft", "ArrowRight"].includes(domEvent.key)) return;
+          const tabs = [...networkView.detail.querySelectorAll("[data-dtab]")];
+          const next = tabs[(tabs.indexOf(tab) + (domEvent.key === "ArrowRight" ? 1 : tabs.length - 1)) % tabs.length];
+          network.detailTab = next.dataset.dtab;
+          renderNetworkDetail();
+          networkView.detail.querySelector('[data-dtab="' + network.detailTab + '"]').focus();
+          domEvent.preventDefault();
+        });
+
+        // ---- Polling ----
+
+        let networkLastPayload = "";
+        async function loadNetwork() {
+          await loadLaunches();
+          const payload = await apiJSON("/api/v1/network/events?limit=1000");
+          const events = payload.events || [];
+          const serialized = events.length + ":" + (events.length ? events[events.length - 1].id + (events[events.length - 1].response ? "r" : "") : "") + ":" + Object.keys(launchesById).length;
+          try {
+            const mocks = await apiJSON("/api/v1/mocks");
+            const map = {};
+            for (const rule of mocks.rules || []) map[rule.id] = rule;
+            network.mockRules = map;
+          } catch (_) { /* keep the last known rules */ }
+          if (serialized === networkLastPayload) return;
+          networkLastPayload = serialized;
+          if (network.paused) {
+            const known = new Set(network.events.map((event) => event.id));
+            network.pausedNew = events.filter((event) => !known.has(event.id)).length;
+            renderNetwork();
+            return;
+          }
+          network.events = events;
+          renderNetwork();
+        }
+
+        tabHandlers.network = { show() { renderNetwork(); poller.poke("network"); } };
+
+        function resetNetwork() {
+          network.events = [];
+          network.cleared.clear();
+          networkLastPayload = "";
+          networkList.select(null);
+          renderNetwork();
+        }
+        """#
+
+    static let jsPaletteJs = #"""
+        // The command palette (⇧⌘P) and the page's keyboard shortcuts. Shortcuts
+        // follow Simulator.app and Xcode where they exist; tabs use ⌥1–5 because
+        // browsers keep ⌘1–9 for themselves.
+
+        function paletteCommands() {
+          const commands = [
+            ["Device", "home", "Home", "⇧⌘H", pressHome],
+            ["Device", "camera", "Save screenshot", "⌘S", saveScreenshot],
+            ["Device", "copy", "Copy screenshot", "", copyScreenshot],
+            ["Device", "shake", "Shake", "⌃⌘Z", pressShake],
+            ["Device", "keyboard", "Show or hide the software keyboard", keyboardBridge.enabled ? "⌘K" : "", toggleSoftwareKeyboard],
+            ["Device", "keyboard", keyboardBridge.enabled ? "Stop typing with the Mac keyboard" : "Type with the Mac keyboard", "⇧⌘K", () => setKeyboardMode(!keyboardBridge.enabled)],
+            ["Device", "paste", "Paste the Mac clipboard", "⌘V", pasteFromClipboard],
+            ["Device", "photo", "Add files to Photos…", "", () => $("photosFile").click()]
+          ];
+          if (deviceInfo.app) {
+            commands.push(["App", "stop", "Terminate " + deviceInfo.app, "", terminateApp], ["App", "relaunch", "Relaunch " + deviceInfo.app, "", relaunchApp]);
+          }
+          commands.push(
+            ["Inspector", "panel", inspector.open ? "Hide the inspector" : "Show the inspector", "⌥⌘0", () => setInspectorOpen(!inspector.open)],
+            ["Inspector", "panel", "Network", "⌥1", () => openTab("network")],
+            ["Inspector", "panel", "Logs", "⌥2", () => openTab("logs")],
+            ["Inspector", "panel", "State", "⌥3", () => openTab("state")],
+            ["Inspector", "pick", "Accessibility", "⌥4", () => openTab("ax")],
+            ["Inspector", "panel", "Tests", "⌥5", () => openTab("tests")],
+            ["Inspector", "search", "Filter the current list", "/", focusFilter],
+            ["Network", network.paused ? "play" : "pause", network.paused ? "Resume the request list" : "Pause the request list", "", () => { openTab("network"); networkPause.click(); }],
+            ["Network", "trash", "Clear the request list", "", () => { openTab("network"); networkClear.click(); }],
+            ["Logs", "follow", logs.follow ? "Stop following new log lines" : "Follow new log lines", "", () => { openTab("logs"); logsFollow.click(); }],
+            ["Logs", "trash", "Clear the log list", "", () => { openTab("logs"); logsClear.click(); }],
+            ["Accessibility", "pick", ax.pick ? "Stop picking elements" : "Pick elements on the screen", "P", () => { openTab("ax"); setAxPick(!ax.pick); }],
+            ["Tests", "film", "Show recorded runs", "", () => { openTab("tests"); tests.view = "history"; store("tests.view", "history"); renderTests(); }]
+          );
+          for (const test of tests.definitions) {
+            if (!test.parseError) commands.push(["Tests", "play", "Run “" + (test.name || test.file) + "”", "", () => { openTab("tests"); tests.view = "tests"; tests.selectedFile = test.file; renderTests(); runTest(test.file); }]);
+          }
+          if (app.dataset.mode === "replay") commands.push(["Tests", "film", "Back to the live screen", "Esc", exitReplay]);
+          commands.push(["Help", "help", "Keyboard shortcuts", "", showShortcuts]);
+          return commands.map(([group, glyph, label, kbd, run]) => ({ group, glyph, label, kbd, run }));
+        }
+
+        // Switching tabs from the keyboard lands in the new tab's list, where ↑/↓ work
+        // at once — unless focus was somewhere a person is still using, like the screen.
+        function openTab(tab) {
+          const active = document.activeElement;
+          const landInList = !active || active === document.body || $("inspector").contains(active);
+          if (!inspector.open) setInspectorOpen(true);
+          setTab(tab);
+          if (landInList) focusTabList(tab);
+        }
+
+        function focusTabList(tab) {
+          const lists = { network: networkList, logs: logsList, ax: axList, tests: tests.view === "history" ? historyList : definitionList };
+          if (lists[tab]) lists[tab].focus();
+          else if (tab === "state") (stateModels.querySelector('[tabindex="0"]') || stateModels).focus();
+        }
+
+        function focusFilter() {
+          if (!inspector.open) setInspectorOpen(true);
+          const filters = { network: networkFilter, logs: logsFilter, state: stateFilter, ax: axFilter, tests: testsFilter };
+          filters[inspector.tab].focus();
+        }
+
+        let paletteItems = [];
+        let paletteIndex = 0;
+        let paletteOpener = null;
+
+        function renderPalette() {
+          const query = $("paletteInput").value.trim().toLowerCase();
+          const words = query.split(/\s+/).filter(Boolean);
+          paletteItems = paletteCommands().filter((command) => words.every((word) => (command.group + " " + command.label).toLowerCase().includes(word)));
+          paletteIndex = Math.min(paletteIndex, Math.max(0, paletteItems.length - 1));
+          const list = $("paletteList");
+          list.innerHTML = "";
+          let group = "";
+          paletteItems.forEach((command, index) => {
+            if (command.group !== group) { group = command.group; list.append(el("div", { class: "pal-group", role: "presentation", text: group })); }
+            const item = el("div", { class: "pal-item", role: "option", id: "pal-" + index, "aria-selected": String(index === paletteIndex), "data-index": index },
+              el("span", { html: icon(command.glyph) }), el("span", { text: command.label }), command.kbd ? el("kbd", { text: command.kbd }) : null);
+            list.append(item);
+          });
+          if (!paletteItems.length) list.append(el("div", { class: "empty", html: "<b>No command matches</b>Try “screenshot”, “logs” or a test's name." }));
+          $("paletteInput").setAttribute("aria-activedescendant", paletteItems.length ? "pal-" + paletteIndex : "");
+          const selected = $("pal-" + paletteIndex);
+          if (selected) selected.scrollIntoView({ block: "nearest" });
+        }
+
+        function openPalette() {
+          closeMenu();
+          closePopover();
+          paletteOpener = document.activeElement;
+          $("paletteScrim").hidden = false;
+          $("paletteInput").value = "";
+          paletteIndex = 0;
+          renderPalette();
+          $("paletteInput").focus();
+        }
+
+        function closePalette(restore) {
+          if ($("paletteScrim").hidden) return false;
+          $("paletteScrim").hidden = true;
+          if (restore !== false && paletteOpener && paletteOpener.focus) paletteOpener.focus();
+          return true;
+        }
+
+        function runPaletteItem(index) {
+          const command = paletteItems[index];
+          closePalette(false);
+          if (command) command.run();
+        }
+
+        $("paletteInput").addEventListener("input", () => { paletteIndex = 0; renderPalette(); });
+        $("paletteInput").addEventListener("keydown", (event) => {
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            if (!paletteItems.length) return;
+            paletteIndex = (paletteIndex + (event.key === "ArrowDown" ? 1 : paletteItems.length - 1)) % paletteItems.length;
+            renderPalette();
+          } else if (event.key === "Enter") {
+            event.preventDefault();
+            runPaletteItem(paletteIndex);
+          } else if (event.key === "Escape") {
+            event.preventDefault();
+            closePalette();
+          } else if (event.key === "Tab") {
+            event.preventDefault();
+          }
+        });
+        $("paletteList").addEventListener("click", (event) => {
+          const item = event.target.closest(".pal-item");
+          if (item) runPaletteItem(Number(item.dataset.index));
+        });
+        $("paletteScrim").addEventListener("mousedown", (event) => { if (event.target === $("paletteScrim")) closePalette(); });
+        $("paletteButton").addEventListener("click", openPalette);
+
+        function showShortcuts() {
+          openPopover($("paletteButton"),
+            "<p><b>⇧⌘P</b> commands · <b>⌥1–5</b> inspector tabs · <b>⌥⌘0</b> show or hide the inspector · <b>/</b> filter</p>" +
+            "<p><b>↑ ↓</b> move in a list · <b>Enter</b> open · <b>Esc</b> close · <b>⇧F10</b> the row's menu</p>" +
+            "<p><b>⇧⌘H</b> Home · <b>⌘S</b> screenshot · <b>⌃⌘Z</b> shake · <b>⇧⌘K</b> type with the Mac keyboard (⇧⌘K again releases it) · <b>⌘K</b> software keyboard while typing</p>" +
+            "<p><b>⌥-drag</b> pinch or rotate · <b>⌥⇧-drag</b> two-finger pan · the wheel scrolls · <b>P</b> picks elements in Accessibility · <b>⌘↩</b> runs the selected test</p>");
+        }
+
+        // The chords that stay SimTool's while the Mac keyboard types into the device —
+        // the menu shortcuts of Simulator.app keep working there too.
+        function isViewerChord(event) {
+          const meta = event.metaKey || event.ctrlKey;
+          return (meta && event.shiftKey && !event.altKey && (event.code === "KeyP" || event.code === "KeyH")) ||
+            (event.metaKey && !event.shiftKey && !event.altKey && !event.ctrlKey && event.code === "KeyS") ||
+            (event.metaKey && event.ctrlKey && !event.shiftKey && event.code === "KeyZ") ||
+            (event.metaKey && event.altKey && event.code === "Digit0");
+        }
+
+        document.addEventListener("keydown", (event) => {
+          if (event.defaultPrevented) return;
+          const meta = event.metaKey || event.ctrlKey;
+          const editing = isEditableTarget(event.target);
+          if (meta && event.shiftKey && event.code === "KeyP") { event.preventDefault(); if (!closePalette()) openPalette(); return; }
+          if (!$("paletteScrim").hidden || !$("dialogScrim").hidden) return;
+          if (event.key === "Escape") {
+            if (closeMenu(true) || closePopover()) { event.preventDefault(); return; }
+            if (editing) { event.target.blur(); return; }
+            if (app.dataset.mode === "replay") { event.preventDefault(); exitReplay(); return; }
+            return;
+          }
+          if (meta && event.shiftKey && event.code === "KeyH") { event.preventDefault(); pressHome(); return; }
+          if (event.metaKey && !event.shiftKey && !event.altKey && !event.ctrlKey && event.code === "KeyS") { event.preventDefault(); saveScreenshot(); return; }
+          if (event.metaKey && event.ctrlKey && event.code === "KeyZ") { event.preventDefault(); pressShake(); return; }
+          if (event.metaKey && event.altKey && event.code === "Digit0") { event.preventDefault(); setInspectorOpen(!inspector.open); return; }
+          if (event.altKey && !meta && /^Digit[1-5]$/.test(event.code)) { event.preventDefault(); openTab(TABS[Number(event.code.slice(5)) - 1]); return; }
+          if (meta && event.key === "Enter" && inspector.tab === "tests" && tests.view === "tests" && tests.selectedFile) { event.preventDefault(); runTest(tests.selectedFile); return; }
+          if (editing || keyboardBridge.enabled) return;
+          if (meta && event.code === "KeyF" && inspector.open) { event.preventDefault(); focusFilter(); return; }
+          if (event.key === "/" && !meta && !event.altKey) { event.preventDefault(); focusFilter(); return; }
+          if (event.code === "KeyP" && !meta && !event.altKey && !event.shiftKey && inspector.tab === "ax" && inspector.open) { event.preventDefault(); setAxPick(!ax.pick); return; }
+          if (event.key === " " && app.dataset.mode === "replay" && event.target === document.body) { event.preventDefault(); $("playPause").click(); }
+        });
+
+        // A click outside closes menus and popovers.
+        document.addEventListener("mousedown", (event) => {
+          if (!$("menu").hidden && !$("menu").contains(event.target)) closeMenu();
+          if (!$("popover").hidden && !$("popover").contains(event.target) && !event.target.closest("[aria-haspopup=dialog]")) closePopover();
+        });
+        window.addEventListener("resize", () => { closeMenu(); closePopover(); });
+        """#
+
+    static let jsStateJs = #"""
+        // State: live snapshots of the app's @SimToolDebugState models — a list of
+        // models, the selected one's snapshot, and what changed, as before → after.
+
+        const STATE_HISTORY_LIMIT = 500;
+        const stateView = {
+          cursor: null,
+          latest: {},          // modelId → latest event (a deallocation keeps the last snapshot)
+          changes: [],         // { event, diffs }, oldest first
+          selected: stored("state.selected", null),
+          mode: "snapshot",    // snapshot | changes
+          lastChange: {},      // modelId → paths changed by its latest event
+          folded: new Set()    // "modelId|path" of the nested values a person folded
+        };
+
+        const stateFilter = createFilter("state", { placeholder: "Filter models, keys and values", onChange: () => renderState() });
+        const stateModes = segmented("View", [["snapshot", "Snapshot"], ["changes", "Changes"]], () => stateView.mode, (mode) => { stateView.mode = mode; renderState(); });
+        const stateCopy = el("button", { class: "tb-btn", type: "button", "aria-label": "Copy the snapshot as JSON", "data-tip": "Copy the snapshot as JSON", html: icon("copy") });
+
+        const statePanel = $("panel-state");
+        const stateModels = el("div", { class: "models", role: "listbox", "aria-label": "Tracked models", tabindex: "0" });
+        const stateBody = el("div", { class: "state-body", role: "region", "aria-label": "Model state" });
+        statePanel.append(
+          el("div", { class: "ptool" }, stateFilter.field, stateModes, el("span", { class: "ptool-spacer" }), stateCopy),
+          el("div", { class: "state-split" }, stateModels, stateBody)
+        );
+
+        stateCopy.addEventListener("click", () => {
+          const event = stateView.latest[stateView.selected];
+          if (event) copyText(JSON.stringify(event.snapshot, (key, value) => key === MODEL_ID_KEY ? undefined : value, 2), "Snapshot copied");
+        });
+
+        function stateMatches(id) {
+          const query = stateFilter.text;
+          const chips = stateFilter.chips;
+          if (!query && !chips.length) return true;
+          const event = stateView.latest[id];
+          const hay = (id + " " + JSON.stringify(event ? event.snapshot : "")).toLowerCase();
+          return matchesFilters(hay, chips, query);
+        }
+
+        function renderStateTree(value, changed, path, modelId) {
+          if (!value || typeof value !== "object") return '<span>' + escapeHTML(stateValueText(value)) + "</span>";
+          const keys = Array.isArray(value) ? value.map((_, index) => index) : Object.keys(value).filter((key) => key !== MODEL_ID_KEY).sort();
+          return keys.map((key) => {
+            const child = value[key];
+            const childPath = path ? path + (Array.isArray(value) ? "[" + key + "]" : "." + key) : String(key);
+            const label = Array.isArray(value) ? "[" + key + "]" : key;
+            const isChanged = changed.some((candidate) => candidate === childPath || candidate.startsWith(childPath + ".") || candidate.startsWith(childPath + "["));
+            if (child && typeof child === "object" && Object.keys(child).filter((k) => k !== MODEL_ID_KEY).length) {
+              const summary = Array.isArray(child) ? label + " [" + child.length + "]" : label;
+              const open = stateView.folded.has(modelId + "|" + childPath) ? "" : " open";
+              return "<details" + open + '><summary data-path="' + escapeHTML(childPath) + '"><span class="k">' + escapeHTML(summary) + '</span></summary><div class="indent">' + renderStateTree(child, changed, childPath, modelId) + "</div></details>";
+            }
+            return '<div><span class="k">' + escapeHTML(label) + '</span>: <span class="' + (isChanged ? "changed" : "") + '">' + escapeHTML(stateValueText(child)) + "</span></div>";
+          }).join("");
+        }
+
+        function renderState() {
+          const ids = Object.keys(stateView.latest).sort((a, b) => {
+            const left = stateView.latest[a], right = stateView.latest[b];
+            return (left.deallocated ? 1 : 0) - (right.deallocated ? 1 : 0) || a.localeCompare(b);
+          }).filter(stateMatches);
+          if (stateView.selected && !stateView.latest[stateView.selected]) stateView.selected = null;
+          if (!stateView.selected && ids.length) stateView.selected = ids[0];
+          setCount("state", Object.keys(stateView.latest).length, 0);
+
+          const focusedId = document.activeElement && stateModels.contains(document.activeElement) ? document.activeElement.dataset.model : null;
+          stateModels.innerHTML = "";
+          for (const id of ids) {
+            const event = stateView.latest[id];
+            const button = el("button", { type: "button", class: "model" + (event.deallocated ? " dead" : ""), role: "option", "aria-selected": String(id === stateView.selected), tabindex: id === stateView.selected ? "0" : "-1", "data-model": id });
+            button.innerHTML = '<span class="dot ' + (event.deallocated ? "dot-idle" : "dot-ok") + '" title="' + (event.deallocated ? "deallocated" : "alive") + '"></span>' +
+              '<span class="m-name" translate="no">' + escapeHTML(id) + '</span><span class="m-seq">#' + escapeHTML(event.seq) + "</span>" +
+              '<span class="m-sub">' + (event.deallocated ? "deallocated " : "changed ") + escapeHTML(formatClock(event.timestamp)) + "</span>";
+            stateModels.append(button);
+          }
+          if (focusedId) { const again = stateModels.querySelector('[data-model="' + CSS.escape(focusedId) + '"]'); if (again) again.focus(); }
+
+          if (!ids.length) {
+            stateBody.innerHTML = "";
+            stateBody.paneKey = null;
+            if (!inspector.attachedApp && inspector.configKnown && !Object.keys(stateView.latest).length) stateBody.append(noAppPanel("state"));
+            else if (Object.keys(stateView.latest).length) stateBody.append(el("div", { class: "empty", html: "<b>No model matches</b>Clear the filter to see all " + formatCount(Object.keys(stateView.latest).length) + "." }));
+            else stateBody.append(el("div", { class: "empty", html: "<b>No tracked models yet</b>Annotate an <code>@Observable</code> model with <code>@SimToolDebugState</code>, register it with <code>SimToolState.track(model)</code>, and launch the app through SimTool — its state streams here on every change." }));
+            return;
+          }
+          const event = stateView.latest[stateView.selected];
+          // Every state event re-renders; patchPane keeps folds, focus, scroll and a text selection.
+          const paneKey = stateView.selected + "|" + stateView.mode;
+          if (stateView.mode === "snapshot") {
+            patchPane(stateBody, paneKey, '<div class="dhead flat"><span class="dtitle" translate="no">' + escapeHTML(stateView.selected) + '</span><span class="muted small">seq ' + escapeHTML(event.seq) + " · " + (event.deallocated ? "deallocated" : "alive") + "</span></div>" +
+              '<div class="tree-kv" translate="no">' + renderStateTree(event.snapshot, stateView.lastChange[stateView.selected] || [], "", stateView.selected) + "</div>");
+          } else {
+            const embedded = embeddedModelIds(stateView.latest);
+            const blocks = [];
+            if (embedded[stateView.selected]) {
+              patchPane(stateBody, paneKey, '<div class="empty"><b>Changes show in ' + escapeHTML(embedded[stateView.selected]) + "</b>This model lives inside that one, so its changes appear there as nested paths.</div>");
+              return;
+            }
+            for (let index = stateView.changes.length - 1; index >= 0; index--) {
+              const { event: change, diffs } = stateView.changes[index];
+              if (change.modelId !== stateView.selected) continue;
+              // The parent's history entry already shows this change as a nested diff.
+              if (embedded[change.modelId]) continue;
+              blocks.push('<div class="change"><div class="change-head"><b translate="no">' + escapeHTML(change.modelId) + "</b><span>seq " + escapeHTML(change.seq) + '</span><span class="mono">' + escapeHTML(formatClock(change.timestamp, true)) + "</span>" + (change.deallocated ? "<span>deallocated</span>" : "") + "</div>" +
+                diffs.map((diff) => '<div class="diffline" translate="no"><span class="path">' + escapeHTML(diff.path) + "</span><del>" + escapeHTML(stateValueText(diff.before)) + '</del><span class="arrow">→</span><ins>' + escapeHTML(stateValueText(diff.after)) + "</ins></div>").join("") + "</div>");
+            }
+            patchPane(stateBody, paneKey, blocks.length ? blocks.join("") : '<div class="empty"><b>No changes yet</b>This model has not changed since it was first reported.</div>');
+          }
+        }
+
+        // Folding a nested value is remembered per model and path, across renders.
+        stateBody.addEventListener("toggle", (event) => {
+          const summary = event.target.firstElementChild;
+          if (!summary || summary.dataset.path == null || !stateView.selected) return;
+          const key = stateView.selected + "|" + summary.dataset.path;
+          if (event.target.open) stateView.folded.delete(key); else stateView.folded.add(key);
+        }, true);
+
+        stateModels.addEventListener("click", (event) => {
+          const button = event.target.closest("[data-model]");
+          if (!button) return;
+          stateView.selected = button.dataset.model;
+          store("state.selected", stateView.selected);
+          renderState();
+          const again = stateModels.querySelector('[data-model="' + CSS.escape(stateView.selected) + '"]');
+          if (again) again.focus();
+        });
+        stateModels.addEventListener("keydown", (event) => {
+          const buttons = [...stateModels.querySelectorAll("[data-model]")];
+          const index = buttons.findIndex((button) => button.dataset.model === stateView.selected);
+          const delta = { ArrowDown: 1, ArrowUp: -1 }[event.key];
+          if (!delta || !buttons.length) return;
+          event.preventDefault();
+          const next = buttons[Math.max(0, Math.min(buttons.length - 1, index + delta))];
+          stateView.selected = next.dataset.model;
+          renderState();
+          const again = stateModels.querySelector('[data-model="' + CSS.escape(stateView.selected) + '"]');
+          if (again) again.focus();
+        });
+
+        async function pollState() {
+          const since = stateView.cursor == null ? "" : "&since=" + stateView.cursor;
+          const payload = await apiJSON("/api/v1/state/events?limit=500" + since);
+          if (payload.nextCursor != null) stateView.cursor = payload.nextCursor;
+          if (!payload.events || !payload.events.length) return;
+          for (const event of payload.events) {
+            const previous = stateView.latest[event.modelId];
+            const diffs = diffStateValues(previous ? previous.snapshot : undefined, event.snapshot, "", []);
+            if (previous || event.deallocated) {
+              stateView.changes.push({ event, diffs });
+              if (stateView.changes.length > STATE_HISTORY_LIMIT) stateView.changes.shift();
+            }
+            stateView.lastChange[event.modelId] = event.deallocated ? [] : diffs.map((diff) => diff.path);
+            // A deallocation carries no snapshot; keep the last known one so the
+            // greyed-out model still shows what it looked like.
+            stateView.latest[event.modelId] = event.deallocated && previous ? { ...event, snapshot: previous.snapshot } : event;
+          }
+          renderState();
+        }
+
+        tabHandlers.state = { show() { renderState(); poller.poke("state"); } };
+
+        function resetState() {
+          stateView.cursor = null;
+          stateView.latest = {};
+          stateView.changes = [];
+          stateView.lastChange = {};
+          renderState();
+        }
+        """#
+
+    static let jsStreamJs = #"""
+        // The device screen: H.264/AVCC over one long fetch, decoded with WebCodecs,
+        // painted on a canvas. The stream reconnects with backoff when the server goes
+        // away, and the page says what is happening instead of showing a frozen frame
+        // as "live".
+
+        const canvas = $("screenCanvas");
+        const canvasContext = canvas.getContext("2d", { alpha: false, desynchronized: true });
+        const maxCanvasDPR = 1.5;
+
+        const screenState = {
+          width: 0,         // stream size in pixels
+          height: 0,
+          points: null,     // screen size in points, once known (AX root frame)
+          connection: "connecting",  // connecting | live | reconnecting | offline
+          attempt: 0,
+          retryAt: 0
+        };
+        const connectionListeners = [];
+        function onConnection(listener) { connectionListeners.push(listener); }
+
+        function setConnection(state, detail) {
+          const changed = screenState.connection !== state;
+          screenState.connection = state;
+          app.dataset.conn = state;
+          renderConnectionLabel();
+          $("placeholder").hidden = state !== "connecting" || screenState.width > 0;
+          if (detail) $("placeholder").textContent = detail;
+          if (changed) for (const listener of connectionListeners) listener(state);
+        }
+
+        // A replay says Replay — and still says when the server is out of reach.
+        const CONNECTION_LABELS = { connecting: "Connecting…", live: "Live", reconnecting: "Reconnecting…", offline: "Offline" };
+        function renderConnectionLabel() {
+          const link = CONNECTION_LABELS[screenState.connection];
+          const label = app.dataset.mode === "replay" ? "Replay" + (screenState.connection === "live" ? "" : " · " + link) : link;
+          $("connLabel").textContent = label;
+          $("connLabel").parentElement.title = label;
+          $("sbConn").textContent = label.replace(/…/g, "");
+        }
+
+        // ---- AVCC envelopes ----
+
+        const avccTags = { 1: "description", 2: "keyframe", 3: "delta" };
+        class Demuxer {
+          constructor() { this.buffer = new Uint8Array(0); }
+          push(bytes) {
+            const merged = new Uint8Array(this.buffer.length + bytes.length);
+            merged.set(this.buffer);
+            merged.set(bytes, this.buffer.length);
+            this.buffer = merged;
+            const chunks = [];
+            let offset = 0;
+            while (this.buffer.length - offset >= 4) {
+              const length = new DataView(this.buffer.buffer, this.buffer.byteOffset + offset, 4).getUint32(0, false);
+              if (length < 1) { offset += 4; continue; }
+              if (this.buffer.length - offset - 4 < length) break;
+              const type = avccTags[this.buffer[offset + 4]];
+              if (type) chunks.push({ type, payload: this.buffer.slice(offset + 5, offset + 4 + length) });
+              offset += 4 + length;
+            }
+            if (offset > 0) this.buffer = this.buffer.slice(offset);
+            return chunks;
+          }
+        }
+
+        function avcCodecString(description) {
+          if (description.length < 4) return "avc1.42E01E";
+          const hex = (byte) => byte.toString(16).padStart(2, "0");
+          return "avc1." + hex(description[1]) + hex(description[2]) + hex(description[3]);
+        }
+
+        // ---- Painting ----
+
+        let frameTimes = [];
+        let backing = { width: 0, height: 0 };
+
+        function updateBacking() {
+          const rect = canvas.getBoundingClientRect();
+          if (!rect.width || !screenState.width) return;
+          const dpr = Math.min(window.devicePixelRatio || 1, maxCanvasDPR);
+          backing = {
+            width: Math.max(1, Math.min(screenState.width, Math.round(rect.width * dpr))),
+            height: Math.max(1, Math.min(screenState.height, Math.round(rect.height * dpr)))
+          };
+        }
+
+        function paint(frame) {
+          const width = frame.displayWidth, height = frame.displayHeight;
+          if (width !== screenState.width || height !== screenState.height) {
+            screenState.width = width;
+            screenState.height = height;
+            $("placeholder").hidden = true;
+            fitDevice();
+            updateBacking();
+          }
+          if (!backing.width) updateBacking();
+          if (canvas.width !== backing.width || canvas.height !== backing.height) {
+            canvas.width = backing.width;
+            canvas.height = backing.height;
+          }
+          canvasContext.drawImage(frame, 0, 0, backing.width, backing.height);
+          const now = performance.now();
+          frameTimes.push(now);
+        }
+
+        function makeFramePainter() {
+          let pending = null;
+          let scheduled = false;
+          function draw() {
+            scheduled = false;
+            const frame = pending;
+            pending = null;
+            if (!frame) return;
+            try { paint(frame); } finally { frame.close(); }
+          }
+          return {
+            drawDecoded(frame) {
+              if (pending) pending.close();
+              pending = frame;
+              if (!scheduled) { scheduled = true; requestAnimationFrame(draw); }
+            }
+          };
+        }
+
+        // fps as measured: frames painted in the last second. A still screen sends no
+        // frames, which reads "idle", not a made-up number.
+        setInterval(() => {
+          const now = performance.now();
+          frameTimes = frameTimes.filter((time) => now - time < 1000);
+          const text = screenState.connection !== "live" ? "— fps" : frameTimes.length ? frameTimes.length + " fps" : "idle";
+          $("readFps").textContent = text;
+        }, 500);
+
+        // ---- Connection loop ----
+
+        let streamAbort = null;
+        let retryTimer = null;
+        let streamGeneration = 0;   // a newer run makes an older one's errors irrelevant
+        const reconnectListeners = [];
+        function onReconnect(listener) { reconnectListeners.push(listener); }
+
+        async function runStream() {
+          if (typeof VideoDecoder === "undefined") {
+            setConnection("offline", "This browser cannot decode the stream (WebCodecs VideoDecoder is unavailable). Use a current Chrome or Safari.");
+            $("veilTitle").textContent = "This browser cannot show the stream";
+            $("veilText").textContent = "WebCodecs VideoDecoder is unavailable — open the viewer in a current Chrome or Safari.";
+            $("reconnectNow").hidden = true;
+            return;
+          }
+          clearTimeout(retryTimer);
+          const generation = ++streamGeneration;
+          streamAbort = new AbortController();
+          const wasReconnecting = screenState.attempt > 0;
+          if (!wasReconnecting) setConnection("connecting");
+          let decoder = null;
+          try {
+            const controller = streamAbort;
+            const response = await fetch("/stream.avcc", { signal: controller.signal, cache: "no-store" });
+            if (!response.ok || !response.body) throw new Error("the server answered " + response.status);
+            const demuxer = new Demuxer();
+            const painter = makeFramePainter();
+            let timestamp = 0;
+            decoder = new VideoDecoder({
+              output(frame) { painter.drawDecoded(frame); },
+              error(error) { setMessage("Video decoder error: " + error.message + " — reconnecting", "err"); controller.abort(); }
+            });
+            const reader = response.body.getReader();
+            screenState.attempt = 0;
+            setConnection("live");
+            if (wasReconnecting) for (const listener of reconnectListeners) listener();
+            while (true) {
+              const { value, done } = await reader.read();
+              if (done) break;
+              if (!value) continue;
+              for (const chunk of demuxer.push(value)) {
+                if (chunk.type === "description") {
+                  if (decoder.state === "closed") throw new Error("the decoder closed");
+                  decoder.configure({ codec: avcCodecString(chunk.payload), description: chunk.payload, optimizeForLatency: true, hardwareAcceleration: "prefer-hardware" });
+                } else if (decoder.state === "configured") {
+                  try {
+                    decoder.decode(new EncodedVideoChunk({ type: chunk.type === "keyframe" ? "key" : "delta", timestamp, data: chunk.payload }));
+                    timestamp += 16667;
+                  } catch (_) {}
+                }
+              }
+            }
+            throw new Error("the stream ended");
+          } catch (error) {
+            if (decoder && decoder.state !== "closed") { try { decoder.close(); } catch (_) {} }
+            if (generation === streamGeneration) scheduleReconnect(error);
+          }
+        }
+
+        function scheduleReconnect(error) {
+          screenState.attempt += 1;
+          const delay = Math.min(5000, 500 * Math.pow(2, screenState.attempt - 1));
+          screenState.retryAt = performance.now() + delay;
+          setConnection(screenState.attempt > 6 ? "offline" : "reconnecting");
+          $("veilTitle").textContent = screenState.attempt > 6 ? "simtool is not answering" : "Connection to simtool lost";
+          updateVeilCountdown();
+          if (error && screenState.attempt === 1) setMessage("Video stream lost (" + error.message + ") — reconnecting", "err");
+          retryTimer = setTimeout(runStream, delay);
+        }
+
+        function updateVeilCountdown() {
+          if (screenState.connection !== "reconnecting" && screenState.connection !== "offline") return;
+          const seconds = Math.max(0, Math.ceil((screenState.retryAt - performance.now()) / 1000));
+          $("veilText").textContent = "Showing the last frame · retrying in " + seconds + " s (attempt " + screenState.attempt + ")";
+        }
+        setInterval(updateVeilCountdown, 500);
+
+        function restartStream() {
+          clearTimeout(retryTimer);
+          if (streamAbort) streamAbort.abort();
+          runStream();
+        }
+
+        $("reconnectNow").addEventListener("click", restartStream);
+
+        // The page went to sleep with the tab hidden for long: a stale socket can sit
+        // half-open. Coming back, make sure the stream is still flowing.
+        document.addEventListener("visibilitychange", () => {
+          if (!document.hidden && screenState.connection !== "live" && screenState.connection !== "connecting") restartStream();
+        });
+
+        // ---- Fitting the device into the stage ----
+
+        function fitDevice() {
+          const area = $("deviceArea").getBoundingClientRect();
+          const aspect = screenState.width && screenState.height ? screenState.width / screenState.height : 402 / 874;
+          const maxW = Math.max(120, area.width - 64), maxH = Math.max(160, area.height - 48);
+          let height = maxH, width = height * aspect;
+          if (width > maxW) { width = maxW; height = width / aspect; }
+          const device = $("device");
+          device.style.setProperty("--dev-w", Math.floor(width) + "px");
+          device.style.setProperty("--dev-h", Math.floor(height) + "px");
+          // The screen's own corner radius, in proportion: ~55 pt on a 402 pt wide phone.
+          device.style.setProperty("--dev-radius", Math.round(width * 0.137) + "px");
+          updateBacking();
+          updateReadoutSize();
+          if (typeof drawRulers === "function") drawRulers();
+        }
+
+        function updateReadoutSize() {
+          const points = screenState.points;
+          if (points) $("readSize").textContent = Math.round(points.width) + " × " + Math.round(points.height) + " pt";
+          else if (screenState.width) $("readSize").textContent = screenState.width + " × " + screenState.height + " px";
+        }
+
+        new ResizeObserver(fitDevice).observe($("deviceArea"));
+
+        // Pointer position in points (or pixels until the point size is known).
+        function pointerReadout(clientX, clientY) {
+          const rect = canvas.getBoundingClientRect();
+          const fx = (clientX - rect.left) / rect.width, fy = (clientY - rect.top) / rect.height;
+          if (fx < 0 || fy < 0 || fx > 1 || fy > 1) return "";
+          if (screenState.points) return "x " + Math.round(fx * screenState.points.width) + "  y " + Math.round(fy * screenState.points.height) + " pt";
+          if (screenState.width) return "x " + Math.round(fx * screenState.width) + "  y " + Math.round(fy * screenState.height) + " px";
+          return "";
+        }
+        """#
+
+    static let jsTestsJs = #"""
+        // Tests: the YAML tests of the project, their runs, and recorded sessions.
+        // A recording plays in the screen's place — Replay is a mode of the whole
+        // viewer, so looking at Network or Logs does not stop it.
+
+        const tests = {
+          view: stored("tests.view", "tests"),      // tests | history
+          definitions: [],
+          sessions: [],
+          run: null,                                // /api/v1/tests/run
+          selectedFile: stored("tests.selected", null),
+          selectedSession: null,
+          watchedSession: null,                     // a running session whose end switches to its recording
+          recordVideo: stored("tests.video", true),
+          replay: null,                             // the session playing
+          sessionsPath: ""
+        };
+
+        const testsFilter = createFilter("tests", { placeholder: "Filter name, file, reference, verdict", onChange: () => renderTests() });
+        const testsModes = segmented("Tests view", [["tests", "Tests"], ["history", "History"]], () => tests.view, (view) => { tests.view = view; store("tests.view", view); renderTests(); });
+        testsModes.classList.add("keep");
+        const testsWhere = el("span", { class: "muted small mono ptool-note", text: ".simtool/tests" });
+        const testsView = buildListPanel("tests", { listLabel: "Tests", toolbar: [testsModes, testsFilter.field, el("span", { class: "ptool-spacer" }), testsWhere] });
+
+        // The outcome in words with its mark; `markOnly` for the narrow first column, which names it in a tooltip.
+        function sessionOutcomeHTML(session, markOnly) {
+          const outcome = outcomeOf(session);
+          const glyph = { satisfied: "check", passed: "check", unsatisfied: "x", failed: "x", inconclusive: "warn", infra: "offline", interrupted: "stop", stopped: "stop" }[outcome.tone] || "more";
+          if (session.status === "running") return '<span class="verdict v-running"><span class="spinner" aria-hidden="true"></span>' + (markOnly ? "" : "Running") + "</span>";
+          return '<span class="verdict v-' + escapeHTML(outcome.tone) + '"' + (markOnly ? ' title="' + escapeHTML(outcome.text) + '"' : "") + ">" + icon(glyph) + (markOnly ? "" : escapeHTML(outcome.text)) + "</span>";
+        }
+
+        // ---- Tests view ----
+
+        const definitionList = createList(testsView.list, {
+          key: (test) => test.file,
+          // runActive() too: every row's Run button turns off while any test runs.
+          version: (test) => JSON.stringify([test.name, test.stepCount, test.parseError, test.reference, test.kind, runActive(), runStateOf(test), lastRunOf(test) && lastRunOf(test).id, lastRunOf(test) && lastRunOf(test).verdict]),
+          rowClass: () => "test-grid",
+          render: renderDefinitionRow,
+          empty: () => el("div", { class: "empty", html: tests.definitions.length ? "<b>No test matches</b>Clear the filter to see all " + formatCount(tests.definitions.length) + "." :
+            "<b>No tests yet</b>Add a YAML test to <code>.simtool/tests/</code> in the project this server runs for — <code>simtool test run --help</code> shows the format. Tests appear here with a Run button." }),
+          onSelect: (file) => { tests.selectedFile = file; store("tests.selected", file); renderTestsDetail(); },
+          // Enter opens the test's actions; running it takes ⌘↩ or the Run button, so browsing never starts a run.
+          onActivate: () => { const action = testsView.detail.querySelector('[data-act="run"], [data-act="stop"]'); if (action) action.focus(); },
+          onMenu: (file, test, x, y, row) => openMenu(x, y, [
+            { icon: "play", label: "Run", kbd: "⌘↩", disabled: !!test.parseError || runActive(), run: () => runTest(file) },
+            { icon: "copy", label: "Copy the run command", run: () => copyText("simtool test run .simtool/tests/" + file, "Command copied") }
+          ], row)
+        });
+
+        function runActive() { return !!(tests.run && tests.run.active); }
+        function runStateOf(test) { return tests.run && tests.run.file === test.file ? [tests.run.active, tests.run.completedSteps, tests.run.status].join(":") : ""; }
+        function lastRunOf(test) { return tests.lastRuns ? tests.lastRuns[test.file] : null; }
+
+        function renderDefinitionRow(test, row) {
+          const running = tests.run && tests.run.active && tests.run.file === test.file;
+          const last = lastRunOf(test);
+          const lead = test.parseError ? '<span class="st st-err" title="Cannot run">' + icon("warn") + "</span>"
+            : running ? '<span class="spinner" aria-label="Running"></span>'
+            : last ? sessionOutcomeHTML(last, true)
+            : '<span class="dot dot-idle dot-lead" title="Never run"></span>';
+          const action = test.parseError ? "" : running
+            ? (tests.run.stoppable === false ? '<span class="muted small">Running…</span>' : '<button class="btn btn-sm btn-danger" type="button" data-act="stop">' + icon("stop", "ic-sm") + "Stop</button>")
+            : '<button class="btn btn-sm" type="button" data-act="run"' + (runActive() ? " disabled" : "") + ">" + icon("play", "ic-sm") + "Run</button>";
+          row.innerHTML =
+            '<span class="cell">' + lead + "</span>" +
+            '<span class="cell t-name"><b translate="no">' + escapeHTML(test.name || test.file) + "</b>" +
+              (test.parseError ? '<span class="perr">Cannot run · ' + escapeHTML(test.parseError) + "</span>" : '<span translate="no">' + escapeHTML(test.file) + (test.reference ? " · " + escapeHTML(test.reference) : "") + "</span>") + "</span>" +
+            '<span class="cell kind c-kind">' + escapeHTML(test.kind || "—") + "</span>" +
+            '<span class="cell num c-steps">' + (test.parseError ? "—" : formatCount(test.stepCount)) + "</span>" +
+            '<span class="cell c-last">' + (running ? '<span class="verdict v-running">Step ' + Math.min(tests.run.completedSteps + 1, tests.run.totalSteps || test.stepCount) + " of " + (tests.run.totalSteps || test.stepCount) + "</span>"
+              : test.parseError ? '<span class="muted">Cannot run</span>'
+              : last ? sessionOutcomeHTML(last) + ' <span class="muted small" title="' + escapeHTML(new Date(last.startedAt).toString()) + '">· ' + escapeHTML(formatAgo(last.startedAt)) + "</span>"
+              : '<span class="muted">Never run</span>') + "</span>" +
+            '<span class="cell">' + action + "</span>";
+        }
+
+        testsView.list.addEventListener("click", (event) => {
+          const action = event.target.closest("[data-act]");
+          if (!action) return;
+          const row = action.closest(".row");
+          if (action.dataset.act === "run") runTest(row.dataset.key);
+          if (action.dataset.act === "stop") stopTest();
+        });
+
+        // ---- History view ----
+
+        function sessionMenu(session) {
+          return [
+            { icon: "film", label: "Play the recording", disabled: session.status === "running" || !!session.videoError, run: () => enterReplay(session) },
+            { icon: "copy", label: "Copy session id", run: () => copyText(session.id, "Session id copied") },
+            { icon: "copy", label: "Copy report path", disabled: !tests.sessionsPath, run: () => copyText(tests.sessionsPath + "/" + session.id + "/report.md", "Report path copied") },
+            "-",
+            { icon: "trash", label: "Delete session…", tone: "danger", disabled: session.status === "running", run: () => deleteSession(session) }
+          ];
+        }
+
+        async function deleteSession(session) {
+          if (!(await confirmDestructive("Delete this run?", "“" + session.title + "” (" + formatDayTime(session.startedAt) + ") and its recording and evidence are deleted from the project's test sessions.", "Delete run"))) return;
+          try {
+            await api("/api/v1/tests/" + encodeURIComponent(session.id), { method: "DELETE" });
+            if (tests.replay && tests.replay.id === session.id) exitReplay();
+            tests.sessions = tests.sessions.filter((candidate) => candidate.id !== session.id);
+            testsLastSessions = "";
+            renderTests();
+            toast("Run deleted", { icon: "trash" });
+          } catch (error) {
+            fail("Delete failed", error);
+          }
+        }
+
+        // ---- Rendering ----
+
+        function testsVisibleDefinitions() {
+          const query = testsFilter.text, chips = testsFilter.chips;
+          return tests.definitions.filter((test) => {
+            const last = lastRunOf(test);
+            const hay = [test.name, test.file, test.reference, test.kind, test.description, last ? outcomeOf(last).text : "never run"].filter(Boolean).join(" ").toLowerCase();
+            return matchesFilters(hay, chips, query);
+          });
+        }
+
+        function testsVisibleSessions() {
+          const query = testsFilter.text, chips = testsFilter.chips;
+          return tests.sessions.filter((session) => {
+            const hay = [session.title, session.file, session.reference, session.kind, session.status, outcomeOf(session).text, session.deviceName].filter(Boolean).join(" ").toLowerCase();
+            return matchesFilters(hay, chips, query);
+          });
+        }
+
+        const sessionContainer = el("div", { class: "list", role: "listbox", "aria-label": "Runs", hidden: true });
+        // The history list renders into its own container next to the tests list.
+        testsView.listWrap.append(sessionContainer);
+        const historyList = createList(sessionContainer, {
+          key: (session) => session.id,
+          version: (session) => [session.status, session.verdict, session.endedAt, session.title, formatAgo(session.startedAt)].join("|"),
+          rowClass: () => "hist-grid",
+          render: (session, row) => {
+            row.innerHTML =
+              '<span class="cell">' + sessionOutcomeHTML(session) + "</span>" +
+              '<span class="cell t-name"><b translate="no">' + escapeHTML(session.title) + '</b><span translate="no">' + escapeHTML([session.reference, session.file || session.id].filter(Boolean).join(" · ")) + "</span></span>" +
+              '<span class="cell kind c-kind">' + escapeHTML(session.kind || "—") + "</span>" +
+              '<span class="cell num c-len">' + (session.endedAt ? formatOffset(sessionDurationSeconds(session)) : "—") + "</span>" +
+              '<span class="cell num" title="' + escapeHTML(new Date(session.startedAt).toString()) + '">' + escapeHTML(formatAgo(session.startedAt)) + "</span>";
+          },
+          header: el("div", { class: "thead hist-grid", role: "row", html: '<span class="cell">Outcome</span><span class="cell">Run</span><span class="cell c-kind">Kind</span><span class="cell num c-len">Length</span><span class="cell num">Started</span>' }),
+          empty: () => el("div", { class: "empty", html: tests.sessions.length ? "<b>No run matches</b>Clear the filter to see all " + formatCount(tests.sessions.length) + "." :
+            "<b>No runs yet</b>Every <code>simtool test run</code> — from here or from a terminal — records its steps, video and evidence as a session you can replay here." }),
+          onSelect: (id) => { tests.selectedSession = id; renderTestsDetail(); },
+          onActivate: (id) => { const session = tests.sessions.find((candidate) => candidate.id === id); if (session) enterReplay(session); },
+          onMenu: (id, session, x, y, row) => openMenu(x, y, sessionMenu(session), row)
+        });
+
+        function renderTests() {
+          tests.lastRuns = lastRunByFile(tests.sessions);
+          const history = tests.view === "history";
+          testsView.list.hidden = history;
+          sessionContainer.hidden = !history;
+          for (const button of testsModes.children) button.setAttribute("aria-pressed", String((button.textContent === "History") === history));
+          if (history) historyList.update(testsVisibleSessions());
+          else definitionList.update(testsVisibleDefinitions());
+          if (!history && tests.selectedFile && definitionList.selectedKey !== tests.selectedFile && tests.definitions.some((test) => test.file === tests.selectedFile)) definitionList.select(tests.selectedFile, { quiet: true, scroll: false });
+          if (history && tests.selectedSession && historyList.selectedKey !== tests.selectedSession && tests.sessions.some((session) => session.id === tests.selectedSession)) historyList.select(tests.selectedSession, { quiet: true, scroll: false });
+          const failing = tests.definitions.filter((test) => { const last = lastRunOf(test); return last && ["unsatisfied", "failed", "infra"].includes(last.verdict || last.status); }).length;
+          setCount("tests", tests.definitions.length, failing);
+          const running = tests.run && tests.run.active;
+          testsView.guide.innerHTML = guideHTML([
+            history ? plural(tests.sessions.length, "run", "runs") : plural(tests.definitions.length, "test", "tests"),
+            running ? '<span class="verdict v-running"><span class="spinner" aria-hidden="true"></span>Running ' + escapeHTML(tests.run.name || tests.run.file || "") + " · step " + Math.min(tests.run.completedSteps + 1, tests.run.totalSteps) + " of " + tests.run.totalSteps + "</span>" : "",
+            failing && !history ? '<span class="st-err">' + plural(failing, "test failed", "tests failed") + " on the last run</span>" : ""
+          ], "");
+          renderTestsDetail();
+        }
+
+        function stepRowsForDefinition(test) {
+          const live = tests.run && tests.run.file === test.file ? tests.run : null;
+          const last = lastRunOf(test);
+          const fromSession = {};
+          if (!live || !live.active) {
+            // The last finished run of this test: which steps passed, when, and where it stopped.
+            const session = live && live.sessionId ? tests.sessions.find((candidate) => candidate.id === live.sessionId) || last : last;
+            if (session) for (const entry of session.entries || []) {
+              if (entry.kind !== "step") continue;
+              const step = parseStepText(entry.text);
+              if (step.index) fromSession[step.index - 1] = { mark: step.mark, at: formatOffset(entryOffsetSeconds(session, entry)), detail: splitStep(step.text).tail };
+            }
+          }
+          return (test.steps || []).map((text, index) => {
+            let mark = "pending", at = "", detail = "";
+            if (live && live.active) {
+              if (index < live.completedSteps) mark = "passed";
+              else if (index === live.completedSteps) mark = "running";
+            } else if (fromSession[index]) {
+              ({ mark, at, detail } = fromSession[index]);
+            } else if (live && index === live.completedSteps && live.status === "failed") {
+              mark = "failed"; detail = live.error || "";
+            }
+            return { text, mark, at, detail };
+          });
+        }
+
+        function stepHTML(step, seekable, current, offset) {
+          const glyph = { passed: '<span class="st-ok">' + icon("check") + "</span>", failed: '<span class="st-err">' + icon("x") + "</span>",
+            running: '<span class="spinner" aria-label="Running"></span>', stopped: '<span class="muted">' + icon("stop") + "</span>",
+            note: '<span class="muted">' + icon("chev-r") + "</span>", pending: '<span class="dot dot-idle"></span>' }[step.mark];
+          return '<li class="step' + (step.mark === "pending" ? " pending" : "") + (seekable ? " seekable" : "") + (current ? " current" : "") + '"' + (offset != null ? ' data-offset="' + offset + '"' : "") + (seekable ? ' tabindex="0" role="button"' : "") + ">" +
+            '<span class="st-ic">' + glyph + '</span><span class="s-t">' + escapeHTML(step.at || "") + '</span><span class="s-text" translate="no">' + escapeHTML(step.text) +
+            (step.detail ? '<span class="s-sub">' + escapeHTML(step.detail) + "</span>" : "") + "</span></li>";
+        }
+
+        function renderTestsDetail() {
+          if (tests.view === "history") return renderSessionDetail();
+          const test = tests.definitions.find((candidate) => candidate.file === tests.selectedFile);
+          showDetail(testsView.panel, !!test);
+          if (!test) return;
+          const node = testsView.detail;
+          if (test.parseError) {
+            patchPane(node, "test:" + test.file, '<div class="dhead"><span class="dtitle" translate="no">' + escapeHTML(test.file) + '</span></div><div class="dbody"><div class="callout err">' + icon("warn") +
+              "<div><b>This test cannot run</b><br>" + escapeHTML(test.parseError) + '</div></div><p class="muted">Fix the YAML in <code>.simtool/tests/' + escapeHTML(test.file) + "</code>; the list picks the change up by itself.</p></div>");
+            return;
+          }
+          const running = tests.run && tests.run.active && tests.run.file === test.file;
+          const busy = runActive();
+          const last = lastRunOf(test);
+          const action = running
+            ? (tests.run.stoppable === false ? '<span class="muted small">Running from a terminal</span>' : '<button class="btn btn-sm btn-danger" type="button" data-act="stop">' + icon("stop", "ic-sm") + "Stop</button>")
+            : '<button class="btn btn-sm btn-primary" type="button" data-act="run" data-tip="Run the test" data-key="⌘↩"' + (busy ? " disabled" : "") + ">" + icon("play", "ic-sm") + "Run</button>";
+          // Each step of a run re-renders this pane; patchPane keeps focus on Stop or Record video.
+          patchPane(node, "test:" + test.file,
+            '<div class="dhead"><span class="dtitle ui" translate="no">' + escapeHTML(test.name || test.file) + "</span>" +
+              '<div class="dactions"><label class="check small muted"><input type="checkbox" data-act="video"' + (tests.recordVideo ? " checked" : "") + (busy ? " disabled" : "") + "> Record video</label>" + action + "</div></div>" +
+            '<div class="dmeta"><span class="mono" translate="no">' + escapeHTML(test.file) + "</span>" + (test.kind ? "<span>" + escapeHTML(test.kind) + "</span>" : "") +
+              (test.reference ? "<span>" + escapeHTML(test.reference) + "</span>" : "") + (last ? "<span>Last run " + escapeHTML(formatAgo(last.startedAt)) + " · " + sessionOutcomeHTML(last) + "</span>" : "<span>Never run</span>") + "</div>" +
+            '<div class="dbody">' + (test.description ? '<p class="muted desc">' + escapeHTML(test.description) + "</p>" : "") +
+              (running && tests.run.error ? '<div class="callout err">' + icon("warn") + "<div>" + escapeHTML(tests.run.error) + "</div></div>" : "") +
+              '<ol class="steps">' + stepRowsForDefinition(test).map((step) => stepHTML(step, false, step.mark === "running")).join("") + "</ol></div>");
+        }
+
+        function renderSessionDetail() {
+          const session = tests.sessions.find((candidate) => candidate.id === tests.selectedSession);
+          showDetail(testsView.panel, !!session);
+          if (!session) return;
+          const node = testsView.detail;
+          const criteria = session.criteria || [];
+          const mocks = session.mocks || [];
+          const claim = session.verdict || criteria.length || mocks.length ? '<div class="claim"><div class="claim-head">' + sessionOutcomeHTML(session) +
+              (criteria.length ? '<span class="muted small">' + criteria.filter((criterion) => criterion.status === "met").length + " of " + criteria.length + " criteria met</span>" : "") + "</div>" +
+            criteria.map((criterion) => {
+              const state = criterion.status === "met" ? "met" : criterion.status === "unmet" ? "unmet" : "unchecked";
+              return '<div class="claim-line"><span class="' + (state === "met" ? "st-ok" : state === "unmet" ? "st-err" : "muted") + '">' + icon(state === "met" ? "check" : state === "unmet" ? "x" : "more") + "</span><span><b class=\"mono small\">" +
+                escapeHTML(criterion.label) + (criterion.step ? " · step " + criterion.step : "") + "</b> " + escapeHTML(criterion.detail || (state === "met" ? "held" : state === "unmet" ? "did not hold" : "not reached")) + "</span></div>";
+            }).join("") +
+            mocks.map((mock) => '<div class="claim-line"><span class="' + (mock.strict && !mock.hits ? "st-err" : "muted") + '">' + icon("mock") + '</span><span translate="no">mock ' + escapeHTML(mock.method) + " — " + plural(mock.hits, "call", "calls") + (mock.strict ? ", strict" : "") + "</span></div>").join("") +
+            "</div>" : "";
+          const seekable = session.status !== "running" && !session.videoError;
+          const current = tests.replay && tests.replay.id === session.id ? replayCurrentIndex : -1;
+          const entries = (session.entries || []).map((entry, index) => {
+            const offset = entryOffsetSeconds(session, entry);
+            if (entry.kind === "step") {
+              const step = parseStepText(entry.text);
+              const parts = splitStep(step.text);
+              return stepHTML({ text: parts.head, detail: parts.tail, mark: step.mark, at: formatOffset(offset) }, seekable, index === current, offset.toFixed(2));
+            }
+            const lines = entry.logs || [];
+            if (!lines.length) return "";
+            // A failure entry carries the error first and a long screen dump after it.
+            const title = lines[0] === "On screen:" ? "Screen at the failure — " + plural(lines.length - 1, "element", "elements") : lines[0];
+            return '<li><details class="step-logs"><summary>' + escapeHTML(title) + '</summary><pre class="code" translate="no">' + escapeHTML(lines.slice(lines[0] === "On screen:" ? 1 : 0).join("\n")) + "</pre></details></li>";
+          }).join("");
+          const evidence = (session.evidence || []).length ? '<div class="sec">Evidence</div><ul class="evidence" translate="no">' +
+            (session.evidence || []).map((file) => {
+              const path = (tests.sessionsPath ? tests.sessionsPath + "/" : "") + session.id + "/" + file;
+              return '<li><span class="mono small">' + escapeHTML(path) + '</span><button class="tb-btn" type="button" data-act="copy-path" data-path="' + escapeHTML(path) + '" aria-label="Copy the path" data-tip="Copy the path">' + icon("copy", "ic-sm") + "</button></li>";
+            }).join("") + "</ul>" : "";
+          patchPane(node, "session:" + session.id,
+            '<div class="dhead"><span class="dtitle ui" translate="no">' + escapeHTML(session.title) + "</span>" +
+              '<div class="dactions">' + (seekable ? '<button class="btn btn-sm btn-primary" type="button" data-act="play">' + icon("film", "ic-sm") + (tests.replay && tests.replay.id === session.id ? "Playing" : "Play recording") + "</button>" : "") +
+              '<button class="tb-btn" type="button" data-act="more" aria-label="More actions" aria-haspopup="menu">' + icon("more") + "</button></div></div>" +
+            '<div class="dmeta">' + (session.kind ? "<span>" + escapeHTML(session.kind) + "</span>" : "") + (session.reference ? "<span>" + escapeHTML(session.reference) + "</span>" : "") +
+              "<span>" + escapeHTML(formatDayTime(session.startedAt)) + "</span>" + (session.endedAt ? "<span>" + formatOffset(sessionDurationSeconds(session)) + "</span>" : "") +
+              "<span>" + escapeHTML(session.deviceName || "") + "</span>" + (session.videoError ? '<span class="st-warn">no recording: ' + escapeHTML(session.videoError) + "</span>" : "") + "</div>" +
+            '<div class="dbody">' + claim + '<div class="sec">Timeline' + (seekable ? " · click a step to see that moment" : "") + '</div><ol class="steps">' + entries + "</ol>" + evidence + "</div>");
+        }
+
+        testsView.detail.addEventListener("click", (event) => {
+          const action = event.target.closest("[data-act]");
+          if (action) {
+            if (action.dataset.act === "run") runTest(tests.selectedFile);
+            if (action.dataset.act === "stop") stopTest();
+            if (action.dataset.act === "play") { const session = tests.sessions.find((candidate) => candidate.id === tests.selectedSession); if (session) enterReplay(session); }
+            if (action.dataset.act === "more") { const session = tests.sessions.find((candidate) => candidate.id === tests.selectedSession); if (session) openMenuAt(action, sessionMenu(session)); }
+            if (action.dataset.act === "copy-path") copyText(action.dataset.path, "Path copied");
+            return;
+          }
+          const step = event.target.closest(".step.seekable");
+          if (step) seekToStep(Number(step.dataset.offset));
+        });
+        testsView.detail.addEventListener("change", (event) => {
+          if (event.target.dataset.act === "video") { tests.recordVideo = event.target.checked; store("tests.video", tests.recordVideo); }
+        });
+        testsView.detail.addEventListener("keydown", (event) => {
+          const step = event.target.closest(".step.seekable");
+          if (step && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); seekToStep(Number(step.dataset.offset)); }
+        });
+
+        // ---- Running ----
+
+        async function runTest(file) {
+          const test = tests.definitions.find((candidate) => candidate.file === file);
+          if (!test || test.parseError || runActive()) return;
+          try {
+            const status = await apiJSON("/api/v1/tests/run", { method: "POST", body: JSON.stringify({ file, video: tests.recordVideo }) });
+            tests.run = status;
+            tests.watchedSession = status.sessionId || null;
+            exitReplay();
+            toast("Running “" + (test.name || file) + "”" + (tests.recordVideo ? " — recording" : ""), { icon: "play" });
+            renderTests();
+            poller.poke("tests");
+          } catch (error) {
+            fail("Could not start the test", error);
+          }
+        }
+
+        async function stopTest() {
+          try {
+            tests.run = await apiJSON("/api/v1/tests/run/stop", { method: "POST" });
+            toast("Stopping the run", { icon: "stop" });
+            renderTests();
+          } catch (error) {
+            fail("Could not stop the test", error);
+          }
+        }
+
+        // ---- Replay ----
+
+        const video = $("replayVideo");
+        let replayCurrentIndex = -1;
+
+        function enterReplay(session) {
+          if (!session || session.status === "running") return;
+          if (session.videoError) { toast("This run has no recording: " + session.videoError, { error: true }); return; }
+          tests.replay = session;
+          app.dataset.mode = "replay";
+          $("replayTitle").textContent = session.title + " · " + formatDayTime(session.startedAt);
+          renderConnectionLabel();
+          $("replayNote").hidden = true;
+          video.src = "/api/v1/tests/" + encodeURIComponent(session.id) + "/video";
+          drawScrubTicks(session);
+          updateDeviceButtons();
+          updateAxMode();
+          layoutWorkspace();
+          if (tests.view !== "history") { tests.view = "history"; store("tests.view", "history"); }
+          tests.selectedSession = session.id;
+          if (inspector.tab === "tests") renderTests();
+          video.play().catch(() => {});
+        }
+
+        function exitReplay() {
+          if (app.dataset.mode !== "replay") return;
+          tests.replay = null;
+          replayCurrentIndex = -1;
+          app.dataset.mode = "live";
+          video.pause();
+          video.removeAttribute("src");
+          video.load();
+          renderConnectionLabel();
+          updateDeviceButtons();
+          updateAxMode();
+          layoutWorkspace();
+          if (inspector.tab === "tests") renderTestsDetail();
+        }
+
+        function seekToStep(offset) {
+          const session = tests.sessions.find((candidate) => candidate.id === tests.selectedSession);
+          if (!session) return;
+          if (!tests.replay || tests.replay.id !== session.id) enterReplay(session);
+          const seek = () => { video.currentTime = offset; video.play().catch(() => {}); };
+          if (video.readyState >= 1) seek(); else video.addEventListener("loadedmetadata", seek, { once: true });
+        }
+
+        function drawScrubTicks(session) {
+          const duration = sessionDurationSeconds(session) || 1;
+          $("scrubTicks").innerHTML = (session.entries || []).filter((entry) => entry.kind === "step").map((entry) => {
+            const step = parseStepText(entry.text);
+            const left = Math.min(100, entryOffsetSeconds(session, entry) / duration * 100);
+            return '<span class="scrub-tick' + (step.mark === "failed" ? " fail" : "") + '" style="left:' + left + '%" title="' + escapeHTML(formatOffset(entryOffsetSeconds(session, entry)) + " " + step.text) + '"></span>';
+          }).join("");
+        }
+
+        function updateTransport() {
+          const duration = isFinite(video.duration) ? video.duration : 0;
+          const position = video.currentTime || 0;
+          $("playPause").innerHTML = icon(video.paused ? "play" : "pause");
+          $("playPause").setAttribute("aria-label", video.paused ? "Play" : "Pause");
+          $("replayTime").textContent = formatOffset(position) + " / " + formatOffset(duration);
+          const percent = duration ? Math.min(100, position / duration * 100) : 0;
+          $("scrubFill").style.width = percent + "%";
+          $("scrubHead").style.left = percent + "%";
+          const scrub = $("scrub");
+          scrub.setAttribute("aria-valuemax", String(Math.round(duration)));
+          scrub.setAttribute("aria-valuenow", String(Math.round(position)));
+          scrub.setAttribute("aria-valuetext", formatOffset(position) + " of " + formatOffset(duration));
+          // The current step follows the playhead.
+          const session = tests.replay;
+          if (!session) return;
+          let current = -1;
+          (session.entries || []).forEach((entry, index) => { if (entry.kind === "step" && entryOffsetSeconds(session, entry) <= position + 0.25) current = index; });
+          if (current !== replayCurrentIndex) {
+            replayCurrentIndex = current;
+            if (inspector.tab === "tests" && tests.view === "history" && tests.selectedSession === session.id) {
+              testsView.detail.querySelectorAll(".step").forEach((row) => row.classList.remove("current"));
+              const steps = [...testsView.detail.querySelectorAll(".step[data-offset]")];
+              const stepEntries = (session.entries || []).map((entry, index) => ({ entry, index })).filter(({ entry }) => entry.kind === "step");
+              const position2 = stepEntries.findIndex(({ index }) => index === current);
+              if (steps[position2]) steps[position2].classList.add("current");
+            }
+          }
+        }
+
+        for (const name of ["timeupdate", "play", "pause", "loadedmetadata", "ended", "seeked"]) video.addEventListener(name, updateTransport);
+        // An unfinished or missing mp4 (a hard-killed server): keep the timeline, say the video is gone.
+        video.addEventListener("error", () => { if (app.dataset.mode === "replay") $("replayNote").hidden = false; });
+        $("playPause").addEventListener("click", () => { if (video.paused) video.play().catch(() => {}); else video.pause(); });
+        $("backToLive").addEventListener("click", exitReplay);
+
+        function scrubTo(clientX) {
+          const rect = $("scrub").getBoundingClientRect();
+          const duration = isFinite(video.duration) ? video.duration : 0;
+          if (!duration) return;
+          video.currentTime = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width)) * duration;
+        }
+        let scrubbing = false;
+        $("scrub").addEventListener("pointerdown", (event) => { scrubbing = true; try { $("scrub").setPointerCapture(event.pointerId); } catch (_) {} scrubTo(event.clientX); });
+        $("scrub").addEventListener("pointermove", (event) => { if (scrubbing) scrubTo(event.clientX); });
+        $("scrub").addEventListener("pointerup", () => { scrubbing = false; });
+        $("scrub").addEventListener("keydown", (event) => {
+          const step = { ArrowLeft: -5, ArrowRight: 5, PageDown: -15, PageUp: 15 }[event.key];
+          if (step) { event.preventDefault(); video.currentTime = Math.max(0, Math.min(video.duration || 0, video.currentTime + step)); }
+          if (event.key === "Home") { event.preventDefault(); video.currentTime = 0; }
+          if (event.key === "End") { event.preventDefault(); video.currentTime = video.duration || 0; }
+          if (event.key === " ") { event.preventDefault(); $("playPause").click(); }
+        });
+
+        // ---- Polling ----
+
+        let testsLastSessions = "";
+        let testsLastDefinitions = "";
+        async function loadTests() {
+          const [sessions, definitions, run] = await Promise.all([apiJSON("/api/v1/tests"), apiJSON("/api/v1/tests/definitions"), apiJSON("/api/v1/tests/run")]);
+          const sessionsKey = JSON.stringify(sessions.sessions || []);
+          const definitionsKey = JSON.stringify([definitions.tests || [], run]);
+          if (sessionsKey === testsLastSessions && definitionsKey === testsLastDefinitions) return;
+          const previous = tests.sessions;
+          testsLastSessions = sessionsKey;
+          testsLastDefinitions = definitionsKey;
+          tests.sessions = (sessions.sessions || []).slice().sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt));
+          tests.definitions = definitions.tests || [];
+          const previousRun = tests.run;
+          tests.run = run;
+          // Follow a run that starts anywhere — here or from a terminal: select its test
+          // so its steps stream in, and watch its session.
+          if (run.active && run.sessionId && (!previousRun || previousRun.sessionId !== run.sessionId)) {
+            tests.watchedSession = run.sessionId;
+            if (run.file) { tests.selectedFile = run.file; store("tests.selected", run.file); }
+            if (tests.view !== "tests") { tests.view = "tests"; store("tests.view", "tests"); }
+          }
+          // The moment the watched run ends, its recording takes the screen's place.
+          if (tests.watchedSession) {
+            const before = previous.find((session) => session.id === tests.watchedSession);
+            const after = tests.sessions.find((session) => session.id === tests.watchedSession);
+            if (after && after.status !== "running" && (!before || before.status === "running")) {
+              tests.watchedSession = null;
+              toast("“" + after.title + "” — " + outcomeOf(after).text, after.verdict === "satisfied" || after.status === "passed" ? { icon: "check" } : { error: true });
+              if (inspector.open && inspector.tab === "tests" && !after.videoError) { tests.selectedSession = after.id; enterReplay(after); }
+            }
+          }
+          if (tests.replay && !tests.sessions.some((session) => session.id === tests.replay.id)) exitReplay();
+          renderTests();
+        }
+
+        tabHandlers.tests = { show() { renderTests(); poller.poke("tests"); } };
+        """#
+
+    static let jsTouchJs = #"""
         // Live touch: one WebSocket carries the viewer's finger — and its keys —
         // to the device. Moves coalesce to one per animation frame; downs, ups and
         // keys are never dropped, and a move still waiting goes out first.
@@ -159,303 +4368,571 @@ enum WebViewerAssets {
         """#
 
     static let viewerCss = #"""
-        :root { color-scheme: dark; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; }
+        /* SimTool viewer — "Drafting sheet".
+           One line-weight system instead of glow and glass; colour only where it carries
+           a state. Every colour, size and radius below comes from the tokens on :root. */
+
+        :root {
+          color-scheme: dark;
+          --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+          --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+          --fs-11: 11px; --fs-12: 12px; --fs-13: 13px; --fs-15: 15px;
+          --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 20px; --sp-6: 24px;
+          --r-1: 4px; --r-2: 6px; --r-3: 8px;
+          --h-toolbar: 44px; --h-tabs: 36px; --h-ptool: 38px; --h-row: 26px; --h-status: 26px;
+          --dur: 140ms; --ease: cubic-bezier(.2, .7, .2, 1);
+
+          /* Graphite sheet */
+          --g0: #0e0f11;  /* stage behind the device */
+          --g1: #17191c;  /* panels */
+          --g2: #1d2024;  /* toolbars, headers, popovers */
+          --g3: #25292e;  /* hover */
+          --g4: #2e3339;  /* pressed */
+          --line-hair: rgba(255, 255, 255, .06);
+          --line-thin: rgba(255, 255, 255, .11);
+          --line-thick: rgba(255, 255, 255, .22);
+          --ink1: #e8eaed; --ink2: #a9aeb5; --ink3: #8d939b;
+          /* Selection, focus, primary actions and redlines — nothing else. */
+          --accent: #6aa4ff; --accent-bg: rgba(106, 164, 255, .15); --accent-line: rgba(106, 164, 255, .55); --on-accent: #08142a;
+          /* Course ink: what SimTool did to the app — the finger, test steps, mocks, keys sent to the device. */
+          --course: #b48fff; --course-bg: rgba(180, 143, 255, .13);
+          /* States, only where the data says so. */
+          --ok: #45c08a; --warn: #e7a93f; --err: #f26b76;
+          --err-bg: rgba(242, 107, 118, .09); --warn-bg: rgba(231, 169, 63, .09);
+          --json-str: #9fd49b; --json-num: #e7c27a; --json-lit: #8fb8ff;
+          --pop-shadow: 0 16px 40px rgba(0, 0, 0, .55);
+          --device-line: rgba(255, 255, 255, .18);
+          /* Derived tints, so a theme only has to restate tokens. */
+          --screen-black: #000;
+          --accent-hover: #82b3ff; --accent-fill: rgba(106, 164, 255, .14); --accent-bg-strong: rgba(106, 164, 255, .22);
+          --course-fill: rgba(180, 143, 255, .25); --course-preview: rgba(180, 143, 255, .55); --course-line: rgba(180, 143, 255, .45); --course-track: rgba(180, 143, 255, .3);
+          --ok-line: rgba(69, 192, 138, .35); --ok-bar: rgba(69, 192, 138, .7);
+          --err-line: rgba(242, 107, 118, .35); --err-bg-strong: rgba(242, 107, 118, .14);
+          --mark-bg: rgba(231, 169, 63, .35); --changed-bg: rgba(231, 169, 63, .16);
+          --veil: rgba(14, 15, 17, .7); --scrim: rgba(14, 15, 17, .5); --on-toast-button: rgba(0, 0, 0, .12);
+        }
+
         * { box-sizing: border-box; }
-        body { margin: 0; min-height: 100vh; background: radial-gradient(circle at top left, #25314a 0, #0b1020 34rem, #05070d 100%); color: #f4f7fb; }
-        main { min-height: 100vh; display: grid; place-items: center; padding: 16px; }
-        .viewer-card { position: relative; width: min(var(--card-w, 720px), calc(100vw - 32px)); height: calc(100vh - 32px); display: grid; grid-template-rows: auto minmax(0, 1fr); border: 1px solid rgba(255,255,255,0.12); border-radius: 22px; overflow: hidden; background: rgba(7, 10, 18, 0.78); box-shadow: 0 24px 80px rgba(0,0,0,0.45); backdrop-filter: blur(20px); }
-        .card-resize-handle { position: absolute; top: 0; bottom: 0; width: 6px; z-index: 5; cursor: ew-resize; touch-action: none; }
-        .card-resize-handle.left { left: 0; }
-        .card-resize-handle.right { right: 0; }
-        .card-resize-handle:hover, .card-resize-handle.active { background: rgba(125,211,252,0.25); }
-        a { color: #7dd3fc; }
+        html, body { height: 100%; }
+        body {
+          margin: 0; overflow: hidden; background: var(--g0); color: var(--ink1);
+          font: var(--fs-12)/1.4 var(--font-ui); -webkit-font-smoothing: antialiased; -webkit-tap-highlight-color: transparent;
+        }
+        button { font: inherit; color: inherit; touch-action: manipulation; }
+        kbd {
+          display: inline-block; min-width: 18px; padding: 2px 4px; text-align: center;
+          font: 500 var(--fs-11)/1 var(--font-ui); color: var(--ink2);
+          border: 1px solid var(--line-thin); border-bottom-width: 2px; border-radius: var(--r-1); background: var(--g1);
+        }
+        code { font: var(--fs-11)/1.4 var(--font-mono); }
+        .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+        .muted { color: var(--ink2); }
+        .small { font-size: var(--fs-11); }
+        .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+        .ic { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+        .ic-sm { width: 14px; height: 14px; }
+        .ic-xs { width: 10px; height: 10px; stroke-width: 2; }
+        .ic-lg { width: 28px; height: 28px; stroke-width: 1.3; }
+        :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--r-1); }
+        [hidden] { display: none !important; }
 
-        /* App bar: SIMTOOL on top, device actions + Inspect toggle below */
-        .appbar { border-bottom: 1px solid rgba(255,255,255,0.08); background: rgba(255,255,255,0.025); }
-        .brandrow { padding: 9px 16px 2px; }
-        .brand { margin: 0; color: #7dd3fc; font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase; font-weight: 700; }
-        .toolrow { display: flex; align-items: center; gap: 8px; padding: 4px 14px 10px; }
-        .icon-btn { appearance: none; width: 30px; height: 30px; display: grid; place-items: center; border: 1px solid rgba(255,255,255,0.14); border-radius: 9px; background: rgba(255,255,255,0.06); color: #cdd6e6; font-size: 14px; cursor: pointer; }
-        .icon-btn:hover { background: rgba(255,255,255,0.10); }
-        .inspect-toggle { margin-left: auto; display: flex; align-items: center; gap: 7px; appearance: none; border: 1px solid rgba(255,255,255,0.14); border-radius: 10px; background: rgba(255,255,255,0.06); color: rgba(244,247,251,0.72); padding: 6px 12px; font: 12px ui-sans-serif, system-ui, sans-serif; cursor: pointer; }
-        .inspect-toggle:hover { background: rgba(255,255,255,0.10); }
-        .inspect-toggle .dot { width: 8px; height: 8px; border-radius: 999px; background: #4b5366; }
-        .inspect-toggle.on { background: rgba(125,211,252,0.16); border-color: transparent; color: #bae6fd; }
-        .inspect-toggle.on .dot { background: #7dd3fc; box-shadow: 0 0 8px rgba(125,211,252,0.85); }
-        .inspect-toggle + .inspect-toggle { margin-left: 0; }
+        /* ── App frame: toolbar / workspace / status bar ── */
+        .app { height: 100vh; display: grid; grid-template-rows: var(--h-toolbar) minmax(0, 1fr) var(--h-status); }
 
-        /* Stage holds the device behind the drawer; the status bar and inspector overlay its bottom. */
-        .stage { position: relative; min-height: 0; background: #000; overflow: hidden; }
-        .screen-wrap { position: absolute; inset: 0; padding: 16px; }
-        .screen-wrap.fit { display: grid; place-items: center; overflow: hidden; }
-        .screen-wrap.actual { display: grid; justify-items: center; align-items: start; overflow: auto; }
-        .surface { position: relative; width: 360px; height: 780px; max-width: 100%; max-height: 100%; border-radius: 22px; overflow: hidden; background: #03040a; box-shadow: 0 0 0 1px rgba(255,255,255,0.10), 0 22px 60px rgba(0,0,0,0.36); }
-        canvas { display: block; width: 100%; height: 100%; object-fit: contain; image-rendering: auto; cursor: crosshair; touch-action: none; }
-        /* Mac keyboard → simulator: a ring says the keys go to the device; dashed while they go elsewhere. */
-        .surface.kbd-capture { outline: 2px solid #7dd3fc; outline-offset: 3px; box-shadow: 0 0 0 1px rgba(255,255,255,0.10), 0 0 28px rgba(125,211,252,0.5), 0 22px 60px rgba(0,0,0,0.36); }
-        .surface.kbd-capture.kbd-paused { outline: 2px dashed rgba(125,211,252,0.45); box-shadow: 0 0 0 1px rgba(255,255,255,0.10), 0 22px 60px rgba(0,0,0,0.36); }
-        #placeholder { position: absolute; inset: 0; display: grid; place-items: center; color: rgba(255,255,255,0.52); font-size: 13px; pointer-events: none; }
+        .toolbar {
+          container: bar / inline-size;
+          display: flex; align-items: center; gap: var(--sp-3); min-width: 0; padding: 0 var(--sp-2) 0 var(--sp-3);
+          background: var(--g2); border-bottom: 1px solid var(--line-thin);
+        }
+        /* Actions never shrink; the identity group gives way first (see the container rules below). */
+        .tb-group { display: flex; flex: none; align-items: center; gap: 2px; min-width: 0; }
+        .tb-identity { flex: 0 1 auto; gap: var(--sp-2); overflow: hidden; }
+        .tb-right { margin-left: auto; gap: var(--sp-1); }
+        .tb-sep { width: 1px; height: 18px; margin: 0 var(--sp-2); background: var(--line-thin); flex: none; }
+        .brand { display: inline-flex; align-items: center; gap: 7px; padding-right: var(--sp-1); font-weight: 600; font-size: var(--fs-13); letter-spacing: -.01em; white-space: nowrap; }
+        .brand-mark { position: relative; width: 11px; height: 18px; border: 1.5px solid var(--ink1); border-radius: 3px; }
+        .brand-mark::after { content: ""; position: absolute; left: 2px; right: 2px; top: 2px; height: 1.5px; border-radius: 1px; background: var(--ink1); }
+        .device-id { display: inline-flex; align-items: center; gap: 6px; height: 28px; min-width: 0; max-width: 280px; padding: 0 8px; border: 1px solid var(--line-thin); border-radius: var(--r-2); background: var(--g1); white-space: nowrap; }
+        .device-id b { font-weight: 500; overflow: hidden; text-overflow: ellipsis; }
+        .device-id span { color: var(--ink2); }
+        .conn { display: inline-flex; align-items: center; gap: 6px; color: var(--ink2); white-space: nowrap; }
+        .conn-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ink3); flex: none; }
+        .app[data-conn="live"] .conn-dot { background: var(--ok); }
+        .app[data-conn="reconnecting"] .conn-dot, .app[data-conn="offline"] .conn-dot { background: var(--err); }
+        .app[data-mode="replay"] .conn-dot { background: var(--ink2); }
+        .tb-app { padding: 0 4px; color: var(--ink2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 200px; }
 
-        .statusbar { position: absolute; left: 0; right: 0; bottom: 0; z-index: 1; display: flex; align-items: center; gap: 8px; padding: 6px 12px; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; color: rgba(244,247,251,0.64); background: linear-gradient(rgba(3,5,12,0), rgba(3,5,12,0.74)); pointer-events: none; }
-        .status-dot { width: 7px; height: 7px; border-radius: 999px; background: #4ade80; box-shadow: 0 0 6px rgba(74,222,128,0.7); }
-        .status-dot.err { background: #f87171; box-shadow: 0 0 6px rgba(248,113,113,0.7); }
-        .status-dot.idle { background: #4b5366; box-shadow: none; }
-        .statusbar .device-name { margin-left: auto; color: #bae6fd; }
-        .statusbar .kbd-badge { color: #7dd3fc; }
-        .statusbar .kbd-badge.paused { color: rgba(244,247,251,0.5); }
+        .tb-btn {
+          display: inline-grid; place-items: center; width: 28px; height: 28px; flex: none; border: 0; border-radius: var(--r-2);
+          background: transparent; color: var(--ink2); cursor: pointer;
+        }
+        .tb-btn:hover { background: var(--g3); color: var(--ink1); }
+        .tb-btn:active { background: var(--g4); }
+        .tb-btn[aria-pressed="true"] { background: var(--g3); color: var(--ink1); }
+        .tb-btn:disabled { opacity: .4; cursor: default; background: transparent; }
 
-        /* Inspector drawer: always slides up from the bottom over the device. */
-        .inspector { position: absolute; left: 0; right: 0; bottom: 0; z-index: 3; height: 62%; display: flex; flex-direction: column; min-height: 0; background: #0b1020; border-top: 1px solid rgba(255,255,255,0.10); border-radius: 16px 16px 0 0; box-shadow: 0 -12px 32px rgba(0,0,0,0.55); }
-        .inspector[hidden] { display: none; }
-        .drawer-handle { flex: 0 0 auto; display: grid; place-items: center; padding: 6px 0 4px; cursor: row-resize; touch-action: none; }
-        .drawer-handle .grab { width: 34px; height: 4px; border-radius: 999px; background: rgba(255,255,255,0.28); }
-        .drawer-handle:hover .grab { background: rgba(255,255,255,0.45); }
+        .toggle {
+          display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; white-space: nowrap;
+          border: 1px solid var(--line-thin); border-radius: var(--r-2); background: transparent; color: var(--ink2); cursor: pointer;
+        }
+        .toggle:hover { background: var(--g3); color: var(--ink1); }
+        .toggle[aria-pressed="true"] { color: var(--accent); border-color: var(--accent-line); background: var(--accent-bg); }
+        .toggle-sm { height: 26px; padding: 0 8px; }
+        #keyboardToggle[aria-pressed="true"] { color: var(--course); border-color: var(--course); background: var(--course-bg); }
 
-        /* Side-by-side layout: when the stage is wide enough, the inspector docks as a right column
-           beside the device (both fully visible) instead of overlaying it as a bottom drawer. */
-        .stage.layout-side { display: flex; flex-direction: row; }
-        .stage.layout-side .screen-wrap { position: relative; inset: auto; flex: 9999 1 0%; min-width: 0; }
-        .stage.layout-side.inspector-open .screen-wrap { max-width: 600px; }
-        .stage.layout-side .inspector { position: relative; left: auto; right: auto; bottom: auto; z-index: 0; height: auto; flex: 1 0 400px; min-width: 0; border-top: 0; border-left: 1px solid rgba(255,255,255,0.10); border-radius: 0; box-shadow: none; }
-        .stage.layout-side .drawer-handle { display: none; }
-        .inspector-list-view, .inspector-detail-view { display: flex; flex-direction: column; min-height: 0; flex: 1 1 auto; }
-        .inspector-list-view[hidden], .inspector-detail-view[hidden] { display: none; }
+        .cmdk {
+          display: inline-flex; align-items: center; gap: 8px; min-width: 180px; height: 28px; padding: 0 6px 0 8px;
+          border: 1px solid var(--line-thin); border-radius: var(--r-2); background: var(--g1); color: var(--ink2); cursor: pointer;
+        }
+        .cmdk:hover { border-color: var(--line-thick); color: var(--ink1); }
+        .cmdk kbd { margin-left: auto; }
 
-        .inspector-tabs { display: flex; align-items: center; gap: 2px; padding: 0 8px; border-bottom: 1px solid rgba(255,255,255,0.08); }
-        .insp-tab { appearance: none; background: none; border: 0; border-bottom: 2px solid transparent; color: rgba(244,247,251,0.55); padding: 8px 10px 7px; font: 12px ui-sans-serif, system-ui, sans-serif; cursor: pointer; display: flex; align-items: center; gap: 6px; }
-        .insp-tab:hover { color: #cdd6e6; }
-        .insp-tab.active { color: #bae6fd; border-bottom-color: #7dd3fc; }
-        .insp-tab .tab-count { font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; color: rgba(244,247,251,0.5); }
-        .insp-tab.active .tab-count { color: #7dd3fc; }
-        .state-pane { display: flex; flex-direction: column; gap: 8px; padding: 8px; overflow: auto; flex: 1; min-height: 0; }
-        .state-pane[hidden] { display: none; }
-        .state-models { display: flex; flex-direction: column; gap: 6px; }
-        .state-model { border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; padding: 6px 8px; }
-        .state-model.state-dead { opacity: 0.45; }
-        .state-model summary { cursor: pointer; font: 12px ui-sans-serif, system-ui, sans-serif; color: #bae6fd; }
-        .state-tree { margin: 4px 0 0 12px; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; color: #cdd6e6; }
-        .state-history { display: flex; flex-direction: column; gap: 4px; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
-        .state-change { border-top: 1px solid rgba(255,255,255,0.06); padding-top: 4px; }
-        .state-change-title { color: rgba(244,247,251,0.55); }
-        .state-diff-minus { color: #fda4af; }
-        .state-diff-plus { color: #86efac; }
-        /* Tests tab */
-        .tests-pane { display: flex; flex-direction: column; gap: 8px; min-height: 0; flex: 1; padding: 8px; }
-        .tests-pane[hidden] { display: none; }
-        .tests-sessions { display: flex; flex-direction: column; gap: 4px; max-height: 38%; overflow: auto; flex-shrink: 0; }
-        .tests-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 10px; border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; cursor: pointer; font-size: 12px; }
-        .tests-row:hover { border-color: rgba(125,211,252,0.45); }
-        .tests-row.selected { border-color: #7dd3fc; background: rgba(125,211,252,0.08); }
-        .tests-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .tests-meta { flex-shrink: 0; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
-        .tests-status-passed { color: #4ade80; }
-        .tests-status-failed { color: #f87171; }
-        .tests-status-stopped { color: #9ca3af; }
-        .tests-status-running { color: #fbbf24; }
-        .tests-status-interrupted { color: rgba(244,247,251,0.45); }
-        .tests-verdict-satisfied { color: #4ade80; }
-        .tests-verdict-unsatisfied { color: #f87171; }
-        .tests-verdict-inconclusive { color: #fbbf24; }
-        .tests-verdict-infra { color: #c084fc; }
-        .tests-claim { display: flex; flex-direction: column; gap: 2px; padding: 2px 10px 6px; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; color: rgba(244,247,251,0.7); }
-        .tests-claim-met { color: #4ade80; }
-        .tests-claim-unmet { color: #f87171; }
-        .tests-claim-unchecked { color: rgba(244,247,251,0.45); }
-        .tests-empty { color: rgba(244,247,251,0.45); font-size: 12px; padding: 10px; }
-        .tests-section-header { flex-shrink: 0; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: rgba(244,247,251,0.5); padding: 4px 2px 0; }
-        .tests-subtabs { display: flex; gap: 4px; flex-shrink: 0; }
-        .tests-subtab { cursor: pointer; border: 1px solid rgba(255,255,255,0.12); background: none; color: rgba(244,247,251,0.6); border-radius: 6px; padding: 3px 12px; font-size: 12px; }
-        .tests-subtab.active { color: #f4f7fb; border-color: rgba(125,211,252,0.45); background: rgba(125,211,252,0.10); }
-        .tests-history { display: flex; flex-direction: column; gap: 8px; min-height: 0; flex: 1; }
-        .tests-defs { display: flex; flex-direction: column; gap: 4px; max-height: 45%; overflow: auto; flex-shrink: 0; }
-        .tests-defs[hidden], .tests-history[hidden], .tests-timeline[hidden], .tests-steps[hidden] { display: none; }
-        .tests-def-card { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; font-size: 12px; flex-shrink: 0; cursor: pointer; }
-        .tests-def-card:hover { border-color: rgba(125,211,252,0.35); }
-        .tests-def-card.selected { border-color: #7dd3fc; background: rgba(125,211,252,0.08); }
-        .tests-def-head { display: flex; align-items: baseline; gap: 8px; }
-        .tests-steps { display: flex; flex-direction: column; gap: 3px; min-height: 0; flex: 1; overflow: auto; }
-        .tests-steps-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: rgba(244,247,251,0.5); padding: 4px 2px; }
-        .tests-step-state { flex: 0 0 16px; text-align: center; font-size: 12px; }
-        .tests-step-spinner { display: inline-block; width: 10px; height: 10px; border: 2px solid rgba(125,211,252,0.3); border-top-color: #7dd3fc; border-radius: 50%; animation: tests-spin 0.8s linear infinite; }
-        @keyframes tests-spin { to { transform: rotate(360deg); } }
-        .tests-def-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .tests-def-desc { margin-top: 2px; font-size: 11px; color: rgba(244,247,251,0.5); white-space: normal; overflow-wrap: anywhere; }
-        .tests-def-meta { flex-shrink: 0; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; color: rgba(244,247,251,0.5); }
-        .tests-def-error { color: #f87171; }
-        .tests-def-run { flex-shrink: 0; cursor: pointer; border: 1px solid rgba(125,211,252,0.45); background: none; color: #7dd3fc; border-radius: 6px; padding: 2px 10px; font-size: 11px; }
-        .tests-def-run:hover:not(:disabled) { background: rgba(125,211,252,0.10); }
-        .tests-def-run:disabled { opacity: 0.4; cursor: default; }
-        .tests-def-stop { border-color: rgba(248,113,113,0.45); color: #f87171; }
-        .tests-def-stop:hover:not(:disabled) { background: rgba(248,113,113,0.10); }
-        .tests-video-toggle { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; cursor: pointer; flex-shrink: 0; text-transform: none; letter-spacing: normal; color: rgba(244,247,251,0.6); }
-        .tests-video-toggle input { accent-color: #7dd3fc; margin: 0; cursor: pointer; }
-        .tests-video-toggle input:disabled { cursor: default; }
-        .tests-timeline { display: flex; flex-direction: column; gap: 3px; min-height: 0; flex: 1; overflow: auto; }
-        .tests-timeline-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: rgba(244,247,251,0.5); padding: 4px 2px; }
-        .tests-timeline-title { flex: 1; min-width: 0; overflow-wrap: anywhere; }
-        .tests-timeline-toggle { flex: 0 0 auto; cursor: pointer; user-select: none; color: rgba(244,247,251,0.5); padding: 2px 6px; font-size: 18px; line-height: 1; }
-        .tests-timeline-toggle:hover { color: #7dd3fc; }
-        .tests-step { display: flex; align-items: flex-start; gap: 8px; padding: 5px 8px; border-radius: 6px; border: 1px solid transparent; cursor: pointer; font-size: 12px; }
-        .tests-step:hover { border-color: rgba(125,211,252,0.45); }
-        .tests-step.current { border-color: #7dd3fc; background: rgba(125,211,252,0.10); }
-        .tests-step-t { flex: 0 0 38px; color: #7dd3fc; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
-        .tests-step-text { flex: 1; min-width: 0; }
-        .tests-step-toggle { flex: 0 0 auto; color: rgba(244,247,251,0.5); cursor: pointer; user-select: none; padding: 0 4px; font-size: 16px; line-height: 1; }
-        .tests-step-toggle:hover { color: #7dd3fc; }
-        .tests-detail { margin-left: 46px; display: flex; flex-direction: column; gap: 3px; padding: 2px 0 4px; }
-        .tests-detail[hidden] { display: none; }
-        .tests-detail-text { padding: 2px 8px; font-size: 12px; color: rgba(244,247,251,0.7); }
-        .tests-logline { margin-left: 46px; padding: 2px 8px; border-left: 2px solid rgba(74,222,128,0.5); font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; color: rgba(190,242,164,0.85); word-break: break-all; }
-        .tests-detail .tests-logline { margin-left: 0; }
-        .tests-log { display: flex; gap: 8px; padding: 3px 8px; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; color: rgba(190,242,164,0.85); word-break: break-all; }
-        /* Test session playback over the screen pane */
-        .test-playback { position: absolute; inset: 0; z-index: 2; display: flex; flex-direction: column; background: #03040a; }
-        .test-playback[hidden] { display: none; }
-        .test-back-live { align-self: flex-start; margin: 8px 0 8px 10px; padding: 4px 10px; border: 1px solid rgba(125,211,252,0.6); border-radius: 8px; background: rgba(7,10,18,0.8); color: #bae6fd; font-size: 12px; cursor: pointer; }
-        .test-back-live:hover { background: rgba(125,211,252,0.18); }
-        .test-video { flex: 1; min-height: 0; width: 100%; object-fit: contain; }
-        .test-controls { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: rgba(11,16,32,0.92); border-top: 1px solid rgba(255,255,255,0.10); }
-        .test-ctl-btn { flex: 0 0 auto; width: 32px; height: 26px; cursor: pointer; border: 1px solid rgba(125,211,252,0.45); background: none; color: #7dd3fc; border-radius: 6px; font-size: 12px; line-height: 1; }
-        .test-ctl-btn:hover { background: rgba(125,211,252,0.10); }
-        .test-ctl-time { flex: 0 0 auto; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; color: rgba(244,247,251,0.75); }
-        .test-ctl-seek { flex: 1; min-width: 0; accent-color: #7dd3fc; cursor: pointer; }
-        .test-video-note { position: absolute; left: 0; right: 0; bottom: 52px; z-index: 6; text-align: center; color: rgba(244,247,251,0.6); font-size: 11px; pointer-events: none; }
-        .insp-tab-soon { color: rgba(244,247,251,0.32); }
-        .filter-row { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-bottom: 1px solid rgba(255,255,255,0.08); }
-        .filter-field { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 3px; padding: 2px 4px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.14); border-radius: 8px; }
-        .filter-field:focus-within { border-color: rgba(125,211,252,0.5); }
-        .filter-chips { display: contents; }
-        .inspector-filter { min-width: 60px; width: 110px; flex: 1 1 60px; background: none; border: 0; outline: none; color: #f4f7fb; padding: 2px 4px; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
-        .filter-chip { display: inline-flex; align-items: center; gap: 4px; max-width: 150px; padding: 1px 4px 1px 6px; border-radius: 6px; border: 1px solid; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
-        .filter-chip.include { color: #86efac; border-color: rgba(74,222,128,0.4); background: rgba(74,222,128,0.10); }
-        .filter-chip.exclude { color: #fda4af; border-color: rgba(248,113,113,0.4); background: rgba(248,113,113,0.10); }
-        .filter-chip .chip-term { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .filter-chip-x { appearance: none; border: 0; background: none; color: inherit; cursor: pointer; padding: 0 2px; font-size: 9px; opacity: 0.65; }
-        .filter-chip-x:hover { opacity: 1; }
-        .filter-help { appearance: none; flex: 0 0 auto; width: 18px; height: 18px; display: grid; place-items: center; border: 1px solid rgba(255,255,255,0.14); border-radius: 999px; background: rgba(255,255,255,0.06); color: rgba(244,247,251,0.6); font-size: 10px; cursor: pointer; }
-        .filter-help:hover { background: rgba(255,255,255,0.10); color: #cdd6e6; }
-        .filter-help[hidden] { display: none; }
-        .filter-help-pop { position: fixed; z-index: 10; max-width: 300px; padding: 8px 10px; background: #0b1020; border: 1px solid rgba(255,255,255,0.16); border-radius: 9px; box-shadow: 0 12px 32px rgba(0,0,0,0.55); font: 11px ui-sans-serif, system-ui, sans-serif; color: rgba(244,247,251,0.85); }
-        .filter-help-pop[hidden] { display: none; }
-        .filter-help-pop p { margin: 0 0 6px; }
-        .filter-help-pop p:last-child { margin-bottom: 0; }
-        .filter-help-pop b { color: #bae6fd; }
-        .inspector-filter:disabled { opacity: 0.4; cursor: not-allowed; }
+        /* The toolbar sheds words before it sheds actions: every button keeps its icon, label and
+           shortcut tip. These come after the base rules so that they win over them. */
+        @container bar (max-width: 1060px) { .cmdk-label, .cmdk kbd { display: none; } .cmdk { min-width: 0; } }
+        @container bar (max-width: 940px) { .toggle-label { display: none; } .tb-app { max-width: 120px; } }
+        @container bar (max-width: 820px) { .tb-app, #deviceRuntime, .tb-sep { display: none; } }
+        @container bar (max-width: 700px) {
+          .brand-name { display: none; }
+          .conn-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+          .device-id { max-width: 160px; }
+        }
+        @container bar (max-width: 560px) { .device-id, .brand { display: none; } }
 
-        .logs-controls { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 6px 10px; border-bottom: 1px solid rgba(255,255,255,0.08); }
-        .logs-controls[hidden] { display: none; }
-        .inspector-notice { padding: 8px 10px; border-bottom: 1px solid rgba(255,193,7,0.25); background: rgba(255,193,7,0.10); color: #ffd869; font: 12px/1.5 -apple-system, system-ui, sans-serif; }
-        .inspector-notice[hidden] { display: none; }
-        .inspector-notice code { padding: 1px 5px; border-radius: 4px; background: rgba(0,0,0,0.35); color: #ffe9a8; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; cursor: pointer; overflow-wrap: anywhere; }
-        .inspector-notice code:hover { background: rgba(0,0,0,0.55); }
-        /* The serve command carries a UDID and never fits inline: give it its own wrapped line. */
-        .inspector-notice #inspectorNoticeCmd { display: block; margin: 4px 0; padding: 4px 8px; }
-        #logsStatus { font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; color: rgba(244,247,251,0.55); white-space: nowrap; }
+        /* Tooltips: the action and its shortcut, on hover and keyboard focus. */
+        [data-tip] { position: relative; }
+        [data-tip]:hover::after, [data-tip]:focus-visible::after {
+          content: attr(data-tip); position: absolute; top: calc(100% + 6px); left: 50%; transform: translateX(-50%); z-index: 40;
+          padding: 4px 8px; border-radius: var(--r-1); background: var(--ink1); color: var(--g1);
+          font: 500 var(--fs-11)/1.3 var(--font-ui); white-space: nowrap; pointer-events: none;
+        }
+        [data-tip][data-key]:hover::after, [data-tip][data-key]:focus-visible::after { content: attr(data-tip) "   " attr(data-key); }
+        .tb-right [data-tip]:hover::after, .tb-right [data-tip]:focus-visible::after { left: auto; right: 0; transform: none; }
+        .statusbar [data-tip]:hover::after, .statusbar [data-tip]:focus-visible::after { top: auto; bottom: calc(100% + 6px); }
 
-        .scroll-pane { overflow: auto; flex: 1 1 auto; min-height: 0; }
-        .scroll-pane[hidden] { display: none; }
+        /* ── Workspace: stage | splitter | inspector ── */
+        .workspace { display: grid; grid-template-columns: minmax(300px, var(--stage-w, 1fr)) 1px minmax(380px, 1fr); min-height: 0; min-width: 0; }
+        .workspace.no-inspector { grid-template-columns: minmax(0, 1fr); }
+        .workspace.no-inspector .inspector, .workspace.no-inspector .splitter { display: none; }
+        .workspace.stacked { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(200px, var(--stage-h, 45%)) 1px minmax(0, 1fr); }
+        .workspace.stacked.no-inspector { grid-template-rows: minmax(0, 1fr); }
+        .splitter { position: relative; background: var(--line-thin); cursor: col-resize; touch-action: none; }
+        .splitter::before { content: ""; position: absolute; inset: 0 -4px; }
+        .workspace.stacked .splitter { cursor: row-resize; }
+        .workspace.stacked .splitter::before { inset: -4px 0; }
+        .splitter:hover, .splitter:focus-visible, .splitter.active { background: var(--accent); outline: none; }
 
-        .network-list { list-style: none; margin: 0; padding: 0; }
-        .network-row { display: grid; grid-template-columns: 52px 1fr auto auto; gap: 8px; align-items: center; padding: 6px 10px; cursor: pointer; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; border-bottom: 1px solid rgba(255,255,255,0.05); }
-        .network-row:hover { background: rgba(255,255,255,0.05); }
-        .network-row.selected { background: rgba(125,211,252,0.14); }
-        .network-row .req { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .network-row .time { color: rgba(244,247,251,0.5); }
-        .network-row .status { font-weight: 700; }
-        .network-row .dur { color: rgba(244,247,251,0.6); }
-        .network-row.mocked { border-left: 3px solid #a78bfa; }
-        .network-row .mock-badge { color: #a78bfa; margin-left: 4px; }
-        .status-ok { color: #4ade80; }
-        .status-warn { color: #fbbf24; }
-        .status-err { color: #f87171; }
+        /* ── Stage ── */
+        .stage { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--g0); }
+        .stage-bar { display: none; align-items: center; justify-content: space-between; gap: var(--sp-2); height: 36px; padding: 0 var(--sp-3); border-bottom: 1px solid var(--line-thin); background: var(--g1); flex: none; }
+        .app[data-mode="replay"] .stage-bar { display: flex; }
+        .replay-head { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; white-space: nowrap; overflow: hidden; }
+        .replay-head b { font-weight: 600; }
+        .replay-head span { overflow: hidden; text-overflow: ellipsis; color: var(--ink2); }
+        .device-area { position: relative; flex: 1; min-height: 0; display: grid; place-items: center; padding: 28px 24px 12px; }
+        .device { position: relative; width: var(--dev-w, 320px); height: var(--dev-h, 696px); }
+        .screen {
+          position: absolute; inset: 0; overflow: hidden; background: var(--screen-black); user-select: none;
+          border-radius: var(--dev-radius, 44px);
+          box-shadow: 0 0 0 1px var(--device-line), 0 0 0 5px var(--g0), 0 0 0 6px var(--line-thin);
+        }
+        .screen canvas { display: block; width: 100%; height: 100%; border-radius: inherit; cursor: crosshair; touch-action: none; }
+        .app.ax-pick .screen canvas { cursor: default; }
+        .app.keys-on .screen { box-shadow: 0 0 0 1px var(--device-line), 0 0 0 4px var(--g0), 0 0 0 6px var(--course); }
+        .app.keys-on.keys-paused .screen { box-shadow: 0 0 0 1px var(--device-line), 0 0 0 5px var(--g0), 0 0 0 6px var(--line-thin); outline: 2px dashed var(--course); outline-offset: 5px; }
+        .placeholder { position: absolute; inset: 0; display: grid; place-items: center; padding: var(--sp-4); text-align: center; color: var(--ink2); pointer-events: none; }
 
-        .network-detail { padding: 10px; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; color: rgba(244,247,251,0.86); }
-        .network-detail h3 { margin: 10px 0 4px; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: #7dd3fc; }
-        .network-detail h3:first-child { margin-top: 0; }
-        .network-detail pre { white-space: pre-wrap; word-break: break-word; margin: 0 0 6px; padding: 6px 8px; border-radius: 8px; background: rgba(255,255,255,0.04); }
-        .network-detail .kv { display: grid; grid-template-columns: minmax(96px, 38%) 1fr; column-gap: 12px; row-gap: 3px; margin: 0 0 6px; padding: 6px 8px; border-radius: 8px; background: rgba(255,255,255,0.04); }
-        .network-detail .kv-key { color: rgba(125,211,252,0.82); overflow-wrap: anywhere; }
-        .network-detail .kv-val { color: rgba(244,247,251,0.92); overflow-wrap: anywhere; }
-        .network-detail .mock-value { color: #a78bfa; }
-        .network-detail details.mock-rule { margin: 0 0 6px; padding: 6px 8px; border-radius: 8px; background: rgba(167,139,250,0.08); }
-        .network-detail details.mock-rule summary { cursor: pointer; color: #a78bfa; font-weight: 700; }
-        .network-detail details.mock-rule pre { margin: 6px 0 0; background: transparent; padding: 0; }
-        .network-empty, .logs-empty { color: rgba(244,247,251,0.5); padding: 10px; display: block; }
+        /* Where the finger is, drawn at once, ahead of the video — in course ink. */
+        .touch-layer { position: absolute; inset: 0; z-index: 3; overflow: hidden; pointer-events: none; }
+        .touch-dot { position: absolute; width: 28px; height: 28px; margin: -14px 0 0 -14px; border-radius: 50%; border: 2px solid var(--course); background: var(--course-fill); }
+        .touch-dot.preview { border-color: var(--course-preview); background: transparent; }
+        .touch-dot.wheel { width: 16px; height: 16px; margin: -8px 0 0 -8px; }
+        .touch-dot.held::after { content: ""; position: absolute; inset: -9px; border-radius: 50%; border: 2px solid var(--course); animation: touch-held .18s var(--ease); }
+        @keyframes touch-held { from { transform: scale(.6); opacity: 0; } to { transform: scale(1); opacity: 1; } }
 
-        .detail-back { appearance: none; width: 100%; text-align: left; background: rgba(255,255,255,0.03); border: 0; border-bottom: 1px solid rgba(255,255,255,0.08); color: #bae6fd; padding: 8px 12px; font: 12px ui-sans-serif, system-ui, sans-serif; cursor: pointer; }
-        .detail-back:hover { background: rgba(255,255,255,0.06); }
+        /* Rulers and redlines (Accessibility) — distances in points. */
+        .ruler { position: absolute; display: none; color: var(--ink3); font: var(--fs-11)/1 var(--font-mono); pointer-events: none; }
+        .app.ax-pick .ruler { display: block; }
+        .ruler-x { left: 0; right: 0; bottom: calc(100% + 8px); height: 12px; background-image: repeating-linear-gradient(to right, var(--line-thick) 0 1px, transparent 1px var(--tick-x, 40px)); background-size: 100% 4px; background-repeat: no-repeat; background-position: bottom; }
+        .ruler-y { top: 0; bottom: 0; right: calc(100% + 10px); width: 22px; background-image: repeating-linear-gradient(to bottom, var(--line-thick) 0 1px, transparent 1px var(--tick-y, 40px)); background-size: 4px 100%; background-repeat: no-repeat; background-position: right; }
+        .ruler span { position: absolute; }
+        .ruler-x span { bottom: 6px; transform: translateX(-50%); }
+        .ruler-y span { right: 7px; transform: translateY(-50%); }
+        .redlines { position: absolute; inset: 0; z-index: 2; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+        .redlines .ghost { fill: none; stroke: var(--accent); stroke-opacity: .3; stroke-width: 1; vector-effect: non-scaling-stroke; }
+        .redlines .hover { fill: none; stroke: var(--ink1); stroke-width: 1; stroke-dasharray: 3 3; vector-effect: non-scaling-stroke; }
+        .redlines .box { fill: var(--accent-fill); stroke: var(--accent); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+        .redlines .dim { stroke: var(--accent); stroke-width: 1; vector-effect: non-scaling-stroke; }
+        .redline-labels { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
+        .rl { position: absolute; transform: translate(-50%, -50%); padding: 1px 4px; border-radius: 3px; background: var(--accent); color: var(--on-accent); font: 600 var(--fs-11)/1.25 var(--font-mono); white-space: nowrap; }
+        .rl-size { transform: translate(-50%, 0); }
 
-        .logs-list { list-style: none; margin: 0; padding: 0; }
-        .logs-row { position: relative; padding: 2px 52px 2px 10px; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; border-bottom: 1px solid rgba(255,255,255,0.04); cursor: pointer; }
-        .logs-row:hover { background: rgba(255,255,255,0.05); }
-        .logs-row .time { position: absolute; top: 2px; right: 8px; font-size: 9px; opacity: 0.5; pointer-events: none; }
-        .logs-row .lvl { font-weight: 700; opacity: 0.75; margin-right: 4px; }
-        .logs-row .msg { white-space: pre-wrap; word-break: break-word; }
-        .logs-src-oslog { color: #7dd3fc; }
-        .logs-src-stdout { color: #4ade80; }
-        .logs-row-error { background: rgba(248,113,113,0.08); }
-        .logs-row-error .msg, .logs-row-error .lvl { color: #f87171; font-weight: 600; }
+        /* Offline: the last frame stays, greyed, under what is being done about it. */
+        .offline-veil { position: absolute; inset: 0; z-index: 5; display: none; place-items: center; padding: var(--sp-4); background: var(--veil); }
+        .app[data-conn="reconnecting"] .offline-veil, .app[data-conn="offline"] .offline-veil { display: grid; }
+        .app[data-conn="reconnecting"] .screen canvas, .app[data-conn="offline"] .screen canvas { filter: grayscale(1) brightness(.7); }
+        .veil-card { display: grid; justify-items: center; gap: 6px; max-width: 280px; padding: var(--sp-4); text-align: center; background: var(--g2); border: 1px solid var(--line-thick); border-radius: var(--r-3); box-shadow: var(--pop-shadow); }
+        .veil-card .ic { color: var(--err); }
+        .veil-card span { color: var(--ink2); }
+        .veil-card .btn { margin-top: 6px; }
 
-        /* AX inspector: toolbar + selected-element bar + scrollable tree. */
-        .ax-pane { display: flex; flex-direction: column; min-height: 0; flex: 1 1 auto; }
-        .ax-pane[hidden] { display: none; }
-        .ax-toolbar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid rgba(255,255,255,0.08); }
-        .ax-refresh { appearance: none; width: 26px; height: 24px; display: grid; place-items: center; border: 1px solid rgba(255,255,255,0.14); border-radius: 7px; background: rgba(255,255,255,0.06); color: #cdd6e6; cursor: pointer; font-size: 13px; }
-        .ax-refresh:hover { background: rgba(255,255,255,0.10); }
-        .ax-status { font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; color: rgba(244,247,251,0.55); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .ax-selected-bar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid rgba(255,255,255,0.08); background: rgba(125,211,252,0.06); }
-        .ax-selected-bar[hidden] { display: none; }
-        .ax-selected-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; color: #bae6fd; }
-        .ax-copy { appearance: none; border: 1px solid rgba(125,211,252,0.4); border-radius: 7px; background: rgba(125,211,252,0.14); color: #bae6fd; padding: 4px 10px; font: 11px ui-sans-serif, system-ui, sans-serif; cursor: pointer; white-space: nowrap; }
-        .ax-copy:hover { background: rgba(125,211,252,0.22); }
-        .ax-tree { overflow: auto; flex: 1 1 auto; min-height: 0; padding: 4px 0; }
-        /* Rows size to their content so deep indentation scrolls horizontally
-           instead of squeezing the primary label down to a clipped glyph. */
-        .ax-row { display: flex; align-items: center; gap: 6px; padding: 3px 10px 3px 0; cursor: pointer; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; width: max-content; min-width: 100%; }
-        .ax-row:hover { background: rgba(255,255,255,0.05); }
-        .ax-row.selected { background: rgba(125,211,252,0.16); }
-        .ax-chevron { display: inline-block; width: 12px; text-align: center; color: rgba(244,247,251,0.5); flex: 0 0 auto; }
-        .ax-label { color: #f4f7fb; flex: 0 0 auto; }
-        .ax-text { color: rgba(244,247,251,0.72); flex: 0 0 auto; }
-        .ax-secondary { color: rgba(244,247,251,0.4); flex: 0 0 auto; }
-        .ax-empty { display: block; padding: 12px; color: rgba(244,247,251,0.5); font: 12px ui-sans-serif, system-ui, sans-serif; }
+        /* Replay: the recording takes the screen's place, with a transport under it. */
+        .replay-video { position: absolute; inset: 0; z-index: 4; display: none; width: 100%; height: 100%; border-radius: inherit; object-fit: contain; background: var(--screen-black); }
+        .app[data-mode="replay"] .replay-video { display: block; }
+        .replay-note { position: absolute; left: 0; right: 0; bottom: 12px; z-index: 6; text-align: center; color: var(--ink2); }
+        .transport { display: none; align-items: center; gap: var(--sp-2); height: 40px; padding: 0 var(--sp-3); border-top: 1px solid var(--line-thin); background: var(--g1); flex: none; }
+        .app[data-mode="replay"] .transport { display: flex; }
+        .t-time { font-size: var(--fs-11); color: var(--ink2); white-space: nowrap; }
+        .scrub { position: relative; flex: 1; height: 24px; cursor: pointer; touch-action: none; }
+        .scrub::before { content: ""; position: absolute; left: 0; right: 0; top: 11px; height: 2px; border-radius: 1px; background: var(--line-thick); }
+        .scrub-fill { position: absolute; left: 0; top: 11px; height: 2px; border-radius: 1px; background: var(--ink1); }
+        .scrub-tick { position: absolute; top: 6px; width: 2px; height: 12px; margin-left: -1px; border-radius: 1px; background: var(--course); }
+        .scrub-tick.fail { width: 3px; background: var(--err); }
+        .scrub-head { position: absolute; top: 5px; width: 14px; height: 14px; margin-left: -7px; border-radius: 50%; background: var(--ink1); box-shadow: 0 0 0 3px var(--g1); }
 
-        /* AX overlays drawn over the device image (never into the video canvas). */
-        .ax-overlay { position: absolute; inset: 0; pointer-events: none; z-index: 2; }
-        .ax-overlay[hidden] { display: none; }
-        /* Where the finger is on the device, drawn at once, ahead of the video. */
-        .touch-overlay { position: absolute; inset: 0; pointer-events: none; z-index: 2; overflow: hidden; }
-        .touch-dot { position: absolute; width: 30px; height: 30px; margin: -15px 0 0 -15px; border-radius: 999px; background: rgba(255,255,255,0.30); border: 2px solid rgba(255,255,255,0.78); box-shadow: 0 0 10px rgba(0,0,0,0.35); }
-        .touch-dot[hidden] { display: none; }
-        .touch-dot.preview { background: rgba(255,255,255,0.10); border-color: rgba(255,255,255,0.45); box-shadow: none; }
-        .touch-dot.wheel { width: 18px; height: 18px; margin: -9px 0 0 -9px; background: rgba(125,211,252,0.28); border-color: rgba(125,211,252,0.75); }
-        .touch-dot.held::after { content: ""; position: absolute; inset: -9px; border-radius: 999px; border: 2px solid rgba(125,211,252,0.9); animation: touch-held 0.18s ease-out; }
-        @keyframes touch-held { from { transform: scale(0.6); opacity: 0; } to { transform: scale(1); opacity: 1; } }
-        .ax-box { position: absolute; border: 1px solid rgba(125,211,252,0.32); box-sizing: border-box; }
-        .ax-box.hover { border-color: rgba(125,211,252,0.85); background: rgba(125,211,252,0.12); }
-        .ax-box.selected { border: 2px solid #7dd3fc; background: rgba(125,211,252,0.20); box-shadow: 0 0 0 1px rgba(7,10,18,0.6); }
-        canvas.ax-pick { cursor: default; }
+        .readout { display: flex; align-items: center; gap: var(--sp-3); height: 28px; padding: 0 var(--sp-3); flex: none; overflow: hidden; white-space: nowrap; border-top: 1px solid var(--line-hair); color: var(--ink3); font-size: var(--fs-11); }
+        .readout-ptr { margin-left: auto; color: var(--ink2); }
 
-        /* Right-click context menu (Copy element). */
-        .ax-menu { position: fixed; z-index: 10; min-width: 140px; padding: 4px; background: #0b1020; border: 1px solid rgba(255,255,255,0.16); border-radius: 9px; box-shadow: 0 12px 32px rgba(0,0,0,0.55); }
-        .ax-menu[hidden] { display: none; }
-        .ax-menu-item { appearance: none; display: block; width: 100%; text-align: left; background: none; border: 0; border-radius: 6px; color: #f4f7fb; padding: 7px 10px; font: 12px ui-sans-serif, system-ui, sans-serif; cursor: pointer; white-space: nowrap; }
-        .ax-menu-item:hover { background: rgba(125,211,252,0.18); color: #bae6fd; }
-        .ax-menu-key { float: right; padding-left: 24px; color: rgba(244,247,251,0.45); }
-        .tests-menu-delete { color: #f87171; }
-        .tests-menu-delete:hover { background: rgba(248,113,113,0.16); color: #fca5a5; }
+        /* ── Inspector ── */
+        .inspector { position: relative; container: insp / inline-size; display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--g1); }
+        .tabs { display: flex; align-items: stretch; gap: 2px; height: var(--h-tabs); padding: 0 var(--sp-2); flex: none; overflow-x: auto; scrollbar-width: none; background: var(--g2); border-bottom: 1px solid var(--line-thin); }
+        .tab { position: relative; display: inline-flex; align-items: center; gap: 6px; padding: 0 10px; border: 0; background: none; color: var(--ink2); font-weight: 500; white-space: nowrap; cursor: pointer; }
+        .tab:hover { color: var(--ink1); }
+        .tab[aria-selected="true"] { color: var(--ink1); }
+        .tab[aria-selected="true"]::after { content: ""; position: absolute; left: 6px; right: 6px; bottom: -1px; height: 2px; border-radius: 1px; background: var(--accent); }
+        .count { font: 500 var(--fs-11)/1 var(--font-mono); font-variant-numeric: tabular-nums; color: var(--ink3); }
+        .count-err { display: inline-flex; align-items: center; gap: 3px; font: 600 var(--fs-11)/1 var(--font-mono); color: var(--err); }
+        .count-err::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--err); }
+        .count-err.count-warn { color: var(--warn); }
+        .count-err.count-warn::before { background: var(--warn); }
 
-        /* Launch dividers stay sticky and collapsible across the network and logs lists. */
-        .launch-divider { position: sticky; top: 0; z-index: 2; list-style: none; margin: 0; padding: 4px 10px; display: flex; align-items: center; gap: 6px; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; color: rgba(125,211,252,0.9); background: linear-gradient(rgba(125,211,252,0.08), rgba(125,211,252,0.08)), #070b15; border-top: 1px solid rgba(125,211,252,0.28); border-bottom: 1px solid rgba(125,211,252,0.18); letter-spacing: 0.04em; cursor: pointer; user-select: none; }
-        .launch-divider:hover { background: linear-gradient(rgba(125,211,252,0.16), rgba(125,211,252,0.16)), #070b15; }
-        .launch-divider:focus-visible { outline: 1px solid rgba(125,211,252,0.6); outline-offset: -1px; }
-        .launch-divider .launch-chevron { display: inline-block; width: 10px; text-align: center; opacity: 0.85; }
-        .launch-divider .launch-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .panel { position: relative; display: flex; flex-direction: column; flex: 1; min-height: 0; }
+        .ptool { display: flex; align-items: center; gap: 6px; height: var(--h-ptool); padding: 0 var(--sp-2); flex: none; min-width: 0; border-bottom: 1px solid var(--line-hair); }
+        .ptool-spacer { flex: 1; }
+        .filter {
+          display: flex; align-items: center; gap: 4px; flex: 1 1 200px; min-width: 120px; max-width: 380px; height: 26px; padding: 0 6px;
+          border: 1px solid var(--line-thick); border-radius: var(--r-2); background: var(--g0); color: var(--ink3); cursor: text; overflow: hidden;
+        }
+        .filter:focus-within { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+        .filter input { flex: 1; min-width: 40px; border: 0; outline: 0; background: none; color: var(--ink1); font: var(--fs-12) var(--font-ui); }
+        .filter input::placeholder { color: var(--ink3); }
+        .filter input::-webkit-search-cancel-button { display: none; }
+        .filter:focus-within .filter-kbd { display: none; }
+        .chips { display: contents; }
+        .chip { display: inline-flex; align-items: center; gap: 2px; flex: none; max-width: 160px; height: 18px; padding: 0 2px 0 6px; border-radius: 3px; font: var(--fs-11)/1 var(--font-mono); white-space: nowrap; }
+        .chip span { overflow: hidden; text-overflow: ellipsis; }
+        .chip button { display: grid; place-items: center; width: 16px; height: 16px; border: 0; border-radius: 2px; background: none; color: inherit; opacity: .75; cursor: pointer; }
+        .chip button:hover { opacity: 1; background: var(--g3); }
+        .chip-include { color: var(--ok); box-shadow: inset 0 0 0 1px var(--ok-line); }
+        .chip-exclude { color: var(--err); background: var(--err-bg); box-shadow: inset 0 0 0 1px var(--err-line); }
 
+        .seg { display: inline-flex; flex: none; padding: 2px; border: 1px solid var(--line-thin); border-radius: var(--r-2); background: var(--g0); }
+        .seg button { display: inline-flex; align-items: center; gap: 5px; height: 20px; padding: 0 8px; border: 0; border-radius: 4px; background: none; color: var(--ink2); white-space: nowrap; cursor: pointer; }
+        .seg button:hover { color: var(--ink1); }
+        .seg button[aria-pressed="true"] { background: var(--g3); color: var(--ink1); box-shadow: 0 0 0 1px var(--line-thin); }
+        .pill { display: inline-flex; align-items: center; gap: 5px; flex: none; height: 24px; padding: 0 8px; border: 1px solid var(--line-thin); border-radius: 12px; background: none; color: var(--ink2); white-space: nowrap; cursor: pointer; }
+        .pill:hover { background: var(--g3); color: var(--ink1); }
+        .pill[aria-pressed="true"] { border-color: var(--line-thick); background: var(--g3); color: var(--ink1); }
+        .dot { display: inline-block; width: 7px; height: 7px; flex: none; border-radius: 50%; }
+        .dot-err { background: var(--err); } .dot-ok { background: var(--ok); } .dot-warn { background: var(--warn); } .dot-course { background: var(--course); } .dot-idle { background: var(--ink3); }
+        .levels { display: inline-flex; flex: none; gap: 2px; }
+        .levels button { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 7px; border: 1px solid var(--line-thin); border-radius: var(--r-1); background: none; color: var(--ink2); white-space: nowrap; cursor: pointer; }
+        .levels button:hover { background: var(--g3); }
+        .levels button[aria-pressed="false"] { color: var(--ink3); text-decoration: line-through; }
+        .levels button[aria-pressed="false"] .dot { opacity: .5; }
+        @container insp (max-width: 560px) {
+          .ptool .seg:not(.keep), .ptool .pill:not(.keep), .ptool .levels, .ptool .ptool-note { display: none; }
+        }
+
+        /* Guide words: what span of the list is in view, and whether it is still moving. */
+        .guide { display: flex; align-items: center; gap: var(--sp-3); height: 24px; padding: 0 var(--sp-3); flex: none; overflow: hidden; white-space: nowrap; border-bottom: 1px solid var(--line-hair); color: var(--ink3); font-size: var(--fs-11); }
+        .guide b { color: var(--ink2); font-weight: 500; }
+        .guide .live { color: var(--ok); }
+        .guide .stale { color: var(--warn); }
+        .guide button { border: 0; background: none; padding: 0; color: var(--accent); cursor: pointer; font: inherit; }
+
+        /* Lists: keyed rows, roving focus. */
+        .list { position: relative; flex: 1 1 auto; min-height: 60px; overflow: auto; overscroll-behavior: contain; outline: none; }
+        .list:focus-visible { box-shadow: inset 0 0 0 2px var(--accent-line); }
+        /* A row scrolled into view clears the sticky column headers and launch header. */
+        .list:has(> .thead) { scroll-padding-top: 24px; }
+        .list:has(> .thead + .group-row) { scroll-padding-top: 50px; }
+        .thead {
+          position: sticky; top: 0; z-index: 2; display: grid; align-items: center; column-gap: 10px; height: 24px; padding: 0 var(--sp-3) 0 12px;
+          background: var(--g2); border-bottom: 1px solid var(--line-thin); color: var(--ink2); font-size: var(--fs-11); font-weight: 500; white-space: nowrap;
+        }
+        .thead button { display: inline-flex; align-items: center; gap: 2px; padding: 0; border: 0; background: none; color: inherit; font: inherit; cursor: pointer; }
+        .thead button:hover, .thead .sorted { color: var(--ink1); }
+        .thead .num { justify-content: flex-end; text-align: right; }
+        .row {
+          display: grid; align-items: center; column-gap: 10px; height: var(--h-row); padding: 0 var(--sp-3) 0 10px;
+          border-left: 2px solid transparent; border-bottom: 1px solid var(--line-hair); white-space: nowrap; cursor: default;
+          content-visibility: auto; contain-intrinsic-size: auto var(--h-row);
+        }
+        .row:hover { background: var(--g3); }
+        .list .row[aria-selected="true"] { background: var(--accent-bg); border-left-color: var(--accent); }
+        .list .row[aria-selected="true"]:hover { background: var(--accent-bg-strong); }
+        .row.mocked { border-left-color: var(--course); }
+        .list .row.mocked[aria-selected="true"] { border-left-color: var(--accent); }
+        /* Earlier app launches read quieter; their failures keep their colour. */
+        .row.retired { color: var(--ink2); }
+        .row.retired .name b, .row.retired .msg { color: var(--ink2); }
+        .row:focus-visible { outline-offset: -2px; border-radius: 0; }
+        .cell { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+        .cell.num { text-align: right; font: var(--fs-11) var(--font-mono); font-variant-numeric: tabular-nums; color: var(--ink2); }
+        .cell.time { font: var(--fs-11) var(--font-mono); font-variant-numeric: tabular-nums; color: var(--ink3); }
+        .list .row[aria-selected="true"] .cell.time { color: var(--ink2); }
+        .group-row {
+          position: sticky; top: 24px; z-index: 1; display: flex; align-items: center; gap: 6px; width: 100%; height: 26px; padding: 0 var(--sp-3) 0 8px;
+          border: 0; border-top: 1px solid var(--line-thin); border-bottom: 1px solid var(--line-hair); background: var(--g2);
+          color: var(--ink2); font-size: var(--fs-11); text-align: left; white-space: nowrap; cursor: pointer;
+        }
+        .group-row:hover { color: var(--ink1); }
+        .group-row:focus-visible { outline-offset: -2px; border-radius: 0; }
+        .group-row b { color: var(--ink1); font-weight: 600; }
+        .group-row .ic { width: 12px; height: 12px; }
+        .group-row .gr-meta { margin-left: auto; font-family: var(--font-mono); }
+        .group-row .gr-now { color: var(--ok); font-weight: 500; }
+        .empty { padding: var(--sp-5) var(--sp-4); color: var(--ink2); max-width: 60ch; line-height: 1.5; }
+        .empty b { display: block; margin-bottom: 4px; color: var(--ink1); font-weight: 600; }
+        .empty code { color: var(--ink1); }
+        .empty > .btn { display: flex; width: max-content; margin-top: var(--sp-2); }
+        .newlines {
+          position: absolute; left: 50%; bottom: 14px; z-index: 3; transform: translateX(-50%); display: inline-flex; align-items: center; gap: 6px;
+          padding: 5px 10px; border: 0; border-radius: 14px; background: var(--accent); color: var(--on-accent); font-weight: 600; font-size: var(--fs-11); box-shadow: var(--pop-shadow); cursor: pointer;
+        }
+        .list-wrap { position: relative; display: flex; flex-direction: column; flex: 1 1 auto; min-height: 60px; }
+
+        /* Split detail under the list. */
+        .hsplit { position: relative; flex: none; height: 1px; background: var(--line-thin); cursor: row-resize; touch-action: none; }
+        .hsplit::before { content: ""; position: absolute; inset: -4px 0; }
+        .hsplit:hover, .hsplit:focus-visible, .hsplit.active { background: var(--accent); outline: none; }
+        .detail { display: flex; flex-direction: column; flex: 0 0 var(--detail-h, 44%); min-height: 120px; overflow: hidden; background: var(--g1); }
+        .panel.no-detail > .hsplit, .panel.no-detail > .detail { display: none; }
+        .dhead { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; padding: 8px var(--sp-3) 0; }
+        .dtitle { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 500 var(--fs-12)/1.3 var(--font-mono); }
+        .dtitle.ui { font-family: var(--font-ui); font-size: var(--fs-13); }
+        .dactions { display: flex; flex: none; align-items: center; gap: 4px; }
+        .dactions .check { display: inline-flex; align-items: center; gap: 5px; margin-right: 4px; }
+        .dhead.flat { padding: 0 0 6px; }
+        .dmeta { display: flex; flex-wrap: wrap; gap: 2px var(--sp-3); padding: 2px var(--sp-3) 6px; color: var(--ink2); font-size: var(--fs-11); }
+        .dmeta .mono { color: var(--ink1); }
+        .dtabs { display: flex; flex: none; gap: 2px; padding: 0 var(--sp-2); border-bottom: 1px solid var(--line-hair); }
+        .dtabs button { position: relative; height: 28px; padding: 0 8px; border: 0; background: none; color: var(--ink2); cursor: pointer; }
+        .dtabs button:hover { color: var(--ink1); }
+        .dtabs button[aria-selected="true"] { color: var(--ink1); }
+        .dtabs button[aria-selected="true"]::after { content: ""; position: absolute; left: 6px; right: 6px; bottom: -1px; height: 2px; background: var(--ink1); }
+        .dbody { flex: 1; overflow: auto; overscroll-behavior: contain; padding: var(--sp-2) var(--sp-3) var(--sp-4); }
+
+        .btn {
+          display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 10px; white-space: nowrap; font-weight: 500;
+          border: 1px solid var(--line-thin); border-radius: var(--r-2); background: var(--g2); color: var(--ink1); cursor: pointer;
+        }
+        .btn:hover { background: var(--g3); border-color: var(--line-thick); }
+        .btn:disabled { opacity: .45; cursor: default; }
+        .btn-sm { height: 24px; padding: 0 8px; font-size: var(--fs-11); }
+        .btn-primary { border-color: transparent; background: var(--accent); color: var(--on-accent); }
+        .btn-primary:hover { background: var(--accent-hover); }
+        .btn-course { border-color: var(--course-line); background: var(--course-bg); color: var(--course); }
+        .btn-danger { color: var(--err); }
+
+        .kv { display: grid; grid-template-columns: minmax(110px, 32%) 1fr; column-gap: var(--sp-3); row-gap: 3px; margin: 0 0 var(--sp-3); font: var(--fs-11)/1.5 var(--font-mono); }
+        .kv dt { color: var(--ink2); overflow-wrap: anywhere; }
+        .kv dd { margin: 0; color: var(--ink1); overflow-wrap: anywhere; }
+        .sec { display: flex; align-items: center; gap: 6px; margin: var(--sp-3) 0 var(--sp-1); color: var(--ink2); font-size: var(--fs-11); font-weight: 600; }
+        .sec:first-child { margin-top: 2px; }
+        pre.code { margin: 0; padding: var(--sp-2) var(--sp-3); border: 1px solid var(--line-hair); border-radius: var(--r-2); background: var(--g0); font: var(--fs-11)/1.55 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+        .j-key { color: var(--ink2); } .j-str { color: var(--json-str); } .j-num { color: var(--json-num); } .j-lit { color: var(--json-lit); }
+        .callout { display: flex; align-items: flex-start; gap: var(--sp-2); margin: 0 0 var(--sp-3); padding: var(--sp-2) var(--sp-3); border-radius: var(--r-2); }
+        .callout .ic { margin-top: 1px; }
+        .callout.err { background: var(--err-bg); box-shadow: inset 2px 0 0 var(--err); }
+        .callout.err .ic { color: var(--err); }
+        .callout.warn { background: var(--warn-bg); box-shadow: inset 2px 0 0 var(--warn); }
+        .callout.warn .ic { color: var(--warn); }
+        .callout.course { background: var(--course-bg); box-shadow: inset 2px 0 0 var(--course); }
+        .callout.course .ic { color: var(--course); }
+        .snippet { display: flex; align-items: center; gap: var(--sp-2); margin: 0 0 6px; }
+        .snippet pre.code { flex: 1; }
+
+        /* Network */
+        .net-grid { grid-template-columns: 86px 46px minmax(140px, 1fr) 118px 62px 64px 90px; }
+        .thead.net-grid { padding-left: 12px; }
+        @container insp (max-width: 760px) { .net-grid { grid-template-columns: 86px 46px minmax(120px, 1fr) 112px 64px; } .net-grid .c-size, .net-grid .c-wf { display: none; } }
+        @container insp (max-width: 560px) { .net-grid { grid-template-columns: 86px minmax(0, 1fr) 124px 60px; } .net-grid .c-method { display: none; } }
+        .method { font: 600 var(--fs-11)/1 var(--font-mono); color: var(--ink2); }
+        .method.grpc { font-weight: 500; }
+        .name { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+        .name b { flex: none; max-width: 70%; overflow: hidden; text-overflow: ellipsis; font-weight: 500; }
+        .name span { overflow: hidden; text-overflow: ellipsis; color: var(--ink3); font-size: var(--fs-11); }
+        .tag { display: inline-flex; align-items: center; flex: none; height: 16px; padding: 0 5px; border-radius: 3px; font: 600 var(--fs-11)/1 var(--font-ui); }
+        .tag-course { color: var(--course); background: var(--course-bg); }
+        .st { display: inline-flex; align-items: center; gap: 4px; font: 600 var(--fs-11)/1 var(--font-mono); }
+        .st .ic { width: 12px; height: 12px; stroke-width: 1.8; }
+        .st-ok { color: var(--ok); } .st-warn { color: var(--warn); } .st-err { color: var(--err); } .st-info, .st-idle { color: var(--ink2); } .st-pending { color: var(--ink3); }
+        .wf { position: relative; display: block; height: 6px; border-radius: 1px; background: var(--line-hair); }
+        .wf i { position: absolute; top: 0; bottom: 0; min-width: 2px; border-radius: 1px; background: var(--ink3); }
+        .wf i.ok { background: var(--ok-bar); } .wf i.warn { background: var(--warn); } .wf i.err { background: var(--err); } .wf i.info { background: var(--ink2); }
+
+        /* Logs */
+        .log-grid { grid-template-columns: 86px 62px minmax(110px, 20%) minmax(0, 1fr); }
+        @container insp (max-width: 640px) { .log-grid { grid-template-columns: 86px 62px minmax(0, 1fr); } .log-grid .c-ss { display: none; } }
+        .lv { justify-self: start; padding: 2px 5px; border-radius: 3px; background: var(--g3); color: var(--ink2); font: 600 var(--fs-11)/1 var(--font-ui); }
+        .lv-error { color: var(--err); background: var(--err-bg); box-shadow: inset 0 0 0 1px var(--err-line); }
+        .lv-fault { color: var(--g1); background: var(--err); }
+        .lv-info { background: transparent; box-shadow: inset 0 0 0 1px var(--line-thin); }
+        .lv-debug { background: transparent; color: var(--ink3); }
+        .row.lvl-err { background: var(--err-bg); }
+        .row.lvl-err:hover { background: var(--err-bg-strong); }
+        .ss { color: var(--ink3); font-size: var(--fs-11); }
+        .msg { font: var(--fs-12)/1.3 var(--font-mono); color: var(--ink1); }
+        mark { border-radius: 2px; background: var(--mark-bg); color: inherit; }
+
+        /* State */
+        .state-split { display: grid; flex: 1; min-height: 0; grid-template-columns: minmax(170px, 34%) 1px minmax(0, 1fr); }
+        .state-split::before { content: ""; grid-column: 2; grid-row: 1; background: var(--line-thin); }
+        .models { grid-column: 1; grid-row: 1; overflow: auto; padding: var(--sp-1) 0; outline: none; }
+        .model { display: grid; grid-template-columns: 10px 1fr auto; align-items: center; gap: 2px 8px; width: 100%; padding: 7px var(--sp-3) 7px 10px; border: 0; border-left: 2px solid transparent; background: none; text-align: left; cursor: default; }
+        .model:hover { background: var(--g3); }
+        .model[aria-selected="true"] { background: var(--accent-bg); border-left-color: var(--accent); }
+        .model:focus-visible { outline-offset: -2px; border-radius: 0; }
+        .model .m-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+        .model .m-seq { color: var(--ink3); font: var(--fs-11) var(--font-mono); }
+        .model .m-sub { grid-column: 2 / 4; color: var(--ink3); font: var(--fs-11) var(--font-mono); }
+        .model.dead { color: var(--ink2); }
+        .state-body { grid-column: 3; grid-row: 1; overflow: auto; padding: var(--sp-2) var(--sp-3) var(--sp-4); }
+        .tree-kv { font: var(--fs-12)/1.75 var(--font-mono); }
+        .tree-kv details > summary { cursor: pointer; list-style: none; }
+        .tree-kv details > summary::before { content: "▸ "; color: var(--ink3); }
+        .tree-kv details[open] > summary::before { content: "▾ "; }
+        .tree-kv .k { color: var(--ink2); }
+        .tree-kv .indent { margin-left: 5px; padding-left: 16px; border-left: 1px solid var(--line-hair); }
+        .tree-kv .changed { padding: 0 3px; border-radius: 2px; background: var(--changed-bg); }
+        .change { padding: 8px 0; border-bottom: 1px solid var(--line-hair); }
+        .change-head { display: flex; align-items: baseline; gap: var(--sp-2); margin-bottom: 4px; color: var(--ink3); font-size: var(--fs-11); }
+        .change-head b { color: var(--ink1); font-size: var(--fs-12); font-weight: 500; }
+        .diffline { display: flex; flex-wrap: wrap; gap: 8px; font: var(--fs-12)/1.6 var(--font-mono); }
+        .diffline .path { min-width: 120px; color: var(--ink2); }
+        .diffline del { color: var(--ink2); text-decoration: line-through; text-decoration-color: var(--ink3); }
+        .diffline ins { color: var(--ok); text-decoration: none; }
+        .diffline .arrow { color: var(--ink3); }
+
+        /* Accessibility tree */
+        .tree-grid { grid-template-columns: minmax(0, 1fr) auto; height: 24px; }
+        .trow-main { display: flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; }
+        .twisty { display: grid; place-items: center; width: 14px; height: 14px; flex: none; color: var(--ink3); cursor: pointer; }
+        .twisty .ic { width: 11px; height: 11px; stroke-width: 2; }
+        .role { flex: none; color: var(--ink3); font: 500 var(--fs-11)/1 var(--font-ui); }
+        .ax-id { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--ink1); font: var(--fs-12)/1 var(--font-mono); }
+        .ax-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--ink2); }
+        .ax-frame { color: var(--ink3); font: var(--fs-11)/1 var(--font-mono); }
+        .collapsed-run { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--ink3); font-size: var(--fs-11); font-style: italic; }
+
+        /* Tests */
+        .test-grid { grid-template-columns: 22px minmax(140px, 1fr) 64px 48px minmax(120px, 30%) 64px; height: 36px; }
+        .hist-grid { grid-template-columns: minmax(126px, 26%) minmax(140px, 1fr) 64px 52px 90px; height: 34px; }
+        @container insp (max-width: 640px) {
+          .test-grid { grid-template-columns: 22px minmax(0, 1fr) 64px; } .test-grid .c-kind, .test-grid .c-steps, .test-grid .c-last { display: none; }
+          .hist-grid { grid-template-columns: 126px minmax(0, 1fr) 70px; } .hist-grid .c-kind, .hist-grid .c-len { display: none; }
+        }
+        .t-name { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+        .t-name b { overflow: hidden; text-overflow: ellipsis; font-weight: 500; }
+        .t-name span { overflow: hidden; text-overflow: ellipsis; color: var(--ink3); font: var(--fs-11) var(--font-mono); }
+        .t-name .perr { color: var(--err); font-family: var(--font-ui); }
+        .dot-lead { margin-left: 3px; }
+        .desc { margin: 0 0 var(--sp-2); }
+        .kind { color: var(--ink2); font: 500 var(--fs-11)/1 var(--font-ui); }
+        .verdict { display: inline-flex; align-items: center; gap: 5px; font-size: var(--fs-11); font-weight: 600; white-space: nowrap; }
+        .verdict .ic { width: 12px; height: 12px; stroke-width: 2; }
+        .v-satisfied, .v-passed { color: var(--ok); }
+        .v-unsatisfied, .v-failed { color: var(--err); }
+        .v-inconclusive { color: var(--warn); }
+        .v-infra, .v-interrupted, .v-stopped { color: var(--ink2); }
+        .v-running { color: var(--course); }
+        .spinner { width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--course-track); border-top-color: var(--course); animation: spin .8s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .steps { margin: 0; padding: 0; list-style: none; }
+        .step { display: grid; grid-template-columns: 18px 42px 1fr; align-items: start; gap: 8px; padding: 5px 4px; border-radius: var(--r-1); }
+        .step.seekable { cursor: pointer; }
+        .step.seekable:hover { background: var(--g3); }
+        .step.current { background: var(--accent-bg); }
+        .step .st-ic { display: grid; place-items: center; height: 18px; }
+        .step .st-ic .ic { width: 13px; height: 13px; stroke-width: 2; }
+        .step .s-t { color: var(--course); font: var(--fs-11)/18px var(--font-mono); }
+        .step .s-text { line-height: 18px; overflow-wrap: anywhere; }
+        .step .s-sub { display: block; margin-top: 2px; color: var(--err); font-size: var(--fs-11); line-height: 1.4; }
+        .step.pending .s-text { color: var(--ink3); }
+        .step-logs { margin: 2px 0 4px 68px; }
+        .step-logs summary { color: var(--ink2); font-size: var(--fs-11); cursor: pointer; }
+        .step-logs pre.code { margin-top: 4px; max-height: 260px; overflow: auto; }
+        .claim { display: grid; gap: 4px; margin: 0 0 var(--sp-3); padding: var(--sp-2) var(--sp-3); border: 1px solid var(--line-thin); border-radius: var(--r-2); background: var(--g0); }
+        .claim-head { display: flex; align-items: center; gap: var(--sp-2); font-weight: 600; }
+        .claim-line { display: flex; gap: 8px; }
+        .claim-line .ic { width: 13px; height: 13px; margin-top: 2px; stroke-width: 2; flex: none; }
+        .evidence { margin: 0; padding: 0; list-style: none; }
+        .evidence li { display: flex; align-items: center; gap: 4px; min-height: 26px; }
+        .evidence .mono { min-width: 0; overflow-wrap: anywhere; color: var(--ink2); }
+
+        /* No app attached */
+        .noapp { flex: 1; overflow: auto; padding: var(--sp-6) var(--sp-5); }
+        .noapp h2 { margin: 0 0 var(--sp-2); font-size: var(--fs-15); font-weight: 600; }
+        .noapp p { max-width: 60ch; margin: 0 0 var(--sp-4); color: var(--ink2); line-height: 1.5; }
+        .cmdline { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 4px var(--sp-2); max-width: 640px; margin-bottom: var(--sp-3); }
+        .cmd-title { grid-column: 1 / -1; color: var(--ink2); font-size: var(--fs-11); }
+        .cmdline code { padding: 6px 10px; border: 1px solid var(--line-thin); border-radius: var(--r-2); background: var(--g0); font-size: var(--fs-12); overflow-wrap: anywhere; }
+
+        /* ── Status bar: the sheet's title block ── */
+        .statusbar { display: flex; align-items: stretch; min-width: 0; height: var(--h-status); overflow: hidden; background: var(--g2); border-top: 1px solid var(--line-thin); color: var(--ink2); font: var(--fs-11) var(--font-mono); }
+        .sb-cell { display: inline-flex; align-items: center; gap: 6px; padding: 0 10px; border-right: 1px solid var(--line-hair); white-space: nowrap; }
+        .sb-cell.grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+        .sb-btn { border: 0; border-right: 1px solid var(--line-hair); background: none; color: inherit; font: inherit; cursor: pointer; }
+        .sb-btn:hover { background: var(--g3); color: var(--ink1); }
+        .sb-conn { color: var(--ink1); }
+        .app.keys-on #sbKeys { color: var(--course); }
+        .sb-err { color: var(--err); }
+
+        /* ── Overlays: menus, palette, dialogs, toast ── */
+        .menu { position: fixed; z-index: 60; min-width: 220px; max-width: 420px; padding: 4px; background: var(--g2); border: 1px solid var(--line-thick); border-radius: var(--r-3); box-shadow: var(--pop-shadow); }
+        .menu button { display: flex; align-items: center; gap: 8px; width: 100%; height: 28px; padding: 0 8px; border: 0; border-radius: var(--r-1); background: none; text-align: left; white-space: nowrap; cursor: default; }
+        .menu button span { overflow: hidden; text-overflow: ellipsis; }
+        .menu button:hover { background: var(--accent-bg); }
+        .menu button:focus { background: var(--accent-bg); outline: 2px solid var(--accent); outline-offset: -2px; }
+        .menu button .ic { color: var(--ink2); }
+        .menu button kbd { margin-left: auto; }
+        .menu hr { margin: 4px 2px; border: 0; border-top: 1px solid var(--line-thin); }
+        .menu .m-course, .menu .m-course .ic { color: var(--course); }
+        .menu .m-danger, .menu .m-danger .ic { color: var(--err); }
+
+        .scrim { position: fixed; inset: 0; z-index: 50; display: flex; align-items: flex-start; justify-content: center; padding-top: 12vh; background: var(--scrim); }
+        .palette { width: min(560px, calc(100vw - 32px)); overflow: hidden; background: var(--g2); border: 1px solid var(--line-thick); border-radius: var(--r-3); box-shadow: var(--pop-shadow); }
+        .palette-input { display: flex; align-items: center; gap: 8px; height: 44px; padding: 0 12px; border-bottom: 1px solid var(--line-thin); color: var(--ink2); }
+        .palette-input input { flex: 1; border: 0; outline: 0; background: none; color: var(--ink1); font: var(--fs-13) var(--font-ui); }
+        .palette-list { max-height: 360px; overflow: auto; padding: 4px; }
+        .pal-group { padding: 8px 8px 4px; color: var(--ink3); font-size: var(--fs-11); font-weight: 500; }
+        .pal-item { display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 8px; border-radius: var(--r-2); cursor: default; }
+        .pal-item .ic { color: var(--ink2); }
+        .pal-item kbd { margin-left: auto; }
+        .pal-item[aria-selected="true"] { background: var(--accent-bg); }
+        .pal-item[aria-selected="true"] .ic { color: var(--accent); }
+        .palette-foot { display: flex; gap: var(--sp-4); padding: 8px 12px; border-top: 1px solid var(--line-thin); color: var(--ink3); font-size: var(--fs-11); }
+        .dialog { width: min(420px, calc(100vw - 32px)); padding: var(--sp-4); background: var(--g2); border: 1px solid var(--line-thick); border-radius: var(--r-3); box-shadow: var(--pop-shadow); }
+        .dialog h2 { margin: 0 0 var(--sp-2); font-size: var(--fs-13); font-weight: 600; }
+        .dialog p { margin: 0 0 var(--sp-4); color: var(--ink2); line-height: 1.5; overflow-wrap: anywhere; }
+        .dialog .row-actions { display: flex; justify-content: flex-end; gap: var(--sp-2); }
+        .popover { position: fixed; z-index: 55; max-width: 340px; padding: 10px 12px; background: var(--g2); border: 1px solid var(--line-thick); border-radius: var(--r-3); box-shadow: var(--pop-shadow); color: var(--ink2); line-height: 1.5; }
+        .popover p { margin: 0 0 6px; } .popover p:last-child { margin: 0; }
+        .popover b { color: var(--ink1); font-weight: 600; }
+        .toast { position: fixed; left: 50%; bottom: calc(var(--h-status) + 16px); z-index: 70; transform: translateX(-50%); display: flex; align-items: center; gap: 10px; max-width: min(640px, calc(100vw - 32px)); padding: 8px 12px; border-radius: var(--r-2); background: var(--ink1); color: var(--g1); font-weight: 500; box-shadow: var(--pop-shadow); }
+        .toast span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .toast.err { background: var(--err); color: var(--g1); }
+        .toast button { border: 0; padding: 2px 6px; border-radius: var(--r-1); background: var(--on-toast-button); color: inherit; font-weight: 600; cursor: pointer; }
+
+        @media (prefers-reduced-motion: reduce) {
+          *, *::before, *::after { transition-duration: 0ms !important; animation-duration: 0ms !important; }
+          .spinner { border-top-color: var(--course); }
+        }
+        .tb-btn, .toggle, .pill, .seg button, .tab, .row, .btn, .cmdk, .levels button, .model, .group-row { transition: background-color var(--dur) var(--ease), color var(--dur) var(--ease), border-color var(--dur) var(--ease); }
         @media (max-width: 720px) {
-          main { padding: 0; }
-          .viewer-card { width: 100vw; height: 100vh; border-radius: 0; border: 0; }
-          .card-resize-handle { display: none; }
+          .statusbar .sb-cell.opt { display: none; }
         }
         """#
 
@@ -465,3232 +4942,189 @@ enum WebViewerAssets {
         <head>
           <meta charset="utf-8">
           <meta name="viewport" content="width=device-width, initial-scale=1">
+          <meta name="theme-color" content="#1d2024">
           <title>{{title}}</title>
           <style>{{viewer.css}}</style>
         </head>
         <body>
-          <main>
-            <section id="viewerCard" class="viewer-card">
-              <div id="cardResizeLeft" class="card-resize-handle left" title="Drag to resize"></div>
-              <div id="cardResizeRight" class="card-resize-handle right" title="Drag to resize"></div>
-              <header class="appbar">
-                <div class="brandrow"><p class="brand">SIMTOOL</p></div>
-                <div class="toolrow">
-                  <button id="home" class="icon-btn" type="button" title="Home">🏠</button>
-                  <button id="shot" class="icon-btn" type="button" title="Screenshot">📸</button>
-                  <button id="shake" class="icon-btn" type="button" title="Shake">📳</button>
-                  <button id="terminate" class="icon-btn" type="button" title="Terminate app">⏹️</button>
-                  <button id="relaunch" class="icon-btn" type="button" title="Relaunch app">▶️</button>
-                  <button id="softKeyboard" class="icon-btn" type="button" title="Toggle software keyboard (⌘K while typing into the simulator)">⌨️</button>
-                  <button id="keyboardToggle" class="inspect-toggle" type="button" aria-pressed="false" title="Type into the simulator with the Mac keyboard (⇧⌘K)">
-                    <span class="dot"></span><span>Keyboard</span>
-                  </button>
-                  <button id="inspectToggle" class="inspect-toggle" type="button" aria-pressed="false">
-                    <span class="dot"></span><span>Inspect</span>
-                  </button>
-                </div>
-              </header>
-              <div id="stage" class="stage">
-                <div id="screenWrap" class="screen-wrap fit">
-                  <div id="surface" class="surface">
-                    <canvas id="screen" aria-label="Simulator stream"></canvas>
-                    <div id="axOverlay" class="ax-overlay" hidden></div>
-                    <div id="touchOverlay" class="touch-overlay"></div>
-                    <div id="testPlayback" class="test-playback" hidden>
-                      <button id="testBackLive" class="test-back-live" type="button">← Live</button>
-                      <!-- Custom controls: Orca's embedded browser drops clicks on the
-                           <video> element itself, so native controls are unreachable. -->
-                      <video id="testVideo" class="test-video" playsinline></video>
-                      <div id="testVideoNote" class="test-video-note" hidden>video unavailable</div>
-                      <div id="testControls" class="test-controls">
-                        <button id="testPlayPause" class="test-ctl-btn" type="button" title="Play/Pause">▶</button>
-                        <span id="testTime" class="test-ctl-time">0:00 / 0:00</span>
-                        <input id="testSeek" class="test-ctl-seek" type="range" min="0" max="1000" value="0" step="1">
-                      </div>
-                    </div>
-                  </div>
-                  <div id="placeholder">connecting…</div>
-                  <div class="statusbar">
-                    <span id="statusDot" class="status-dot idle"></span>
-                    <span id="statusText">opening stream</span>
-                    <span id="fps">-- fps</span>
-                    <span id="kbdBadge" class="kbd-badge" hidden></span>
-                    <span id="deviceName" class="device-name">—</span>
-                  </div>
-                </div>
-                <aside id="inspector" class="inspector" hidden>
-                  <div id="drawerHandle" class="drawer-handle" title="Drag to resize"><span class="grab"></span></div>
-                  <div id="inspectorListView" class="inspector-list-view">
-                    <div class="inspector-tabs">
-                      <button id="tabNetwork" class="insp-tab active" type="button" data-tab="network">Network <span id="networkCount" class="tab-count">0</span></button>
-                      <button id="tabLogs" class="insp-tab" type="button" data-tab="logs">Logs <span id="logsCount" class="tab-count">0</span></button>
-                      <button id="tabState" class="insp-tab" type="button" data-tab="state">State <span id="stateCount" class="tab-count">0</span></button>
-                      <button id="tabAx" class="insp-tab insp-tab-soon" type="button" data-tab="ax">AX</button>
-                      <button id="tabTests" class="insp-tab" type="button" data-tab="tests">Tests <span id="testsCount" class="tab-count">0</span></button>
-                    </div>
-                    <div class="filter-row">
-                      <div id="filterField" class="filter-field">
-                        <span id="filterChips" class="filter-chips"></span>
-                        <input id="inspectorFilter" class="inspector-filter" type="search" placeholder="filter service / status / host" />
-                      </div>
-                      <button id="filterHelp" class="filter-help" type="button" title="Filter help">?</button>
-                    </div>
-                    <div id="inspectorNotice" class="inspector-notice" hidden>
-                      <b>No app attached</b> — Network, Logs and State need the app relaunched by simtool.
-                      Restart the server as
-                      <code id="inspectorNoticeCmd" title="Click to copy">simtool serve --app &lt;bundle-id&gt;</code>
-                      or run <code id="inspectorNoticeRunCmd" title="Click to copy">simtool run --web</code> from your project.
-                    </div>
-                    <div id="logsControls" class="logs-controls" hidden>
-                      <span id="logsStatus">idle</span>
-                    </div>
-                    <ul id="networkList" class="network-list scroll-pane"></ul>
-                    <ul id="logsList" class="logs-list scroll-pane" hidden></ul>
-                    <div id="axPane" class="ax-pane" hidden>
-                      <div class="ax-toolbar">
-                        <button id="axRefresh" class="ax-refresh" type="button" title="Refresh tree">⟳</button>
-                        <span id="axStatus" class="ax-status">—</span>
-                      </div>
-                      <div id="axSelectedBar" class="ax-selected-bar" hidden>
-                        <span id="axSelectedLabel" class="ax-selected-label">—</span>
-                        <button id="axCopy" class="ax-copy" type="button" title="Copy this element's full JSON. Right-click any element on screen or row in the tree for a Copy menu.">Copy JSON</button>
-                      </div>
-                      <div id="axTree" class="ax-tree"></div>
-                    </div>
-                    <div id="statePane" class="state-pane" hidden>
-                      <div id="stateModels" class="state-models"></div>
-                      <div id="stateHistory" class="state-history"></div>
-                    </div>
-                    <div id="testsPane" class="tests-pane" hidden>
-                      <div class="tests-subtabs">
-                        <button id="testsSubtabTests" class="tests-subtab active" type="button">Tests</button>
-                        <button id="testsSubtabHistory" class="tests-subtab" type="button">History</button>
-                      </div>
-                      <div id="testsDefinitions" class="tests-defs"></div>
-                      <div id="testsSteps" class="tests-steps scroll-pane"></div>
-                      <div id="testsHistory" class="tests-history" hidden>
-                        <div id="testsSessions" class="tests-sessions"></div>
-                        <div id="testsTimeline" class="tests-timeline scroll-pane"></div>
-                      </div>
-                    </div>
-                  </div>
-                  <div id="inspectorDetailView" class="inspector-detail-view" hidden>
-                    <button id="detailBack" class="detail-back" type="button">‹ <span id="detailBackLabel">Network</span></button>
-                    <div id="detailBody" class="network-detail scroll-pane"></div>
-                  </div>
-                </aside>
+          <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+            <defs>
+              <symbol id="i-home" viewBox="0 0 16 16"><path d="M2.5 7.2 8 2.5l5.5 4.7V13a.5.5 0 0 1-.5.5H9.5V10h-3v3.5H3a.5.5 0 0 1-.5-.5Z"/></symbol>
+              <symbol id="i-camera" viewBox="0 0 16 16"><path d="M2 5.5A1.5 1.5 0 0 1 3.5 4h1.6l1-1.5h3.8l1 1.5h1.6A1.5 1.5 0 0 1 14 5.5v6a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5Z"/><circle cx="8" cy="8.5" r="2.4"/></symbol>
+              <symbol id="i-shake" viewBox="0 0 16 16"><rect x="5" y="2" width="6" height="12" rx="1.2"/><path d="M2.5 5.5v5M13.5 5.5v5M1 7v2M15 7v2"/></symbol>
+              <symbol id="i-stop" viewBox="0 0 16 16"><rect x="3.5" y="3.5" width="9" height="9" rx="1.5"/></symbol>
+              <symbol id="i-relaunch" viewBox="0 0 16 16"><path d="M13 8a5 5 0 1 1-1.6-3.7"/><path d="M13 2.5v3h-3"/></symbol>
+              <symbol id="i-keyboard" viewBox="0 0 16 16"><rect x="1.5" y="4" width="13" height="8" rx="1.2"/><path d="M4 6.5h.01M6.5 6.5h.01M9 6.5h.01M11.5 6.5h.01M4 9h.01M11.5 9h.01M6 9.5h4"/></symbol>
+              <symbol id="i-pick" viewBox="0 0 16 16"><circle cx="8" cy="8" r="4.5"/><path d="M8 1v3M8 12v3M1 8h3M12 8h3"/></symbol>
+              <symbol id="i-search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3.5 3.5"/></symbol>
+              <symbol id="i-pause" viewBox="0 0 16 16"><path d="M5.5 3.5v9M10.5 3.5v9"/></symbol>
+              <symbol id="i-play" viewBox="0 0 16 16"><path d="M5 3.2v9.6a.4.4 0 0 0 .6.3l7.4-4.8a.4.4 0 0 0 0-.6L5.6 2.9a.4.4 0 0 0-.6.3Z"/></symbol>
+              <symbol id="i-trash" viewBox="0 0 16 16"><path d="M2.5 4.5h11M6 4.5V3a.5.5 0 0 1 .5-.5h3a.5.5 0 0 1 .5.5v1.5M4 4.5l.6 8.6a.5.5 0 0 0 .5.4h5.8a.5.5 0 0 0 .5-.4l.6-8.6"/></symbol>
+              <symbol id="i-copy" viewBox="0 0 16 16"><rect x="5" y="5" width="8.5" height="8.5" rx="1.2"/><path d="M11 5V3.5A1 1 0 0 0 10 2.5H3.5a1 1 0 0 0-1 1V10a1 1 0 0 0 1 1H5"/></symbol>
+              <symbol id="i-more" viewBox="0 0 16 16"><path d="M3.5 8h.01M8 8h.01M12.5 8h.01"/></symbol>
+              <symbol id="i-chev-r" viewBox="0 0 16 16"><path d="m6 3.5 4.5 4.5L6 12.5"/></symbol>
+              <symbol id="i-chev-d" viewBox="0 0 16 16"><path d="m3.5 6 4.5 4.5L12.5 6"/></symbol>
+              <symbol id="i-chev-u" viewBox="0 0 16 16"><path d="m3.5 10 4.5-4.5 4.5 4.5"/></symbol>
+              <symbol id="i-close" viewBox="0 0 16 16"><path d="m4 4 8 8M12 4l-8 8"/></symbol>
+              <symbol id="i-warn" viewBox="0 0 16 16"><path d="M8 2.3 14.2 13a.5.5 0 0 1-.4.8H2.2a.5.5 0 0 1-.4-.8Z"/><path d="M8 6.5v3M8 11.6h.01"/></symbol>
+              <symbol id="i-offline" viewBox="0 0 16 16"><path d="M2 2l12 12M5.4 9.6a3.6 3.6 0 0 1 3-1M3 7a7 7 0 0 1 3-1.8M10.8 6.2A7 7 0 0 1 13 7.4M8 12h.01"/></symbol>
+              <symbol id="i-panel" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="1.2"/><path d="M9.5 2.5v11"/></symbol>
+              <symbol id="i-film" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="1.2"/><path d="M5 3v10M11 3v10M2 6h3M2 10h3M11 6h3M11 10h3"/></symbol>
+              <symbol id="i-check" viewBox="0 0 16 16"><path d="m3 8.5 3.2 3L13 4.5"/></symbol>
+              <symbol id="i-x" viewBox="0 0 16 16"><path d="m4.5 4.5 7 7M11.5 4.5l-7 7"/></symbol>
+              <symbol id="i-ruler" viewBox="0 0 16 16"><rect x="1.5" y="5" width="13" height="6" rx="1"/><path d="M4 5v2.2M6.5 5v3.2M9 5v2.2M11.5 5v3.2"/></symbol>
+              <symbol id="i-follow" viewBox="0 0 16 16"><path d="M8 2.5v10M3.5 8.5 8 13l4.5-4.5"/></symbol>
+              <symbol id="i-paste" viewBox="0 0 16 16"><rect x="3" y="3" width="10" height="11" rx="1.2"/><path d="M6 3V2.4a.4.4 0 0 1 .4-.4h3.2a.4.4 0 0 1 .4.4V3M5.5 7h5M5.5 9.5h5M5.5 12h3"/></symbol>
+              <symbol id="i-photo" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="1.2"/><circle cx="6" cy="6.5" r="1.2"/><path d="m2.5 12 4-3.5 3 2.5 2-1.5 2.5 2"/></symbol>
+              <symbol id="i-mock" viewBox="0 0 16 16"><path d="M3 3.5h10v3.8a5 5 0 0 1-10 0Z"/><path d="M5.8 7h.01M10.2 7h.01M6 9.6c1.2.9 2.8.9 4 0"/></symbol>
+              <symbol id="i-terminal" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="1.2"/><path d="m4.5 6 2.5 2-2.5 2M8.5 10.5h3"/></symbol>
+              <symbol id="i-help" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M6.3 6.3a1.8 1.8 0 1 1 2.4 1.7c-.5.2-.7.6-.7 1.1v.3M8 11.4h.01"/></symbol>
+              <symbol id="i-filter" viewBox="0 0 16 16"><path d="M2.5 3.5h11l-4.2 5v4l-2.6 1v-5Z"/></symbol>
+            </defs>
+          </svg>
+
+          <div class="app" id="app" data-conn="connecting" data-mode="live">
+            <header class="toolbar">
+              <div class="tb-group tb-identity">
+                <span class="brand"><span class="brand-mark" aria-hidden="true"></span><span class="brand-name">SimTool</span></span>
+                <span class="device-id" title="Simulator"><b id="deviceName">Simulator</b><span id="deviceRuntime"></span></span>
+                <span class="conn" role="status" aria-live="polite"><span class="conn-dot" aria-hidden="true"></span><span class="conn-label" id="connLabel">Connecting…</span></span>
               </div>
-            </section>
-            <div id="axMenu" class="ax-menu" hidden>
-              <button id="axMenuCopy" class="ax-menu-item" type="button">Copy element</button>
+
+              <div class="tb-group" role="toolbar" aria-label="Device">
+                <button class="tb-btn" type="button" id="homeButton" aria-label="Home" data-tip="Home" data-key="⇧⌘H" aria-keyshortcuts="Shift+Meta+H"><svg class="ic" aria-hidden="true"><use href="#i-home"/></svg></button>
+                <button class="tb-btn" type="button" id="screenshotButton" aria-label="Save screenshot" data-tip="Save screenshot" data-key="⌘S" aria-keyshortcuts="Meta+S"><svg class="ic" aria-hidden="true"><use href="#i-camera"/></svg></button>
+                <button class="tb-btn" type="button" id="shakeButton" aria-label="Shake" data-tip="Shake" data-key="⌃⌘Z" aria-keyshortcuts="Control+Meta+Z"><svg class="ic" aria-hidden="true"><use href="#i-shake"/></svg></button>
+                <button class="tb-btn" type="button" id="softKeyboardButton" aria-label="Show or hide the software keyboard" data-tip="Software keyboard — ⌘K while typing into the device"><svg class="ic" aria-hidden="true"><use href="#i-keyboard"/></svg></button>
+                <span class="tb-sep" aria-hidden="true"></span>
+                <span class="tb-app" id="appName" title="App under test">No app</span>
+                <button class="tb-btn" type="button" id="terminateButton" aria-label="Terminate app" data-tip="Terminate app"><svg class="ic" aria-hidden="true"><use href="#i-stop"/></svg></button>
+                <button class="tb-btn" type="button" id="relaunchButton" aria-label="Relaunch app" data-tip="Relaunch app"><svg class="ic" aria-hidden="true"><use href="#i-relaunch"/></svg></button>
+              </div>
+
+              <div class="tb-group tb-right">
+                <button class="toggle" type="button" id="keyboardToggle" aria-pressed="false" data-tip="Type into the simulator with the Mac keyboard" data-key="⇧⌘K" aria-keyshortcuts="Shift+Meta+K">
+                  <svg class="ic" aria-hidden="true"><use href="#i-keyboard"/></svg><span class="toggle-label">Mac keyboard</span>
+                </button>
+                <button class="cmdk" type="button" id="paletteButton" aria-haspopup="dialog" aria-label="Commands" aria-keyshortcuts="Shift+Meta+P">
+                  <svg class="ic" aria-hidden="true"><use href="#i-search"/></svg><span class="cmdk-label">Commands</span><kbd>⇧⌘P</kbd>
+                </button>
+                <button class="tb-btn" type="button" id="inspectorToggle" aria-pressed="true" aria-controls="inspector" aria-label="Inspector" data-tip="Show or hide the inspector" data-key="⌥⌘0" aria-keyshortcuts="Alt+Meta+0"><svg class="ic" aria-hidden="true"><use href="#i-panel"/></svg></button>
+              </div>
+            </header>
+
+            <main class="workspace" id="workspace">
+              <section class="stage" id="stage" aria-label="Simulator">
+                <div class="stage-bar" id="stageBar">
+                  <div class="replay-head"><svg class="ic" aria-hidden="true"><use href="#i-film"/></svg><b>Replay</b><span id="replayTitle"></span></div>
+                  <button class="btn btn-sm" type="button" id="backToLive">Back to live <kbd>Esc</kbd></button>
+                </div>
+
+                <div class="device-area" id="deviceArea">
+                  <div class="device" id="device">
+                    <div class="ruler ruler-x" id="rulerX" aria-hidden="true"></div>
+                    <div class="ruler ruler-y" id="rulerY" aria-hidden="true"></div>
+                    <div class="screen" id="screen">
+                      <canvas id="screenCanvas" aria-label="Simulator screen. Press and drag to touch; right-click for paste and photos."></canvas>
+                      <svg class="redlines" id="redlines" aria-hidden="true"></svg>
+                      <div class="redline-labels" id="redlineLabels" aria-hidden="true"></div>
+                      <div class="touch-layer" id="touchLayer" aria-hidden="true"></div>
+                      <video class="replay-video" id="replayVideo" playsinline></video>
+                      <div class="replay-note" id="replayNote" hidden>The recording is unavailable — the timeline still works.</div>
+                      <div class="placeholder" id="placeholder">Connecting to the simulator…</div>
+                      <div class="offline-veil" id="offlineVeil">
+                        <div class="veil-card" role="alert">
+                          <svg class="ic ic-lg" aria-hidden="true"><use href="#i-offline"/></svg>
+                          <strong id="veilTitle">Connection to simtool lost</strong>
+                          <span id="veilText">Reconnecting…</span>
+                          <button class="btn btn-primary btn-sm" type="button" id="reconnectNow">Reconnect now</button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="transport" id="transport">
+                  <button class="tb-btn" type="button" id="playPause" aria-label="Play"><svg class="ic" aria-hidden="true"><use href="#i-play"/></svg></button>
+                  <span class="t-time mono" id="replayTime">0:00 / 0:00</span>
+                  <div class="scrub" id="scrub" role="slider" tabindex="0" aria-label="Recording position" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-valuetext="0:00">
+                    <div class="scrub-fill" id="scrubFill"></div>
+                    <div id="scrubTicks"></div>
+                    <span class="scrub-head" id="scrubHead"></span>
+                  </div>
+                </div>
+
+                <div class="readout mono" id="readout" aria-hidden="true">
+                  <span id="readSize">—</span><span id="readFps">— fps</span>
+                  <span class="readout-ptr" id="readPointer"></span>
+                </div>
+              </section>
+
+              <div class="splitter" id="splitter" role="separator" tabindex="0" aria-orientation="vertical" aria-controls="inspector" aria-label="Resize the inspector"></div>
+
+              <section class="inspector" id="inspector" aria-label="Inspector">
+                <div class="tabs" role="tablist" aria-label="Inspector" id="tabs">
+                  <button role="tab" class="tab" type="button" id="tab-network" data-tab="network" aria-controls="panel-network" aria-selected="true" aria-keyshortcuts="Alt+1">Network <span class="count" id="count-network"></span><span class="count-err" id="err-network" hidden></span></button>
+                  <button role="tab" class="tab" type="button" id="tab-logs" data-tab="logs" aria-controls="panel-logs" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+2">Logs <span class="count" id="count-logs"></span><span class="count-err" id="err-logs" hidden></span></button>
+                  <button role="tab" class="tab" type="button" id="tab-state" data-tab="state" aria-controls="panel-state" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+3">State <span class="count" id="count-state"></span></button>
+                  <button role="tab" class="tab" type="button" id="tab-ax" data-tab="ax" aria-controls="panel-ax" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+4">Accessibility</button>
+                  <button role="tab" class="tab" type="button" id="tab-tests" data-tab="tests" aria-controls="panel-tests" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+5">Tests <span class="count" id="count-tests"></span><span class="count-err" id="err-tests" hidden></span></button>
+                </div>
+                <div class="panel" role="tabpanel" id="panel-network" aria-labelledby="tab-network"></div>
+                <div class="panel" role="tabpanel" id="panel-logs" aria-labelledby="tab-logs" hidden></div>
+                <div class="panel" role="tabpanel" id="panel-state" aria-labelledby="tab-state" hidden></div>
+                <div class="panel" role="tabpanel" id="panel-ax" aria-labelledby="tab-ax" hidden></div>
+                <div class="panel" role="tabpanel" id="panel-tests" aria-labelledby="tab-tests" hidden></div>
+              </section>
+            </main>
+
+            <footer class="statusbar" id="statusbar">
+              <span class="sb-cell sb-conn"><span class="conn-dot" aria-hidden="true"></span><span id="sbConn">Connecting</span></span>
+              <span class="sb-cell opt" id="sbDevice"></span>
+              <button class="sb-cell sb-btn opt" type="button" id="sbUdid" data-tip="Copy the simulator UDID"></button>
+              <span class="sb-cell opt" id="sbServer"></span>
+              <span class="sb-cell" id="sbApp">No app attached</span>
+              <span class="sb-cell" id="sbKeys">Keys → page</span>
+              <span class="sb-cell grow" id="sbMessage" role="status" aria-live="polite"></span>
+              <span class="sb-cell opt" id="sbVersion"></span>
+            </footer>
+          </div>
+
+          <div class="menu" id="menu" role="menu" hidden></div>
+          <div class="popover" id="popover" role="dialog" hidden></div>
+          <div class="scrim" id="paletteScrim" hidden>
+            <div class="palette" role="dialog" aria-modal="true" aria-label="Commands">
+              <div class="palette-input"><svg class="ic" aria-hidden="true"><use href="#i-search"/></svg><input id="paletteInput" type="text" role="combobox" aria-expanded="true" aria-controls="paletteList" aria-label="Command" placeholder="Type a command or a test name…" autocomplete="off" spellcheck="false"></div>
+              <div class="palette-list" id="paletteList" role="listbox" aria-label="Commands"></div>
+              <div class="palette-foot"><span><kbd>↑</kbd> <kbd>↓</kbd> move</span><span><kbd>↩</kbd> run</span><span><kbd>esc</kbd> close</span></div>
             </div>
-            <div id="networkMenu" class="ax-menu" hidden>
-              <button id="networkMenuExclude" class="ax-menu-item" type="button">Exclude</button>
-              <button id="networkMenuInclude" class="ax-menu-item" type="button">Include</button>
+          </div>
+          <div class="scrim" id="dialogScrim" hidden>
+            <div class="dialog" role="alertdialog" aria-modal="true" aria-labelledby="dialogTitle" aria-describedby="dialogText">
+              <h2 id="dialogTitle"></h2>
+              <p id="dialogText"></p>
+              <div class="row-actions"><button class="btn" type="button" id="dialogCancel">Cancel</button><button class="btn btn-danger" type="button" id="dialogConfirm">Delete</button></div>
             </div>
-            <div id="networkLaunchMenu" class="ax-menu" hidden>
-              <button id="networkLaunchMenuDelete" class="ax-menu-item tests-menu-delete" type="button">Delete section</button>
-            </div>
-            <div id="logsMenu" class="ax-menu" hidden>
-              <button id="logsMenuCopy" class="ax-menu-item" type="button">Copy entry</button>
-              <button id="logsMenuCopySel" class="ax-menu-item" type="button">Copy Selected</button>
-              <button id="logsMenuIncludeSel" class="ax-menu-item" type="button">Include Selected</button>
-              <button id="logsMenuExcludeSel" class="ax-menu-item" type="button">Exclude Selected</button>
-            </div>
-            <div id="logsLaunchMenu" class="ax-menu" hidden>
-              <button id="logsLaunchMenuDelete" class="ax-menu-item tests-menu-delete" type="button">Delete section</button>
-            </div>
-            <div id="testsMenu" class="ax-menu" hidden>
-              <button id="testsMenuDelete" class="ax-menu-item tests-menu-delete" type="button">Delete</button>
-            </div>
-            <div id="deviceMenu" class="ax-menu" hidden>
-              <button id="deviceMenuPaste" class="ax-menu-item" type="button">Paste<span class="ax-menu-key">⌘V</span></button>
-              <button id="deviceMenuPhotos" class="ax-menu-item" type="button">Add Clipboard Image to Photos</button>
-              <button id="deviceMenuPhotoFiles" class="ax-menu-item" type="button">Add Files to Photos…</button>
-            </div>
-            <input id="photosFile" type="file" accept="image/*,video/*" multiple hidden>
-            <div id="filterHelpPop" class="filter-help-pop" hidden>
-              <p><b>type text</b> — live substring filter over the current tab's fields</p>
-              <p><b>Enter</b> — turn the text into an include chip (show only matches)</p>
-              <p><b>-text + Enter</b> — exclude chip (hide matches)</p>
-              <p data-tab="logs"><b>subsystem:text</b> — match that field only; also message / category / process / level</p>
-              <p data-tab="network"><b>right-click a request</b> — include/exclude its path</p>
-              <p data-tab="logs"><b>right-click selected text</b> — copy / include / exclude it</p>
-            </div>
-          </main>
-          <script>{{touch.js}}
-        {{keyboard.js}}
-        {{viewer.js}}</script>
+          </div>
+          <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+          <input id="photosFile" type="file" accept="image/*,video/*" multiple hidden>
+
+          <script>{{js/touch.js}}
+        {{js/keyboard.js}}
+        {{js/logic.js}}
+        {{js/core.js}}
+        {{js/list.js}}
+        {{js/stream.js}}
+        {{js/device.js}}
+        {{js/inspector.js}}
+        {{js/network.js}}
+        {{js/logs.js}}
+        {{js/state.js}}
+        {{js/ax.js}}
+        {{js/tests.js}}
+        {{js/palette.js}}
+        {{js/main.js}}</script>
         </body>
         </html>
-        """#
-
-    static let viewerJs = #"""
-        const $ = (id) => document.getElementById(id);
-        const screenWrap = $("screenWrap");
-        const surface = $("surface");
-        const canvas = $("screen");
-        const placeholder = $("placeholder");
-        const statusDot = $("statusDot");
-        const statusText = $("statusText");
-        const fps = $("fps");
-        const deviceName = $("deviceName");
-        const homeButton = $("home");
-        const shotButton = $("shot");
-        const shakeButton = $("shake");
-        const terminateButton = $("terminate");
-        const relaunchButton = $("relaunch");
-        const softKeyboardButton = $("softKeyboard");
-        const keyboardToggle = $("keyboardToggle");
-        const kbdBadge = $("kbdBadge");
-        const deviceMenu = $("deviceMenu");
-        const deviceMenuPaste = $("deviceMenuPaste");
-        const deviceMenuPhotos = $("deviceMenuPhotos");
-        const deviceMenuPhotoFiles = $("deviceMenuPhotoFiles");
-        const photosFileInput = $("photosFile");
-        const stage = $("stage");
-
-        const inspectToggle = $("inspectToggle");
-        const inspector = $("inspector");
-        const drawerHandle = $("drawerHandle");
-        const inspectorListView = $("inspectorListView");
-        const inspectorDetailView = $("inspectorDetailView");
-        const detailBack = $("detailBack");
-        const detailBackLabel = $("detailBackLabel");
-        const detailBody = $("detailBody");
-        const inspectorFilter = $("inspectorFilter");
-        const tabButtons = { network: $("tabNetwork"), logs: $("tabLogs"), state: $("tabState"), ax: $("tabAx"), tests: $("tabTests") };
-        const networkCount = $("networkCount");
-        const logsCount = $("logsCount");
-        const networkList = $("networkList");
-        const inspectorNotice = $("inspectorNotice");
-        const inspectorNoticeCmd = $("inspectorNoticeCmd");
-        const inspectorNoticeRunCmd = $("inspectorNoticeRunCmd");
-        const logsControls = $("logsControls");
-        const logsList = $("logsList");
-        const axPane = $("axPane");
-        const statePane = $("statePane");
-        const stateModelsEl = $("stateModels");
-        const stateHistoryEl = $("stateHistory");
-        const stateCountEl = $("stateCount");
-        const axTreeEl = $("axTree");
-        const axOverlay = $("axOverlay");
-        const axStatusEl = $("axStatus");
-        const axRefreshButton = $("axRefresh");
-        const axSelectedBar = $("axSelectedBar");
-        const axSelectedLabel = $("axSelectedLabel");
-        const axCopyButton = $("axCopy");
-        const axMenu = $("axMenu");
-        const axMenuCopy = $("axMenuCopy");
-        const filterChips = $("filterChips");
-        const filterHelp = $("filterHelp");
-        const filterHelpPop = $("filterHelpPop");
-        const networkMenu = $("networkMenu");
-        const networkMenuExclude = $("networkMenuExclude");
-        const networkMenuInclude = $("networkMenuInclude");
-        const networkLaunchMenu = $("networkLaunchMenu");
-        const networkLaunchMenuDelete = $("networkLaunchMenuDelete");
-        const logsMenu = $("logsMenu");
-        const logsMenuCopy = $("logsMenuCopy");
-        const logsMenuCopySel = $("logsMenuCopySel");
-        const logsMenuIncludeSel = $("logsMenuIncludeSel");
-        const logsMenuExcludeSel = $("logsMenuExcludeSel");
-        const logsLaunchMenu = $("logsLaunchMenu");
-        const logsLaunchMenuDelete = $("logsLaunchMenuDelete");
-        const testsMenu = $("testsMenu");
-        const testsMenuDelete = $("testsMenuDelete");
-        const logsStatus = $("logsStatus");
-        const testsPane = $("testsPane");
-        const testsSessionsEl = $("testsSessions");
-        const testsTimelineEl = $("testsTimeline");
-        const testsCountEl = $("testsCount");
-        const testsDefinitionsEl = $("testsDefinitions");
-        const testsStepsEl = $("testsSteps");
-        const testsHistoryEl = $("testsHistory");
-        const testsSubtabTestsEl = $("testsSubtabTests");
-        const testsSubtabHistoryEl = $("testsSubtabHistory");
-        const testPlayback = $("testPlayback");
-        const testVideo = $("testVideo");
-        const testBackLive = $("testBackLive");
-        const testVideoNote = $("testVideoNote");
-
-        const canvasContext = canvas.getContext("2d", { alpha: false, desynchronized: true });
-        const maxCanvasDPR = 1.5;
-
-        let mode = "fit";
-        let streamWidth = 0;
-        let streamHeight = 0;
-
-        function setStatus(text, kind) {
-          statusText.textContent = text;
-          statusDot.className = "status-dot" + (kind === "err" ? " err" : kind === "idle" ? " idle" : "");
-        }
-
-        const tags = { 1: "description", 2: "keyframe", 3: "delta" };
-        class Demuxer {
-          constructor() { this.buffer = new Uint8Array(0); }
-          push(bytes) {
-            const merged = new Uint8Array(this.buffer.length + bytes.length);
-            merged.set(this.buffer);
-            merged.set(bytes, this.buffer.length);
-            this.buffer = merged;
-            const chunks = [];
-            let offset = 0;
-            while (this.buffer.length - offset >= 4) {
-              const length = new DataView(this.buffer.buffer, this.buffer.byteOffset + offset, 4).getUint32(0, false);
-              if (length < 1) { offset += 4; continue; }
-              if (this.buffer.length - offset - 4 < length) break;
-              const tag = this.buffer[offset + 4];
-              const type = tags[tag];
-              if (type) chunks.push({ type, payload: this.buffer.slice(offset + 5, offset + 4 + length) });
-              offset += 4 + length;
-            }
-            if (offset > 0) this.buffer = this.buffer.slice(offset);
-            return chunks;
-          }
-        }
-
-        function avcCodecString(description) {
-          if (description.length < 4) return "avc1.42E01E";
-          const h = (b) => b.toString(16).padStart(2, "0");
-          return "avc1." + h(description[1]) + h(description[2]) + h(description[3]);
-        }
-
-        function updateSurfaceSize() {
-          if (!streamWidth || !streamHeight) return;
-          const aspect = streamWidth / streamHeight;
-          if (mode === "actual") {
-            surface.style.width = `${streamWidth}px`;
-            surface.style.height = `${streamHeight}px`;
-            return;
-          }
-          const padding = 36;
-          const maxW = Math.max(160, screenWrap.clientWidth - padding);
-          const maxH = Math.max(160, screenWrap.clientHeight - padding);
-          let w = Math.min(maxW, maxH * aspect);
-          let h = w / aspect;
-          if (h > maxH) { h = maxH; w = h * aspect; }
-          surface.style.width = `${Math.floor(w)}px`;
-          surface.style.height = `${Math.floor(h)}px`;
-        }
-
-        let frameTimes = [];
-        function didPaint(w, h) {
-          placeholder.style.display = "none";
-          streamWidth = w;
-          streamHeight = h;
-          updateSurfaceSize();
-          const now = performance.now();
-          frameTimes.push(now);
-          frameTimes = frameTimes.filter((t) => now - t < 1000);
-          fps.textContent = `${frameTimes.length} fps`;
-        }
-
-        function canvasBackingSize(sourceW, sourceH) {
-          const rect = canvas.getBoundingClientRect();
-          if (!rect.width || !rect.height) return { width: sourceW, height: sourceH };
-          const dpr = Math.min(window.devicePixelRatio || 1, maxCanvasDPR);
-          return {
-            width: Math.max(1, Math.min(sourceW, Math.round(rect.width * dpr))),
-            height: Math.max(1, Math.min(sourceH, Math.round(rect.height * dpr)))
-          };
-        }
-
-        function paint(source, w, h) {
-          if (!canvasContext) return;
-          const backing = canvasBackingSize(w, h);
-          if (canvas.width !== backing.width || canvas.height !== backing.height) {
-            canvas.width = backing.width;
-            canvas.height = backing.height;
-          }
-          canvasContext.drawImage(source, 0, 0, backing.width, backing.height);
-          didPaint(w, h);
-        }
-
-        function makeFramePainter() {
-          let pendingFrame = null;
-          let scheduled = false;
-
-          function drawPending() {
-            scheduled = false;
-            const frame = pendingFrame;
-            pendingFrame = null;
-            if (!frame) return;
-            try { paint(frame, frame.displayWidth, frame.displayHeight); }
-            finally { frame.close(); }
-          }
-
-          return {
-            drawDecoded(frame) {
-              if (pendingFrame) pendingFrame.close();
-              pendingFrame = frame;
-              if (!scheduled) {
-                scheduled = true;
-                requestAnimationFrame(drawPending);
-              }
-            }
-          };
-        }
-
-        async function api(path, options = {}) {
-          const headers = new Headers(options.headers || {});
-          if (options.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
-          const response = await fetch(path, { ...options, headers });
-          if (!response.ok) {
-            // The server explains failures in {"error": …}; that beats a bare status line.
-            let detail = "";
-            try { detail = (await response.json()).error || ""; } catch (_) {}
-            throw new Error(detail || `${response.status} ${response.statusText}`);
-          }
-          return response;
-        }
-
-        function eventToSimulatorPoint(event, element) {
-          const rect = element.getBoundingClientRect();
-          const x = (event.clientX - rect.left) * (streamWidth / rect.width);
-          const y = (event.clientY - rect.top) * (streamHeight / rect.height);
-          return { x, y };
-        }
-
-        async function pressHome() {
-          try {
-            await api("/api/v1/input", { method: "POST", body: JSON.stringify({ action: "button", name: "home" }) });
-          } catch (error) {
-            setStatus(`home failed: ${error.message}`, "err");
-          }
-        }
-
-        async function pressShake() {
-          try {
-            await api("/api/v1/input", { method: "POST", body: JSON.stringify({ action: "shake" }) });
-          } catch (error) {
-            setStatus(`shake failed: ${error.message}`, "err");
-          }
-        }
-
-        async function pressTerminate() {
-          try {
-            await api("/api/v1/input", { method: "POST", body: JSON.stringify({ action: "terminate" }) });
-          } catch (error) {
-            setStatus(`terminate failed: ${error.message}`, "err");
-          }
-        }
-
-        async function pressRelaunch() {
-          try {
-            await api("/api/v1/input", { method: "POST", body: JSON.stringify({ action: "launch" }) });
-          } catch (error) {
-            setStatus(`relaunch failed: ${error.message}`, "err");
-          }
-        }
-
-        // Mac clipboard → simulator: the server puts the text or image on the
-        // simulator's clipboard and presses ⌘V there, so any text arrives intact
-        // (typing through AXe reaches only US-keyboard characters).
-        let pasteInFlight = false;
-        async function runPaste(label, send, failureHint = "") {
-          if (pasteInFlight) return;
-          pasteInFlight = true;
-          setStatus(label, "idle");
-          try {
-            const result = await send();
-            setStatus(result.stdout || "pasted", "live");
-          } catch (error) {
-            setStatus(`paste failed: ${error.message}${failureHint}`, "err");
-          } finally {
-            pasteInFlight = false;
-          }
-        }
-
-        function pasteIntoSimulator(text) {
-          if (!text) { setStatus("paste: the clipboard holds no text or image", "err"); return; }
-          runPaste("pasting…", async () => {
-            const response = await api("/api/v1/input", { method: "POST", body: JSON.stringify({ action: "paste", text }) });
-            return response.json();
-          });
-        }
-
-        function pasteImageIntoSimulator(image) {
-          runPaste("pasting image…", () => postFile("/api/v1/input/paste-image", image), " — or right-click the screen to add it to Photos");
-        }
-
-        // Files and clipboard images go as the raw body; the name rides in a header.
-        async function postFile(path, blob) {
-          const headers = { "Content-Type": blob.type || "application/octet-stream" };
-          if (blob.name) headers["X-SimTool-Filename"] = encodeURIComponent(blob.name);
-          const response = await api(path, { method: "POST", headers, body: blob });
-          return response.json();
-        }
-
-        // Text when the clipboard has some, else its image; null when it holds neither.
-        async function readClipboard() {
-          if (!navigator.clipboard.read) {
-            const text = await navigator.clipboard.readText();
-            return text ? { text } : null;
-          }
-          let image = null;
-          for (const item of await navigator.clipboard.read()) {
-            if (item.types.includes("text/plain")) {
-              const text = await (await item.getType("text/plain")).text();
-              if (text) return { text };
-            }
-            const imageType = item.types.find((type) => type.startsWith("image/"));
-            if (imageType && !image) image = await item.getType(imageType);
-          }
-          return image ? { image } : null;
-        }
-
-        async function pasteFromClipboard() {
-          if (!navigator.clipboard || !(navigator.clipboard.read || navigator.clipboard.readText)) {
-            setStatus("paste: this page cannot read the clipboard — press ⌘V instead", "err");
-            return;
-          }
-          let content;
-          try {
-            content = await readClipboard();
-          } catch (_) {
-            setStatus("paste: clipboard access was denied — press ⌘V instead", "err");
-            return;
-          }
-          if (content && content.image) pasteImageIntoSimulator(content.image);
-          else pasteIntoSimulator(content ? content.text : "");
-        }
-
-        // Add to Photos: the clipboard image or files chosen on the Mac land where
-        // a photo picker offers them.
-        let photosInFlight = false;
-        async function addToPhotos(files) {
-          if (photosInFlight || !files.length) return;
-          photosInFlight = true;
-          try {
-            let result = null;
-            for (const [index, file] of files.entries()) {
-              setStatus(files.length > 1 ? `adding to Photos… ${index + 1}/${files.length}` : "adding to Photos…", "idle");
-              result = await postFile("/api/v1/photos", file);
-            }
-            setStatus(files.length > 1 ? `Added ${files.length} files to Photos.` : result.stdout, "live");
-          } catch (error) {
-            setStatus(`add to Photos failed: ${error.message}`, "err");
-          } finally {
-            photosInFlight = false;
-          }
-        }
-
-        async function addClipboardImageToPhotos() {
-          let image = null;
-          try {
-            if (navigator.clipboard && navigator.clipboard.read) {
-              for (const item of await navigator.clipboard.read()) {
-                const imageType = item.types.find((type) => type.startsWith("image/"));
-                if (imageType) { image = await item.getType(imageType); break; }
-              }
-            }
-          } catch (_) {
-            setStatus("Add to Photos: clipboard access was denied — use Add Files to Photos…", "err");
-            return;
-          }
-          if (image) addToPhotos([image]);
-          else setStatus("Add to Photos: the clipboard holds no image — use Add Files to Photos…", "err");
-        }
-
-        // Right-click on the device screen (outside AX mode): the clipboard actions.
-        function showDeviceMenu(x, y) {
-          deviceMenu.hidden = false;
-          const rect = deviceMenu.getBoundingClientRect();
-          deviceMenu.style.left = Math.max(6, Math.min(x, window.innerWidth - rect.width - 6)) + "px";
-          deviceMenu.style.top = Math.max(6, Math.min(y, window.innerHeight - rect.height - 6)) + "px";
-        }
-        function hideDeviceMenu() {
-          deviceMenu.hidden = true;
-        }
-
-        // The viewer's own fields (inspector filter and the like) keep their native paste.
-        function isEditableTarget(target) {
-          const element = target instanceof Element ? target : target && target.parentElement;
-          return !!(element && element.closest("input, textarea, select, [contenteditable]:not([contenteditable='false'])"));
-        }
-
-        async function downloadScreenshot() {
-          try {
-            const response = await api("/api/v1/screenshot");
-            const blob = await response.blob();
-            const url = URL.createObjectURL(blob);
-            const link = document.createElement("a");
-            link.href = url;
-            link.download = "simtool-screenshot.png";
-            link.click();
-            URL.revokeObjectURL(url);
-          } catch (error) {
-            setStatus(`screenshot failed: ${error.message}`, "err");
-          }
-        }
-
-        async function startAvcc() {
-          if (typeof VideoDecoder === "undefined") throw new Error("WebCodecs VideoDecoder is unavailable");
-          setStatus("connecting", "idle");
-          const demuxer = new Demuxer();
-          const framePainter = makeFramePainter();
-          let timestamp = 0;
-          let decoder = new VideoDecoder({
-            output(frame) {
-              framePainter.drawDecoded(frame);
-            },
-            error(error) { setStatus(`decoder error: ${error.message}`, "err"); }
-          });
-          const response = await fetch("/stream.avcc");
-          const reader = response.body.getReader();
-          setStatus("live", "live");
-          while (true) {
-            const { value, done } = await reader.read();
-            if (done) break;
-            if (!value) continue;
-            for (const chunk of demuxer.push(value)) {
-              if (chunk.type === "description") {
-                decoder.configure({
-                  codec: avcCodecString(chunk.payload),
-                  description: chunk.payload,
-                  optimizeForLatency: true,
-                  hardwareAcceleration: "prefer-hardware"
-                });
-              } else if (decoder.state === "configured") {
-                try {
-                  decoder.decode(new EncodedVideoChunk({
-                    type: chunk.type === "keyframe" ? "key" : "delta",
-                    timestamp,
-                    data: chunk.payload
-                  }));
-                  timestamp += 16667;
-                } catch (_) {}
-              }
-            }
-          }
-          throw new Error("AVCC stream ended");
-        }
-
-        // ---- App launches (shared dividers across network + logs) ----
-
-        let launchesById = {};
-        const collapsedLogLaunches = new Set();
-        const collapsedNetworkLaunches = new Set();
-        const expandedTestSteps = new Set();   // "<sessionId>:<entryIndex>" of steps whose detail is open
-
-        async function loadLaunches() {
-          try {
-            const response = await api("/api/v1/launches");
-            const payload = await response.json();
-            const map = {};
-            for (const launch of (payload.launches || [])) map[launch.launchId] = launch;
-            launchesById = map;
-          } catch (_) {}
-        }
-
-        // Renders an ISO8601 timestamp (stored in UTC) as a local HH:MM:SS clock.
-        // Falls back to the raw UTC time slice if the string isn't a parseable date.
-        function clockTime(iso) {
-          if (!iso) return "";
-          const date = new Date(iso);
-          if (isNaN(date.getTime())) return String(iso).slice(11, 19);
-          const pad = (value) => String(value).padStart(2, "0");
-          return pad(date.getHours()) + ":" + pad(date.getMinutes()) + ":" + pad(date.getSeconds());
-        }
-
-        function launchLabel(launchId) {
-          const launch = launchesById[launchId];
-          const time = launch ? clockTime(launch.startedAt) : "";
-          const pid = launch ? launch.pid : null;
-          const parts = ["App launch"];
-          if (time) parts.push(time);
-          if (pid != null) parts.push("pid " + pid);
-          return parts.join(" · ");
-        }
-
-        function appendLaunchDivider(list, launchId, collapsedSet, rerender, onContextMenu) {
-          const key = String(launchId);
-          const isCollapsed = collapsedSet.has(key);
-          const li = document.createElement("li");
-          li.className = "launch-divider" + (isCollapsed ? " collapsed" : "");
-          li.setAttribute("role", "button");
-          li.setAttribute("tabindex", "0");
-          li.setAttribute("aria-expanded", isCollapsed ? "false" : "true");
-          const chevron = document.createElement("span");
-          chevron.className = "launch-chevron";
-          chevron.textContent = isCollapsed ? "▸" : "▾";
-          const label = document.createElement("span");
-          label.className = "launch-label";
-          label.textContent = launchLabel(launchId);
-          li.append(chevron, label);
-          const toggle = () => {
-            if (collapsedSet.has(key)) collapsedSet.delete(key);
-            else collapsedSet.add(key);
-            rerender();
-          };
-          li.addEventListener("click", toggle);
-          li.addEventListener("keydown", (event) => {
-            if (event.key === "Enter" || event.key === " ") {
-              event.preventDefault();
-              toggle();
-            }
-          });
-          if (onContextMenu) {
-            li.addEventListener("contextmenu", (event) => {
-              event.preventDefault();
-              onContextMenu(event.clientX, event.clientY, launchId);
-            });
-          }
-          list.appendChild(li);
-          return isCollapsed;
-        }
-
-        function escapeHTML(value) {
-          return String(value)
-            .replace(/&/g, "&amp;")
-            .replace(/</g, "&lt;")
-            .replace(/>/g, "&gt;");
-        }
-
-        // Lists rebuild their whole DOM on every poll, which resets scrollTop and yanks the view.
-        // Capture the scroll position before the rebuild, then hand it to restoreScroll() after.
-        const SCROLL_EDGE_SLOP = 24;
-        function captureScroll(el) {
-          return {
-            top: el.scrollTop,
-            height: el.scrollHeight,
-            atTop: el.scrollTop <= SCROLL_EDGE_SLOP,
-            atBottom: el.scrollHeight - el.scrollTop - el.clientHeight <= SCROLL_EDGE_SLOP
-          };
-        }
-        // `liveEnd` marks the edge where new cells appear ("bottom", "top", or "none"). We follow that
-        // edge only when the user was already parked there; otherwise we keep their position so a
-        // background append never moves the scroll while they're reading.
-        function restoreScroll(el, liveEnd, prev) {
-          if (liveEnd === "top") {
-            el.scrollTop = prev.atTop ? 0 : prev.top + (el.scrollHeight - prev.height);
-          } else if (liveEnd === "bottom") {
-            el.scrollTop = prev.atBottom ? el.scrollHeight : prev.top;
-          } else {
-            el.scrollTop = prev.top;
-          }
-        }
-
-        // ---- Network ----
-
-        let networkEvents = [];
-        let mockRulesById = {};
-        let mockRuleExpanded = false;
-        let networkSelectedId = null;
-        let networkTimer = null;
-
-        // Include/exclude filter chips, kept per tab and persisted across reloads.
-        const FILTER_CHIPS_KEY = "simtool.filterChips";
-        const filterChipsByTab = { network: [], logs: [], state: [], ax: [], tests: [] };
-        try {
-          const stored = JSON.parse(localStorage.getItem(FILTER_CHIPS_KEY) || "{}");
-          for (const tab of Object.keys(filterChipsByTab)) {
-            const list = stored && Array.isArray(stored[tab]) ? stored[tab] : [];
-            filterChipsByTab[tab] = list.filter((chip) =>
-              chip && (chip.kind === "include" || chip.kind === "exclude")
-              && typeof chip.term === "string" && chip.term.trim()
-            ).map((chip) =>
-              typeof chip.field === "string" && chip.field.trim()
-                ? { kind: chip.kind, term: chip.term, field: chip.field }
-                : { kind: chip.kind, term: chip.term }
-            );
-          }
-        } catch (_) { /* malformed storage: start clean */ }
-
-        function saveFilterChips() {
-          try { localStorage.setItem(FILTER_CHIPS_KEY, JSON.stringify(filterChipsByTab)); } catch (_) {}
-        }
-
-        function rerenderActiveTab() {
-          if (activeTab === "network") renderNetworkList();
-          else if (activeTab === "logs") renderLogsList();
-          else if (activeTab === "state") renderState();
-          else if (activeTab === "ax") renderAxTree();
-          else if (activeTab === "tests") { renderTestsList(); renderTestsDefinitions(); }
-        }
-
-        // Adding a chip replaces any chip with the same field+term (either kind),
-        // so an exclude flips an identical include instead of stacking next to it.
-        function chipKey(field, term) {
-          return (field || "") + ":" + term.toLowerCase();
-        }
-
-        function addFilterChip(kind, term, field) {
-          const trimmed = term.trim();
-          if (!trimmed) return;
-          const key = chipKey(field, trimmed);
-          const chips = filterChipsByTab[activeTab].filter((chip) => chipKey(chip.field, chip.term) !== key);
-          chips.push(field ? { kind, term: trimmed, field } : { kind, term: trimmed });
-          filterChipsByTab[activeTab] = chips;
-          saveFilterChips();
-          renderFilterChips();
-          rerenderActiveTab();
-        }
-
-        function removeFilterChip(index) {
-          filterChipsByTab[activeTab].splice(index, 1);
-          saveFilterChips();
-          renderFilterChips();
-          rerenderActiveTab();
-        }
-
-
-        // "field:text" scopes a term to one field instead of the whole haystack.
-        // Only fields from the allowed list count; anything else (say, an URL's
-        // "https:") stays a plain substring term.
-        function parseFieldTerm(text, allowedFields) {
-          const colon = text.indexOf(":");
-          if (colon > 0 && allowedFields) {
-            const field = text.slice(0, colon).trim().toLowerCase();
-            const term = text.slice(colon + 1).trim();
-            if (term && allowedFields.includes(field)) return { field, term };
-          }
-          return { field: null, term: text };
-        }
-
-        function termMatches(term, field, hay, fields) {
-          const needle = term.toLowerCase();
-          if (field) return !!fields && (fields[field] || "").includes(needle);
-          return hay.includes(needle);
-        }
-
-        // Exclude chips win over include chips; include chips are OR'd ("show only
-        // these"); the live input text is an extra substring filter on top.
-        // `fields` (per-entry lowercased field map) backs field-scoped terms; tabs
-        // without it match everything against the haystack.
-        function matchesFilters(hay, chips, query, fields, queryField) {
-          for (const chip of chips) {
-            if (chip.kind === "exclude" && termMatches(chip.term, chip.field, hay, fields)) return false;
-          }
-          const includes = chips.filter((chip) => chip.kind === "include");
-          if (includes.length && !includes.some((chip) => termMatches(chip.term, chip.field, hay, fields))) return false;
-          return !query || termMatches(query, queryField, hay, fields);
-        }
-
-        function renderFilterChips() {
-          filterChips.innerHTML = "";
-          filterChipsByTab[activeTab].forEach((chip, index) => {
-            const el = document.createElement("span");
-            el.className = "filter-chip " + chip.kind;
-            const label = (chip.field ? chip.field + ":" : "") + chip.term;
-            const term = document.createElement("span");
-            term.className = "chip-term";
-            term.textContent = (chip.kind === "exclude" ? "−" : "") + label;
-            term.title = label;
-            const x = document.createElement("button");
-            x.type = "button";
-            x.className = "filter-chip-x";
-            x.textContent = "✕";
-            x.title = "Remove filter";
-            x.addEventListener("click", () => removeFilterChip(index));
-            el.append(term, x);
-            filterChips.appendChild(el);
-          });
-        }
-
-        function summarizeRequest(event) {
-          const request = event.request || {};
-          if (event.protocol === "grpc") {
-            return request.path || [request.grpcService, request.grpcMethod].filter(Boolean).join("/");
-          }
-          return [request.method, request.url || request.path].filter(Boolean).join(" ");
-        }
-
-        function requestPath(event) {
-          const request = event.request || {};
-          if (event.protocol === "grpc") {
-            return request.path || [request.grpcService, request.grpcMethod].filter(Boolean).join("/");
-          }
-          return request.url || request.path || "";
-        }
-
-        // URL path without host/query for context-menu chips (gRPC: service/method).
-        function chipPathForEvent(event) {
-          const raw = requestPath(event);
-          if (!raw) return "";
-          if (event.protocol === "grpc") return raw;
-          try { return new URL(raw, "http://localhost").pathname; } catch (_) { return raw; }
-        }
-
-        function lastPathSegment(rawPath) {
-          if (!rawPath) return "";
-          let path = String(rawPath);
-          const cut = path.search(/[?#]/);
-          if (cut >= 0) path = path.slice(0, cut);
-          path = path.replace(/\/+$/, "");
-          const segments = path.split("/").filter(Boolean);
-          return segments.length ? segments[segments.length - 1] : path;
-        }
-
-        function summarizeRequestShort(event) {
-          const last = lastPathSegment(requestPath(event));
-          if (event.protocol === "grpc") return last || summarizeRequest(event);
-          const method = (event.request || {}).method;
-          return [method, last].filter(Boolean).join(" ") || summarizeRequest(event);
-        }
-
-        function summarizeStatus(event) {
-          if (event.error) return "ERR";
-          const response = event.response || {};
-          if (event.protocol === "grpc") {
-            return response.grpcStatusCode != null ? String(response.grpcStatusCode) : "—";
-          }
-          return response.statusCode != null ? String(response.statusCode) : "—";
-        }
-
-        // Full status incl. the gRPC message — kept out of the row's status cell (code only),
-        // but used for the row tooltip and the search haystack so the message stays discoverable.
-        function fullStatusText(event) {
-          if (event.error) return "ERR";
-          const response = event.response || {};
-          if (event.protocol === "grpc") {
-            return [response.grpcStatusCode, response.grpcStatusMessage].filter(Boolean).join(" ") || "—";
-          }
-          return response.statusCode != null ? String(response.statusCode) : "—";
-        }
-
-        function statusClass(event) {
-          if (event.error) return "status-err";
-          const response = event.response || {};
-          if (event.protocol === "grpc") {
-            if (response.grpcStatusCode == null) return "";
-            return response.grpcStatusCode === "0" ? "status-ok" : "status-err";
-          }
-          const code = response.statusCode;
-          if (code == null) return "";
-          if (code >= 500) return "status-err";
-          if (code >= 300) return "status-warn";
-          return "status-ok";
-        }
-
-        function networkEventHaystack(event) {
-          const request = event.request || {};
-          return [summarizeRequest(event), fullStatusText(event), event.protocol, request.host]
-            .filter(Boolean).join(" ").toLowerCase();
-        }
-
-        function filteredNetworkEvents() {
-          const query = (filterByTab.network || "").trim().toLowerCase();
-          const chips = filterChipsByTab.network;
-          if (!query && !chips.length) return networkEvents;
-          return networkEvents.filter((event) => matchesFilters(networkEventHaystack(event), chips, query));
-        }
-
-        function renderNetworkList() {
-          const events = filteredNetworkEvents();
-          const prevScroll = captureScroll(networkList);
-          networkList.innerHTML = "";
-          if (!events.length) {
-            const empty = document.createElement("li");
-            empty.className = "network-empty";
-            empty.textContent = "no requests captured";
-            networkList.appendChild(empty);
-            return;
-          }
-          // Oldest-first, grouped by launch — mirrors the Logs tab so both lists read top-to-bottom
-          // and newly captured requests append at the bottom.
-          const ordered = events.slice().sort((a, b) =>
-            ((a.launchId ?? -1) - (b.launchId ?? -1)) || String(a.timestamp || "").localeCompare(String(b.timestamp || ""))
-          );
-          const firstLaunch = ordered.find((event) => event.launchId != null);
-          let lastLaunch;
-          let launchCollapsed = false;
-          if (firstLaunch) {
-            launchCollapsed = appendLaunchDivider(networkList, firstLaunch.launchId, collapsedNetworkLaunches, renderNetworkList, showNetworkLaunchMenu);
-            lastLaunch = firstLaunch.launchId;
-          }
-          for (const event of ordered) {
-            const lid = event.launchId;
-            if (lid != null && lid !== lastLaunch) {
-              launchCollapsed = appendLaunchDivider(networkList, lid, collapsedNetworkLaunches, renderNetworkList, showNetworkLaunchMenu);
-              lastLaunch = lid;
-            }
-            if (launchCollapsed) continue;
-            const row = document.createElement("li");
-            row.className = "network-row" + (event.id === networkSelectedId ? " selected" : "") + (event.mocked ? " mocked" : "");
-            const time = document.createElement("span");
-            time.className = "time";
-            time.textContent = clockTime(event.timestamp);
-            const req = document.createElement("span");
-            req.className = "req";
-            req.textContent = summarizeRequestShort(event);
-            req.title = summarizeRequest(event);
-            if (event.mocked) {
-              const badge = document.createElement("span");
-              badge.className = "mock-badge";
-              badge.textContent = "🎭";
-              badge.title = event.mockRuleId ? ("Mocked by " + event.mockRuleId) : "Mocked response";
-              req.appendChild(badge);
-            }
-            const status = document.createElement("span");
-            status.className = "status " + statusClass(event);
-            status.textContent = summarizeStatus(event);
-            status.title = fullStatusText(event);
-            const dur = document.createElement("span");
-            dur.className = "dur";
-            dur.textContent = Math.round(event.durationMilliseconds) + "ms";
-            row.append(time, req, status, dur);
-            row.addEventListener("click", () => {
-              if (hasTextSelection()) return;
-              networkSelectedId = event.id;
-              renderNetworkDetail(event);
-              showDetailView("Network");
-            });
-            row.addEventListener("contextmenu", (domEvent) => {
-              domEvent.preventDefault();
-              const path = chipPathForEvent(event);
-              if (!path) return;
-              showNetworkMenu(domEvent.clientX, domEvent.clientY, path);
-            });
-            networkList.appendChild(row);
-          }
-          restoreScroll(networkList, "bottom", prevScroll);
-        }
-
-        function renderNetworkDetail(event) {
-          const lines = [];
-          const section = (title) => lines.push(`<h3>${escapeHTML(title)}</h3>`);
-          const pre = (text, mocked) => lines.push(`<pre${mocked ? ' class="mock-value"' : ''}>${escapeHTML(text)}</pre>`);
-          const kv = (entries, mocked) => {
-            const pairs = Object.entries(entries || {});
-            if (!pairs.length) return;
-            const cells = pairs.map(([key, value]) =>
-              `<span class="kv-key">${escapeHTML(key)}</span><span class="kv-val${mocked ? ' mock-value' : ''}">${escapeHTML(value)}</span>`
-            ).join("");
-            lines.push(`<div class="kv">${cells}</div>`);
-          };
-
-          section("Overview");
-          pre([
-            summarizeRequest(event),
-            `${event.protocol} · ${Math.round(event.durationMilliseconds)}ms · ${summarizeStatus(event)}`,
-            event.timestamp,
-            event.appBundleID || ""
-          ].filter(Boolean).join("\n"));
-          if (event.mocked) {
-            lines.push(`<div class="kv"><span class="kv-key">Mocked</span><span class="kv-val mock-value">${escapeHTML(event.mockRuleId || "yes")}</span></div>`);
-            const rule = event.mockRuleId ? mockRulesById[event.mockRuleId] : null;
-            if (rule) {
-              lines.push(`<details class="mock-rule"${mockRuleExpanded ? " open" : ""}><summary>Mock rule</summary><pre class="mock-value">${escapeHTML(JSON.stringify(rule, null, 2))}</pre></details>`);
-            } else if (event.mockRuleId) {
-              lines.push(`<div class="kv"><span class="kv-key">Mock rule</span><span class="kv-val">(no longer active)</span></div>`);
-            }
-          }
-
-          const request = event.request || {};
-          section("Request");
-          kv(event.protocol === "grpc" ? request.metadata : request.headers);
-          if (request.bodyPreview) pre(request.bodyPreview);
-
-          if (event.response) {
-            const response = event.response;
-            section("Response");
-            const mocked = !!event.mocked;
-            if (event.protocol === "grpc") {
-              const status = [response.grpcStatusCode, response.grpcStatusMessage].filter((s) => s != null && s !== "").join(" · ");
-              if (status) kv({ "gRPC status": status }, mocked);
-            } else if (response.statusCode != null) {
-              kv({ "Status": String(response.statusCode) }, mocked);
-            }
-            kv(event.protocol === "grpc" ? response.metadata : response.headers);
-            if (response.bodyPreview) pre(response.bodyPreview, mocked);
-            else if (mocked) pre("(mock returned no body)", mocked);
-          }
-
-          if (event.error) {
-            section("Error");
-            pre(event.error.message || "");
-          }
-
-          detailBody.innerHTML = lines.join("");
-          const mockRuleEl = detailBody.querySelector("details.mock-rule");
-          if (mockRuleEl) {
-            mockRuleEl.addEventListener("toggle", () => { mockRuleExpanded = mockRuleEl.open; });
-          }
-        }
-
-        async function loadNetwork() {
-          try {
-            await loadLaunches();
-            const response = await api("/api/v1/network/events?limit=200");
-            const payload = await response.json();
-            networkEvents = payload.events || [];
-            networkCount.textContent = networkEvents.length;
-            try {
-              const mockResponse = await api("/api/v1/mocks");
-              const mockPayload = await mockResponse.json();
-              const map = {};
-              (mockPayload.rules || []).forEach((rule) => { map[rule.id] = rule; });
-              mockRulesById = map;
-            } catch (_) { /* keep last known mock rules */ }
-            if (activeTab === "network") {
-              if (inspectorView === "list") renderNetworkList();
-              else if (networkSelectedId != null) {
-                const selected = networkEvents.find((event) => event.id === networkSelectedId);
-                if (selected) renderNetworkDetail(selected);
-              }
-            }
-          } catch (_) { /* keep last good render */ }
-        }
-
-        function startNetworkPolling() {
-          loadNetwork();
-          if (!networkTimer) networkTimer = setInterval(loadNetwork, 1500);
-        }
-
-        function stopNetworkPolling() {
-          if (networkTimer) { clearInterval(networkTimer); networkTimer = null; }
-        }
-
-        // ---- Logs ----
-
-        let logsEntries = [];
-        let logsCursor = null;
-        let logsTimer = null;
-        let logsCaptureStarted = false;
-        let logsTargetApp = "";
-        const LOGS_MAX = 2000;
-
-        function logsSourceLabel(entry) {
-          return entry.source === "stdout" ? "stdout" : "oslog";
-        }
-
-        const LOGS_ERROR_RE = /\b(fatal error|error|exception|fault|crash|failure)\b|❌/i;
-        function isErrorEntry(entry) {
-          const level = (entry.level || "").toLowerCase();
-          if (level === "error" || level === "fault") return true;
-          return LOGS_ERROR_RE.test(entry.message || "");
-        }
-
-        const LOGS_FILTER_FIELDS = ["message", "subsystem", "category", "process", "level"];
-
-        function filteredLogs() {
-          const query = (filterByTab.logs || "").trim().toLowerCase();
-          const chips = filterChipsByTab.logs;
-          const live = parseFieldTerm(query, LOGS_FILTER_FIELDS);
-          return logsEntries.filter((entry) => {
-            if (!query && !chips.length) return true;
-            const fields = {
-              message: (entry.message || "").toLowerCase(),
-              subsystem: (entry.subsystem || "").toLowerCase(),
-              category: (entry.category || "").toLowerCase(),
-              process: (entry.process || "").toLowerCase(),
-              level: (entry.level || "").toLowerCase()
-            };
-            const hay = [fields.message, fields.subsystem, fields.category, fields.process, fields.level]
-              .filter(Boolean).join(" ");
-            return matchesFilters(hay, chips, live.term, fields, live.field);
-          });
-        }
-
-        function renderLogsList() {
-          // Group by launch rather than by arrival order: entries can be attributed to an earlier
-          // launch than their neighbors (crash summaries are ingested during the next launch), and
-          // rendering them in arrival order would split that launch's section in two.
-          const entries = filteredLogs().slice().sort((a, b) =>
-            ((a.launchId ?? -1) - (b.launchId ?? -1)) || (a.sequence - b.sequence)
-          );
-          const prevScroll = captureScroll(logsList);
-          logsList.innerHTML = "";
-          if (!entries.length) {
-            const empty = document.createElement("li");
-            empty.className = "logs-empty";
-            empty.textContent = "no log lines captured";
-            logsList.appendChild(empty);
-            return;
-          }
-          const firstLaunch = entries.find((entry) => entry.launchId != null);
-          let lastLaunch;
-          let launchCollapsed = false;
-          if (firstLaunch) {
-            launchCollapsed = appendLaunchDivider(logsList, firstLaunch.launchId, collapsedLogLaunches, renderLogsList, showLogsLaunchMenu);
-            lastLaunch = firstLaunch.launchId;
-          }
-          for (const entry of entries) {
-            const lid = entry.launchId;
-            if (lid != null && lid !== lastLaunch) {
-              launchCollapsed = appendLaunchDivider(logsList, lid, collapsedLogLaunches, renderLogsList, showLogsLaunchMenu);
-              lastLaunch = lid;
-            }
-            if (launchCollapsed) continue;
-            const row = document.createElement("li");
-            row.className = "logs-row" + (isErrorEntry(entry) ? " logs-row-error" : "");
-            const source = logsSourceLabel(entry);
-            const time = document.createElement("span");
-            time.className = "time logs-src-" + source;
-            time.textContent = (entry.timestamp || "").slice(11, 19);
-            time.title = source;
-            row.appendChild(time);
-            if (entry.level) {
-              const lvl = document.createElement("span");
-              lvl.className = "lvl logs-src-" + source;
-              lvl.textContent = entry.level;
-              row.appendChild(lvl);
-            }
-            const msg = document.createElement("span");
-            msg.className = "msg";
-            msg.textContent = entry.message || "";
-            row.appendChild(msg);
-            row.addEventListener("click", () => {
-              if (hasTextSelection()) return;
-              renderLogDetail(entry);
-              showDetailView("Logs");
-            });
-            row.addEventListener("contextmenu", (domEvent) => {
-              domEvent.preventDefault();
-              showLogsMenu(domEvent.clientX, domEvent.clientY, entry);
-            });
-            logsList.appendChild(row);
-          }
-          restoreScroll(logsList, "bottom", prevScroll);
-        }
-
-        function renderLogDetail(entry) {
-          const lines = [];
-          lines.push(`<h3>Entry</h3>`);
-          const fields = {
-            level: entry.level,
-            source: logsSourceLabel(entry),
-            subsystem: entry.subsystem,
-            category: entry.category,
-            process: entry.process,
-            time: entry.timestamp
-          };
-          const cells = Object.entries(fields)
-            .filter(([, value]) => value)
-            .map(([key, value]) => `<span class="kv-key">${escapeHTML(key)}</span><span class="kv-val">${escapeHTML(value)}</span>`)
-            .join("");
-          if (cells) lines.push(`<div class="kv">${cells}</div>`);
-          lines.push(`<h3>Message</h3>`);
-          lines.push(`<pre>${escapeHTML(entry.message || "")}</pre>`);
-          detailBody.innerHTML = lines.join("");
-        }
-
-        async function startLogsCapture() {
-          const app = (logsTargetApp || "").trim();
-          // Capture only ever starts scoped to an app: an unscoped capture streams OSLog for the
-          // entire simulator, which drowns the viewer in unrelated system noise.
-          if (!app) {
-            logsStatus.textContent = "no app attached";
-            return;
-          }
-          logsEntries = [];
-          logsCursor = null;
-          logsList.innerHTML = "";
-          // OSLog only: the target app logs via os_log/Logger, so stdout/print capture (which would
-          // relaunch the app to attach its console) is never requested.
-          const body = { app };
-          try {
-            await api("/api/v1/logs/capture", { method: "POST", body: JSON.stringify(body) });
-            logsStatus.textContent = "capturing oslog";
-            logsCaptureStarted = true;
-          } catch (error) {
-            logsStatus.textContent = `error: ${error.message}`;
-          }
-        }
-
-        async function pollLogs() {
-          try {
-            await loadLaunches();
-            const since = logsCursor == null ? "" : `&since=${logsCursor}`;
-            const response = await api(`/api/v1/logs/capture?limit=500${since}`);
-            const payload = await response.json();
-            const entries = payload.entries || [];
-            if (entries.length) {
-              logsEntries = logsEntries.concat(entries);
-              if (logsEntries.length > LOGS_MAX) logsEntries = logsEntries.slice(logsEntries.length - LOGS_MAX);
-              if (activeTab === "logs" && inspectorView === "list") renderLogsList();
-            }
-            if (payload.cursor != null) logsCursor = payload.cursor;
-            logsCount.textContent = logsEntries.length;
-            const dropped = payload.droppedCount ? ` · ${payload.droppedCount} dropped` : "";
-            logsStatus.textContent = `${logsEntries.length} lines${dropped}`;
-          } catch (error) {
-            logsStatus.textContent = `error: ${error.message}`;
-          }
-        }
-
-        function startLogsPolling() {
-          pollLogs();
-          if (!logsTimer) logsTimer = setInterval(pollLogs, 1500);
-        }
-
-        function stopLogsPolling() {
-          if (logsTimer) { clearInterval(logsTimer); logsTimer = null; }
-        }
-
-        // Ensure logs are being captured + drained while the Logs tab is in view.
-        async function ensureLogs() {
-          if (!logsCaptureStarted) await startLogsCapture();
-          if (inspectorOpen && logsCaptureStarted) startLogsPolling();
-        }
-
-        // ---- Accessibility (AX) ----
-
-        let axTree = null;            // { roots, nodeCount }
-        let axNodesByKey = new Map(); // node.id -> node (augmented with _key/_parentKey/_depth)
-        let axExpanded = new Set();   // expanded node keys
-        let axSelectedKey = null;
-        let axHoverKey = null;
-        let axTimer = null;
-        let axFetching = false;
-        let axLastUpdated = 0;
-        let axFilter = "";
-
-        function axHasFrame(node) {
-          const f = node.frame;
-          return !!(f && f.width > 0 && f.height > 0);
-        }
-
-        function axNodeLabel(node) {
-          return node.accessibilityIdentifier || node.label || node.title
-              || node.value || node.role || node.type || "element";
-        }
-
-        function axNodeSecondary(node) {
-          return [node.role, node.type].filter(Boolean).join(" · ");
-        }
-
-        // Screen reference = the largest-area ROOT frame (the AXApplication, in points).
-        // Only roots are considered: some deep container groups report their frame in
-        // device pixels (e.g. 1206x2622 = 3x), which would otherwise hijack the reference
-        // and squash every real (point-space) element into a corner.
-        function axScreenFrame() {
-          if (!axTree) return null;
-          let best = null, bestArea = 0;
-          for (const root of (axTree.roots || [])) {
-            const f = root.frame;
-            if (!f || !f.width || !f.height) continue;
-            const area = f.width * f.height;
-            if (area > bestArea) { bestArea = area; best = f; }
-          }
-          return best;
-        }
-
-        function axIndex(tree) {
-          const byKey = new Map();
-          const walk = (node, parentKey, depth) => {
-            node._key = node.id;
-            node._parentKey = parentKey;
-            node._depth = depth;
-            byKey.set(node.id, node);
-            for (const child of node.children || []) walk(child, node.id, depth + 1);
-          };
-          for (const root of (tree.roots || [])) walk(root, null, 0);
-          axNodesByKey = byKey;
-        }
-
-        function axHaystack(node) {
-          return [node.accessibilityIdentifier, node.label, node.value, node.title, node.role, node.roleDescription, node.type]
-            .filter(Boolean).join(" ").toLowerCase();
-        }
-
-        function axRow(node, expanded) {
-          const hasChildren = (node.children || []).length > 0;
-          const row = document.createElement("div");
-          row.className = "ax-row" + (node._key === axSelectedKey ? " selected" : "");
-          row.style.paddingLeft = (8 + node._depth * 14) + "px";
-          row.dataset.key = node._key;
-
-          const chevron = document.createElement("span");
-          chevron.className = "ax-chevron";
-          chevron.textContent = hasChildren ? (expanded ? "▾" : "▸") : "";
-          if (hasChildren) {
-            chevron.addEventListener("click", (event) => {
-              event.stopPropagation();
-              if (axExpanded.has(node._key)) axExpanded.delete(node._key);
-              else axExpanded.add(node._key);
-              renderAxTree();
-            });
-          }
-
-          const primary = document.createElement("span");
-          primary.className = "ax-label";
-          primary.textContent = axNodeLabel(node);
-          row.append(chevron, primary);
-
-          // Show the human-readable label when it isn't already the primary text, so
-          // identifier-named or role-only rows still say what the element actually is.
-          const labelText = (node.label && node.label.trim()) ? node.label : "";
-          if (labelText && labelText !== primary.textContent) {
-            const human = document.createElement("span");
-            human.className = "ax-text";
-            human.textContent = '"' + labelText + '"';
-            row.append(human);
-          }
-
-          const secondary = document.createElement("span");
-          secondary.className = "ax-secondary";
-          secondary.textContent = axNodeSecondary(node);
-          row.append(secondary);
-          row.addEventListener("click", () => selectAxNode(node._key, false));
-          row.addEventListener("contextmenu", (event) => {
-            event.preventDefault();
-            selectAxNode(node._key, false);
-            showAxMenu(event.clientX, event.clientY, node);
-          });
-          row.addEventListener("mouseenter", () => { axHoverKey = node._key; renderAxOverlay(); });
-          row.addEventListener("mouseleave", () => { if (axHoverKey === node._key) { axHoverKey = null; renderAxOverlay(); } });
-          return row;
-        }
-
-        function renderAxTree() {
-          if (!axTree) { axTreeEl.innerHTML = '<span class="ax-empty">no accessibility tree</span>'; return; }
-          const q = axFilter.trim().toLowerCase();
-          const chips = filterChipsByTab.ax;
-          let showKeys = null;
-          if (q || chips.length) {
-            showKeys = new Set();
-            for (const node of axNodesByKey.values()) {
-              if (!matchesFilters(axHaystack(node), chips, q)) continue;
-              showKeys.add(node._key);
-              let pk = node._parentKey;
-              while (pk != null && !showKeys.has(pk)) {
-                showKeys.add(pk);
-                const parent = axNodesByKey.get(pk);
-                pk = parent ? parent._parentKey : null;
-              }
-            }
-          }
-          const rows = [];
-          const walk = (node) => {
-            if (showKeys && !showKeys.has(node._key)) return;
-            const expanded = showKeys ? true : axExpanded.has(node._key);
-            rows.push(axRow(node, expanded));
-            if (expanded) for (const child of (node.children || [])) walk(child);
-          };
-          for (const root of (axTree.roots || [])) walk(root);
-          axTreeEl.innerHTML = "";
-          if (!rows.length) { axTreeEl.innerHTML = '<span class="ax-empty">no matches</span>'; return; }
-          for (const row of rows) axTreeEl.appendChild(row);
-        }
-
-        function updateAxStatus() {
-          const count = axTree ? axTree.nodeCount : 0;
-          axStatusEl.textContent = axTree ? `${count} nodes · updated just now` : "—";
-        }
-
-        async function loadAxTree() {
-          if (axFetching) return;
-          axFetching = true;
-          try {
-            const response = await api("/api/v1/ax/tree?raw=1");
-            const payload = await response.json();
-            axTree = payload;
-            axIndex(payload);
-            axLastUpdated = performance.now();
-            if (activeTab === "ax" && inspectorOpen) {
-              renderAxTree();
-              renderAxSelected();
-              renderAxOverlay();
-              updateAxStatus();
-            }
-          } catch (error) {
-            axStatusEl.textContent = `error: ${error.message}`;
-          } finally {
-            axFetching = false;
-          }
-        }
-
-        function startAxPolling() {
-          loadAxTree();
-          if (!axTimer) axTimer = setInterval(loadAxTree, 2000);
-        }
-
-        function stopAxPolling() {
-          if (axTimer) { clearInterval(axTimer); axTimer = null; }
-        }
-
-        // Frame points -> percentage box within .surface (percentages auto-track resize).
-        function axFrameToBox(frame, screen) {
-          return {
-            left: ((frame.x - screen.x) / screen.width) * 100,
-            top: ((frame.y - screen.y) / screen.height) * 100,
-            width: (frame.width / screen.width) * 100,
-            height: (frame.height / screen.height) * 100
-          };
-        }
-
-        function renderAxOverlay() {
-          if (!axOverlay) return;
-          const show = inspectorOpen && activeTab === "ax" && !!axTree;
-          axOverlay.hidden = !show;
-          if (!show) { axOverlay.innerHTML = ""; return; }
-          const screen = axScreenFrame();
-          axOverlay.innerHTML = "";
-          if (!screen || !screen.width || !screen.height) return;
-          for (const node of axNodesByKey.values()) {
-            if (!axHasFrame(node)) continue;
-            const box = axFrameToBox(node.frame, screen);
-            // Skip frames that overflow the point-space screen — these are the
-            // pixel-scaled container groups, not real on-screen elements.
-            if (box.width > 105 || box.height > 105) continue;
-            const el = document.createElement("div");
-            let cls = "ax-box";
-            if (node._key === axSelectedKey) cls += " selected";
-            else if (node._key === axHoverKey) cls += " hover";
-            el.className = cls;
-            el.style.left = box.left + "%";
-            el.style.top = box.top + "%";
-            el.style.width = box.width + "%";
-            el.style.height = box.height + "%";
-            axOverlay.appendChild(el);
-          }
-        }
-
-        function selectAxNode(key, fromCanvas) {
-          axSelectedKey = key;
-          if (fromCanvas) {
-            let node = axNodesByKey.get(key);
-            let pk = node ? node._parentKey : null;
-            while (pk != null) {
-              axExpanded.add(pk);
-              const parent = axNodesByKey.get(pk);
-              pk = parent ? parent._parentKey : null;
-            }
-          }
-          renderAxTree();
-          renderAxSelected();
-          renderAxOverlay();
-          if (fromCanvas) {
-            const row = axTreeEl.querySelector(".ax-row.selected");
-            if (row) row.scrollIntoView({ block: "nearest" });
-          }
-        }
-
-        // Canvas click -> deepest (smallest-area) framed node containing the point.
-        function axHitTest(clientX, clientY) {
-          const rect = surface.getBoundingClientRect();
-          if (!rect.width || !rect.height) return null;
-          const screen = axScreenFrame();
-          if (!screen) return null;
-          const px = screen.x + ((clientX - rect.left) / rect.width) * screen.width;
-          const py = screen.y + ((clientY - rect.top) / rect.height) * screen.height;
-          let best = null, bestArea = Infinity;
-          for (const node of axNodesByKey.values()) {
-            const f = node.frame;
-            if (!axHasFrame(node)) continue;
-            if (px >= f.x && px <= f.x + f.width && py >= f.y && py <= f.y + f.height) {
-              const area = f.width * f.height;
-              // <= so that among coincident frames (e.g. Application and its Window
-              // both cover the screen) the deepest, last-walked node wins.
-              if (area <= bestArea) { bestArea = area; best = node; }
-            }
-          }
-          return best;
-        }
-
-        function axSelectMode() {
-          return inspectorOpen && activeTab === "ax";
-        }
-
-        function axUpdateCanvasMode() {
-          canvas.classList.toggle("ax-pick", axSelectMode());
-        }
-
-        function axAncestorPath(node) {
-          const path = [];
-          let pk = node._parentKey;
-          while (pk != null) {
-            const parent = axNodesByKey.get(pk);
-            if (!parent) break;
-            path.unshift(axNodeLabel(parent));
-            pk = parent._parentKey;
-          }
-          return path;
-        }
-
-        function axCopyPayload(node) {
-          return {
-            accessibilityIdentifier: node.accessibilityIdentifier ?? null,
-            label: node.label ?? null,
-            value: node.value ?? null,
-            title: node.title ?? null,
-            role: node.role ?? null,
-            roleDescription: node.roleDescription ?? null,
-            type: node.type ?? null,
-            enabled: node.enabled ?? null,
-            pid: node.pid ?? null,
-            frame: node.frame ?? null,
-            ancestorPath: axAncestorPath(node),
-            raw: node.raw ?? null
-          };
-        }
-
-        function renderAxSelected() {
-          const node = axSelectedKey ? axNodesByKey.get(axSelectedKey) : null;
-          if (!node) { axSelectedBar.hidden = true; return; }
-          axSelectedBar.hidden = false;
-          axSelectedLabel.textContent = axNodeLabel(node);
-        }
-
-        async function axWriteClipboard(text) {
-          try {
-            await navigator.clipboard.writeText(text);
-          } catch (_) {
-            const area = document.createElement("textarea");
-            area.value = text;
-            document.body.appendChild(area);
-            area.select();
-            try { document.execCommand("copy"); } catch (_) {}
-            document.body.removeChild(area);
-          }
-        }
-
-        function axFlashCopied() {
-          axCopyButton.textContent = "Copied ✓";
-          setTimeout(() => { axCopyButton.textContent = "Copy JSON"; }, 1200);
-        }
-
-        // Copy one node's full JSON. Used by the Copy button and by right-click
-        // (contextmenu) on a tree row or on the device screen.
-        async function copyAxNode(node) {
-          if (!node) return;
-          await axWriteClipboard(JSON.stringify(axCopyPayload(node), null, 2));
-          axFlashCopied();
-        }
-
-        function copyAxSelected() {
-          copyAxNode(axSelectedKey ? axNodesByKey.get(axSelectedKey) : null);
-        }
-
-        // Right-click context menu with a single "Copy element" action.
-        let axMenuNode = null;
-        function showAxMenu(x, y, node) {
-          axMenuNode = node;
-          axMenu.hidden = false;
-          const rect = axMenu.getBoundingClientRect();
-          const maxX = window.innerWidth - rect.width - 6;
-          const maxY = window.innerHeight - rect.height - 6;
-          axMenu.style.left = Math.max(6, Math.min(x, maxX)) + "px";
-          axMenu.style.top = Math.max(6, Math.min(y, maxY)) + "px";
-        }
-        function hideAxMenu() {
-          axMenu.hidden = true;
-          axMenuNode = null;
-        }
-
-        // Right-click menu on network rows: include/exclude the request path.
-        let networkMenuPath = "";
-        function showNetworkMenu(x, y, path) {
-          networkMenuPath = path;
-          const short = path.length > 42 ? "…" + path.slice(-41) : path;
-          networkMenuExclude.textContent = "Exclude '" + short + "'";
-          networkMenuInclude.textContent = "Include '" + short + "'";
-          networkMenu.hidden = false;
-          const rect = networkMenu.getBoundingClientRect();
-          networkMenu.style.left = Math.max(6, Math.min(x, window.innerWidth - rect.width - 6)) + "px";
-          networkMenu.style.top = Math.max(6, Math.min(y, window.innerHeight - rect.height - 6)) + "px";
-        }
-        function hideNetworkMenu() {
-          networkMenu.hidden = true;
-          networkMenuPath = "";
-        }
-
-        // Right-click menu on a network launch divider: purge that launch's requests server-side.
-        let networkLaunchMenuId = null;
-        function showNetworkLaunchMenu(x, y, launchId) {
-          networkLaunchMenuId = launchId;
-          networkLaunchMenu.hidden = false;
-          const rect = networkLaunchMenu.getBoundingClientRect();
-          networkLaunchMenu.style.left = Math.max(6, Math.min(x, window.innerWidth - rect.width - 6)) + "px";
-          networkLaunchMenu.style.top = Math.max(6, Math.min(y, window.innerHeight - rect.height - 6)) + "px";
-        }
-        function hideNetworkLaunchMenu() {
-          networkLaunchMenu.hidden = true;
-          networkLaunchMenuId = null;
-        }
-
-        // Mouseup after dragging out a selection also fires click; rows must not
-        // open their detail view (and destroy the selection) in that case.
-        function hasTextSelection() {
-          const selection = window.getSelection();
-          return !!selection && !selection.isCollapsed;
-        }
-
-        // Right-click menu on log rows: copy the full entry, or — when text is
-        // selected — copy/include/exclude the selected text. The selection is
-        // captured at open time: clicking a menu item may collapse it.
-        let logsMenuEntry = null;
-        let logsMenuSelection = "";
-        function showLogsMenu(x, y, entry) {
-          logsMenuEntry = entry;
-          logsMenuSelection = hasTextSelection() ? window.getSelection().toString() : "";
-          const selected = !!logsMenuSelection.trim();
-          logsMenuCopy.hidden = selected;
-          logsMenuCopySel.hidden = !selected;
-          logsMenuIncludeSel.hidden = !selected;
-          logsMenuExcludeSel.hidden = !selected;
-          logsMenu.hidden = false;
-          const rect = logsMenu.getBoundingClientRect();
-          logsMenu.style.left = Math.max(6, Math.min(x, window.innerWidth - rect.width - 6)) + "px";
-          logsMenu.style.top = Math.max(6, Math.min(y, window.innerHeight - rect.height - 6)) + "px";
-        }
-        function hideLogsMenu() {
-          logsMenu.hidden = true;
-          logsMenuEntry = null;
-          logsMenuSelection = "";
-        }
-
-        // Right-click menu on a logs launch divider: purge that launch's entries server-side.
-        let logsLaunchMenuId = null;
-        function showLogsLaunchMenu(x, y, launchId) {
-          logsLaunchMenuId = launchId;
-          logsLaunchMenu.hidden = false;
-          const rect = logsLaunchMenu.getBoundingClientRect();
-          logsLaunchMenu.style.left = Math.max(6, Math.min(x, window.innerWidth - rect.width - 6)) + "px";
-          logsLaunchMenu.style.top = Math.max(6, Math.min(y, window.innerHeight - rect.height - 6)) + "px";
-        }
-        function hideLogsLaunchMenu() {
-          logsLaunchMenu.hidden = true;
-          logsLaunchMenuId = null;
-        }
-
-        // Right-click menu on test session rows: delete the session's artifacts.
-        let testsMenuSessionId = null;
-        function showTestsMenu(x, y, session) {
-          testsMenuSessionId = session.id;
-          testsMenu.hidden = false;
-          const rect = testsMenu.getBoundingClientRect();
-          testsMenu.style.left = Math.max(6, Math.min(x, window.innerWidth - rect.width - 6)) + "px";
-          testsMenu.style.top = Math.max(6, Math.min(y, window.innerHeight - rect.height - 6)) + "px";
-        }
-        function hideTestsMenu() {
-          testsMenu.hidden = true;
-          testsMenuSessionId = null;
-        }
-
-        function logEntryText(entry) {
-          const head = [entry.timestamp, entry.level, entry.subsystem].filter(Boolean).join(" ");
-          const message = entry.message || "";
-          return head ? head + ": " + message : message;
-        }
-
-        function showFilterHelp() {
-          // Tab-specific lines only show on their tab; untagged lines always do.
-          for (const line of filterHelpPop.querySelectorAll("[data-tab]")) {
-            line.hidden = line.dataset.tab !== activeTab;
-          }
-          filterHelpPop.hidden = false;
-          const button = filterHelp.getBoundingClientRect();
-          const rect = filterHelpPop.getBoundingClientRect();
-          filterHelpPop.style.left = Math.max(6, Math.min(button.left, window.innerWidth - rect.width - 6)) + "px";
-          filterHelpPop.style.top = (button.bottom + 6) + "px";
-        }
-        function hideFilterHelp() { filterHelpPop.hidden = true; }
-
-        // ---- State inspector: live model snapshots pushed by the app under test ----
-
-        let stateCursor = null;
-        let statePollTimer = null;
-        const stateLatest = new Map();   // modelId -> latest event
-        const stateChanges = [];          // { event, diffs }, oldest first
-        const STATE_HISTORY_LIMIT = 300;
-
-        function startStatePolling() {
-          if (statePollTimer) return;
-          pollStateEvents();
-          statePollTimer = setInterval(pollStateEvents, 1000);
-        }
-
-        function stopStatePolling() {
-          if (!statePollTimer) return;
-          clearInterval(statePollTimer);
-          statePollTimer = null;
-        }
-
-        async function pollStateEvents() {
-          try {
-            const since = stateCursor == null ? "" : "&since=" + stateCursor;
-            const res = await fetch("/api/v1/state/events?limit=500" + since);
-            if (!res.ok) return;
-            const payload = await res.json();
-            if (!payload.events || !payload.events.length) return;
-            for (const event of payload.events) {
-              const prev = stateLatest.get(event.modelId);
-              const diffs = diffStateValues(prev ? prev.snapshot : undefined, event.snapshot, "", []);
-              if (prev || event.deallocated) {
-                stateChanges.push({ event, diffs });
-                if (stateChanges.length > STATE_HISTORY_LIMIT) stateChanges.shift();
-              }
-              // A deallocation event carries no snapshot; keep the last known state
-              // so the greyed-out card still shows what the model looked like.
-              const stored = event.deallocated && prev ? { ...event, snapshot: prev.snapshot } : event;
-              stateLatest.set(event.modelId, stored);
-            }
-            stateCursor = payload.nextCursor;
-            stateCountEl.textContent = String(stateLatest.size);
-            if (activeTab === "state" && inspectorOpen) renderState();
-          } catch (_) { /* server may be restarting; next poll retries */ }
-        }
-
-        // Nested models that are themselves tracked carry this marker in their
-        // snapshot object; the viewer folds their standalone history into the
-        // parent's diff and never renders the key itself.
-        const MODEL_ID_KEY = "$modelId";
-
-        // childId -> parentId for models embedded (expanded) inside another live
-        // tracked model's snapshot. Recomputed per render from stateLatest, so a
-        // child resurfaces on its own once the parent deallocates.
-        function embeddedModelIds() {
-          const embedded = new Map();
-          for (const [id, event] of stateLatest) {
-            if (event.deallocated) continue;
-            collectEmbedded(event.snapshot, id, embedded);
-          }
-          return embedded;
-        }
-
-        function collectEmbedded(value, ownerId, out) {
-          if (!value || typeof value !== "object") return;
-          if (Array.isArray(value)) {
-            for (const item of value) collectEmbedded(item, ownerId, out);
-            return;
-          }
-          const marker = value[MODEL_ID_KEY];
-          if (typeof marker === "string" && marker !== ownerId) out.set(marker, ownerId);
-          for (const key of Object.keys(value)) {
-            if (key !== MODEL_ID_KEY) collectEmbedded(value[key], ownerId, out);
-          }
-        }
-
-        function diffStateValues(prev, next, path, out) {
-          if (JSON.stringify(prev) === JSON.stringify(next)) return out;
-          const isPlainObject = (v) => v && typeof v === "object" && !Array.isArray(v);
-          if (isPlainObject(prev) && isPlainObject(next)) {
-            for (const key of new Set([...Object.keys(prev), ...Object.keys(next)])) {
-              if (key === MODEL_ID_KEY) continue;
-              diffStateValues(prev[key], next[key], path ? path + "." + key : key, out);
-            }
-            return out;
-          }
-          out.push({ path, before: prev, after: next });
-          return out;
-        }
-
-        function renderStateTree(value, container) {
-          const appendBranch = (labelText, child) => {
-            const details = document.createElement("details");
-            details.open = true;
-            const summary = document.createElement("summary");
-            summary.textContent = labelText + (Array.isArray(child) ? " [" + child.length + "]" : "");
-            details.appendChild(summary);
-            const inner = document.createElement("div");
-            inner.className = "state-tree";
-            renderStateTree(child, inner);
-            details.appendChild(inner);
-            container.appendChild(details);
-          };
-          const appendLeaf = (labelText, child) => {
-            const row = document.createElement("div");
-            row.textContent = labelText + ": " + JSON.stringify(child);
-            container.appendChild(row);
-          };
-          if (value && typeof value === "object" && !Array.isArray(value)) {
-            for (const key of Object.keys(value).sort()) {
-              if (key === MODEL_ID_KEY) continue;
-              const child = value[key];
-              if (child && typeof child === "object") appendBranch(key, child);
-              else appendLeaf(key, child);
-            }
-          } else if (Array.isArray(value)) {
-            value.forEach((item, index) => {
-              if (item && typeof item === "object") appendBranch("[" + index + "]", item);
-              else appendLeaf("[" + index + "]", item);
-            });
-          } else {
-            const row = document.createElement("div");
-            row.textContent = JSON.stringify(value);
-            container.appendChild(row);
-          }
-        }
-
-        function renderState() {
-          const query = (filterByTab.state || "").trim().toLowerCase();
-          const chips = filterChipsByTab.state;
-          const prevScroll = captureScroll(statePane);
-          stateModelsEl.textContent = "";
-          for (const id of [...stateLatest.keys()].sort()) {
-            if (!matchesFilters(id.toLowerCase(), chips, query)) continue;
-            const event = stateLatest.get(id);
-            const card = document.createElement("details");
-            card.className = "state-model" + (event.deallocated ? " state-dead" : "");
-            card.open = true;
-            const summary = document.createElement("summary");
-            summary.textContent = id + (event.deallocated ? " (deallocated)" : "");
-            card.appendChild(summary);
-            const tree = document.createElement("div");
-            tree.className = "state-tree";
-            renderStateTree(event.snapshot, tree);
-            card.appendChild(tree);
-            stateModelsEl.appendChild(card);
-          }
-          stateHistoryEl.textContent = "";
-          const embedded = embeddedModelIds();
-          for (let i = stateChanges.length - 1; i >= 0; i--) {
-            const { event, diffs } = stateChanges[i];
-            // The parent's history entry already shows this change as a nested diff.
-            if (embedded.has(event.modelId)) continue;
-            if (!matchesFilters(event.modelId.toLowerCase(), chips, query)) continue;
-            const block = document.createElement("div");
-            block.className = "state-change";
-            const title = document.createElement("div");
-            title.className = "state-change-title";
-            title.textContent = event.modelId + " · seq " + event.seq + " · "
-              + new Date(event.timestamp * 1000).toLocaleTimeString()
-              + (event.deallocated ? " · deallocated" : "");
-            block.appendChild(title);
-            for (const diff of diffs) {
-              const minus = document.createElement("div");
-              minus.className = "state-diff-minus";
-              minus.textContent = "- " + diff.path + ": " + JSON.stringify(diff.before);
-              block.appendChild(minus);
-              const plus = document.createElement("div");
-              plus.className = "state-diff-plus";
-              plus.textContent = "+ " + diff.path + ": " + JSON.stringify(diff.after);
-              block.appendChild(plus);
-            }
-            stateHistoryEl.appendChild(block);
-          }
-          restoreScroll(statePane, "top", prevScroll);
-        }
-
-        // ---- Tests ----
-
-        let testsSessions = [];
-        let testsTimer = null;
-        let selectedTestId = null;
-        let testsLastPayload = "";
-
-        const TEST_STATUS_LABEL = { running: "●", passed: "✓", failed: "✗", interrupted: "◌" };
-        // Kind-neutral wording: the session carries `kind`, and the row shows it.
-        const TEST_VERDICT_HEADLINE = {
-          satisfied: "the claim holds",
-          unsatisfied: "the claim does not hold",
-          inconclusive: "inconclusive — the run never reached the claim",
-          infra: "infra — the run cannot be trusted",
-        };
-
-        async function loadTests() {
-          try {
-            const response = await fetch("/api/v1/tests");
-            if (!response.ok) return;
-            const payload = await response.json();
-            const previous = testsSessions;
-            const serialized = JSON.stringify(payload.sessions || []);
-            if (serialized === testsLastPayload) return;
-            testsLastPayload = serialized;
-            testsSessions = payload.sessions || [];
-            if (!selectedTestId && testsSessions.length) selectedTestId = testsSessions[0].id;
-            if (selectedTestId && !testsSessions.some((s) => s.id === selectedTestId)) {
-              selectedTestId = testsSessions.length ? testsSessions[0].id : null;
-              if (playbackTestId && !testsSessions.some((s) => s.id === playbackTestId)) showLiveStream();
-            }
-            maybeAutoSwitchPlayback(previous);
-            renderTestsList();
-            renderTestTimeline();
-            renderTestSteps();
-          } catch (_) {}
-        }
-
-        let playbackTestId = null;
-
-        // While a session is running the live stream stays: the agent is driving
-        // the simulator right now. The moment the watched session finishes, swap
-        // to its recording.
-        function maybeAutoSwitchPlayback(previousSessions) {
-          const selected = testsSessions.find((s) => s.id === selectedTestId);
-          const before = previousSessions.find((s) => s.id === selectedTestId);
-          if (selected && before && before.status === "running" && selected.status !== "running") {
-            showTestVideo(selected);
-          }
-        }
-
-        function showTestVideo(session) {
-          if (!session || session.status === "running" || session.videoError) return;
-          if (playbackTestId === session.id && !testPlayback.hidden) return;
-          playbackTestId = session.id;
-          testVideo.src = "/api/v1/tests/" + encodeURIComponent(session.id) + "/video";
-          testPlayback.hidden = false;
-          testVideoNote.hidden = true;
-        }
-
-        function showLiveStream() {
-          playbackTestId = null;
-          testPlayback.hidden = true;
-          testVideo.pause();
-          testVideo.removeAttribute("src");
-          testVideo.load();
-          testVideoNote.hidden = true;
-        }
-
-        // The current step follows the playhead.
-        testVideo.addEventListener("timeupdate", () => {
-          updateTestControls();
-          const session = testsSessions.find((s) => s.id === playbackTestId);
-          if (!session || activeTab !== "tests") return;
-          let currentIndex = -1;
-          (session.entries || []).forEach((entry, index) => {
-            if (entry.kind === "step" && entryOffsetSeconds(session, entry) <= testVideo.currentTime + 0.25) {
-              currentIndex = index;
-            }
-          });
-          testsTimelineEl.querySelectorAll(".tests-step").forEach((row) => {
-            row.classList.toggle("current", Number(row.dataset.index) === currentIndex);
-          });
-        });
-
-        // Unfinalized/missing mp4 (hard-killed server): keep the timeline, flag the video.
-        testVideo.addEventListener("error", () => {
-          if (testPlayback.hidden) return;
-          testVideoNote.hidden = false;
-        });
-
-        testBackLive.addEventListener("click", showLiveStream);
-
-        const testPlayPause = $("testPlayPause");
-        const testSeek = $("testSeek");
-        const testTime = $("testTime");
-        let testSeekDragging = false;
-
-        function toggleTestPlayback() {
-          if (testVideo.paused) testVideo.play().catch(() => {});
-          else testVideo.pause();
-        }
-
-        function updateTestControls() {
-          const duration = isFinite(testVideo.duration) ? testVideo.duration : 0;
-          testPlayPause.textContent = testVideo.paused ? "▶" : "⏸";
-          testTime.textContent = formatOffset(testVideo.currentTime) + " / " + formatOffset(duration);
-          if (!testSeekDragging) {
-            testSeek.value = duration ? String(Math.round(testVideo.currentTime / duration * 1000)) : "0";
-          }
-        }
-
-        testPlayPause.addEventListener("click", toggleTestPlayback);
-        // The video element itself never receives clicks in Orca's embedded
-        // browser; in regular browsers this adds click-to-toggle for free.
-        testVideo.addEventListener("click", toggleTestPlayback);
-        testSeek.addEventListener("pointerdown", () => { testSeekDragging = true; });
-        testSeek.addEventListener("pointerup", () => { testSeekDragging = false; });
-        testSeek.addEventListener("input", () => {
-          const duration = isFinite(testVideo.duration) ? testVideo.duration : 0;
-          if (!duration) return;
-          testVideo.currentTime = Number(testSeek.value) / 1000 * duration;
-        });
-        for (const eventName of ["play", "pause", "loadedmetadata", "ended", "seeked"]) {
-          testVideo.addEventListener(eventName, updateTestControls);
-        }
-
-        let testsDefinitions = [];
-        let testRunStatus = null;
-        let testsDefinitionsLastPayload = "";
-        let testsSubtab = "tests";
-        let makeVideoEnabled = true;
-        let selectedDefinitionFile = null;
-
-        function setTestsSubtab(name) {
-          testsSubtab = name;
-          testsSubtabTestsEl.classList.toggle("active", name === "tests");
-          testsSubtabHistoryEl.classList.toggle("active", name === "history");
-          testsDefinitionsEl.hidden = name !== "tests";
-          testsStepsEl.hidden = name !== "tests";
-          testsHistoryEl.hidden = name !== "history";
-          if (name === "tests") {
-            renderTestsDefinitions();
-            renderTestSteps();
-          } else {
-            renderTestsList();
-            renderTestTimeline();
-          }
-        }
-        testsSubtabTestsEl.addEventListener("click", () => setTestsSubtab("tests"));
-        testsSubtabHistoryEl.addEventListener("click", () => setTestsSubtab("history"));
-
-        async function loadTestsDefinitions() {
-          try {
-            const [definitionsResponse, runResponse] = await Promise.all([
-              fetch("/api/v1/tests/definitions"),
-              fetch("/api/v1/tests/run"),
-            ]);
-            if (!definitionsResponse.ok || !runResponse.ok) return;
-            const definitionsPayload = await definitionsResponse.json();
-            const runPayload = await runResponse.json();
-            const serialized = JSON.stringify([definitionsPayload.tests || [], runPayload]);
-            if (serialized === testsDefinitionsLastPayload) return;
-            testsDefinitionsLastPayload = serialized;
-            testsDefinitions = definitionsPayload.tests || [];
-            if (!selectedDefinitionFile || !testsDefinitions.some((t) => t.file === selectedDefinitionFile)) {
-              selectedDefinitionFile = testsDefinitions.length ? testsDefinitions[0].file : null;
-            }
-            const previousRun = testRunStatus;
-            testRunStatus = runPayload;
-            // Follow the run: select its session so the timeline under the tests
-            // list streams the steps live; when it finishes, the regular
-            // auto-switch plays the recording.
-            if (runPayload.active && runPayload.sessionId &&
-                (!previousRun || previousRun.sessionId !== runPayload.sessionId)) {
-              selectedTestId = runPayload.sessionId;
-              showLiveStream();
-              if (testRunStatus.file) selectedDefinitionFile = testRunStatus.file;
-              if (testsSubtab !== "tests") setTestsSubtab("tests");
-            }
-            renderTestsDefinitions();
-            renderTestSteps();
-          } catch (_) {}
-        }
-
-        async function runTest(file) {
-          try {
-            const response = await fetch("/api/v1/tests/run", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ file, video: makeVideoEnabled }),
-            });
-            const payload = await response.json().catch(() => null);
-            if (response.ok && payload) {
-              testRunStatus = payload;
-              testsDefinitionsLastPayload = "";
-              renderTestSteps();
-              loadTests();
-            } else if (payload && payload.error) {
-              testRunStatus = { active: false, file, status: "failed", error: payload.error, completedSteps: 0, totalSteps: 0 };
-              renderTestSteps();
-            }
-          } catch (_) {}
-        }
-
-        async function stopTest() {
-          try {
-            const response = await fetch("/api/v1/tests/run/stop", { method: "POST" });
-            const payload = await response.json().catch(() => null);
-            if (response.ok && payload) {
-              testRunStatus = payload;
-              testsDefinitionsLastPayload = "";
-              renderTestSteps();
-            }
-          } catch (_) {}
-        }
-
-        function renderTestsDefinitions() {
-          if (activeTab !== "tests" || testsSubtab !== "tests") return;
-          const prevScroll = captureScroll(testsDefinitionsEl);
-          testsDefinitionsEl.innerHTML = "";
-          const header = document.createElement("div");
-          header.className = "tests-section-header";
-          header.textContent = "Tests · .simtool/tests";
-          testsDefinitionsEl.appendChild(header);
-          const chips = filterChipsByTab.tests;
-          const query = (filterByTab.tests || "").trim().toLowerCase();
-          const visibleTests = testsDefinitions.filter((t) =>
-            matchesFilters([t.name, t.file, t.description].join(" ").toLowerCase(), chips, query, null, null));
-          if (!visibleTests.length) {
-            const empty = document.createElement("div");
-            empty.className = "tests-empty";
-            empty.textContent = testsDefinitions.length
-              ? "no tests match the filter"
-              : "no tests yet — add a YAML test to .simtool/tests";
-            testsDefinitionsEl.appendChild(empty);
-            return;
-          }
-          for (const test of visibleTests) {
-            const card = document.createElement("div");
-            card.className = "tests-def-card" + (test.file === selectedDefinitionFile ? " selected" : "");
-            const head = document.createElement("div");
-            head.className = "tests-def-head";
-            const title = document.createElement("span");
-            title.className = "tests-def-title";
-            title.textContent = test.name || test.file;
-            title.title = test.file;
-            const meta = document.createElement("span");
-            meta.className = "tests-def-meta";
-            if (test.parseError) {
-              meta.textContent = "parse error";
-              meta.classList.add("tests-def-error");
-              meta.title = test.parseError;
-            } else {
-              meta.textContent = test.stepCount + " steps";
-            }
-            head.append(title, meta);
-            card.appendChild(head);
-            if (test.description) {
-              const desc = document.createElement("div");
-              desc.className = "tests-def-desc";
-              desc.textContent = test.description;
-              card.appendChild(desc);
-            }
-            card.addEventListener("click", () => {
-              selectedDefinitionFile = test.file;
-              renderTestsDefinitions();
-              renderTestSteps();
-            });
-            testsDefinitionsEl.appendChild(card);
-          }
-          restoreScroll(testsDefinitionsEl, "none", prevScroll);
-        }
-
-        // Steps of the selected YAML test with the state of its current/last
-        // viewer-triggered run: check + video offset for passed steps, a spinner
-        // for the one in flight, a cross where the run stopped.
-        function renderTestSteps() {
-          if (activeTab !== "tests" || testsSubtab !== "tests") return;
-          const prevScroll = captureScroll(testsStepsEl);
-          testsStepsEl.innerHTML = "";
-          const test = testsDefinitions.find((t) => t.file === selectedDefinitionFile);
-          if (!test) return;
-          const busy = Boolean(testRunStatus && testRunStatus.active);
-          const isCurrent = Boolean(testRunStatus && testRunStatus.file === test.file);
-
-          const header = document.createElement("div");
-          header.className = "tests-steps-header";
-          const label = document.createElement("span");
-          label.textContent = "Steps · " + (test.name || test.file);
-          const runButton = document.createElement("button");
-          runButton.className = "tests-def-run";
-          runButton.type = "button";
-          // A run started from a terminal is just as much in flight, but this server
-          // holds no task to cancel — so it gets a label, not a button that lies.
-          const stoppable = !testRunStatus || testRunStatus.stoppable !== false;
-          if (busy && isCurrent && stoppable) {
-            runButton.textContent = "Stop";
-            runButton.classList.add("tests-def-stop");
-            runButton.addEventListener("click", stopTest);
-          } else if (busy && isCurrent) {
-            runButton.textContent = "Running…";
-            runButton.disabled = true;
-          } else {
-            runButton.textContent = "Run";
-            runButton.disabled = busy || Boolean(test.parseError);
-            runButton.addEventListener("click", () => runTest(test.file));
-          }
-          const videoToggle = document.createElement("label");
-          videoToggle.className = "tests-video-toggle";
-          const videoCheckbox = document.createElement("input");
-          videoCheckbox.type = "checkbox";
-          videoCheckbox.checked = makeVideoEnabled;
-          videoCheckbox.disabled = busy;
-          videoCheckbox.addEventListener("change", () => { makeVideoEnabled = videoCheckbox.checked; });
-          videoToggle.append(videoCheckbox, document.createTextNode("Make video"));
-          videoToggle.title = "Record a screen video for this run";
-          header.append(label, videoToggle, runButton);
-          testsStepsEl.appendChild(header);
-
-          const session = isCurrent && testRunStatus.sessionId
-            ? testsSessions.find((s) => s.id === testRunStatus.sessionId)
-            : null;
-          const stepTimes = {};
-          if (session) {
-            for (const entry of session.entries || []) {
-              if (entry.kind !== "step") continue;
-              const match = (entry.text || "").match(/^✓ (\d+)\//);
-              if (match) stepTimes[Number(match[1]) - 1] = formatOffset(entryOffsetSeconds(session, entry));
-            }
-          }
-
-          (test.steps || []).forEach((stepText, index) => {
-            const row = document.createElement("div");
-            row.className = "tests-step";
-            const time = document.createElement("span");
-            time.className = "tests-step-t";
-            const state = document.createElement("span");
-            state.className = "tests-step-state";
-            if (isCurrent && index < testRunStatus.completedSteps) {
-              state.textContent = "✓";
-              state.classList.add("tests-status-passed");
-              time.textContent = stepTimes[index] || "";
-            } else if (isCurrent && index === testRunStatus.completedSteps && testRunStatus.active) {
-              const spinner = document.createElement("span");
-              spinner.className = "tests-step-spinner";
-              state.appendChild(spinner);
-            } else if (isCurrent && index === testRunStatus.completedSteps && testRunStatus.status === "failed") {
-              state.textContent = "✗";
-              state.classList.add("tests-status-failed");
-              if (testRunStatus.error) row.title = testRunStatus.error;
-            } else if (isCurrent && index === testRunStatus.completedSteps && testRunStatus.status === "stopped") {
-              state.textContent = "◼";
-              state.classList.add("tests-status-stopped");
-              row.title = "stopped";
-            }
-            const text = document.createElement("span");
-            text.className = "tests-step-text";
-            text.textContent = (index + 1) + "/" + test.steps.length + " " + stepText;
-            row.append(time, state, text);
-            testsStepsEl.appendChild(row);
-          });
-          restoreScroll(testsStepsEl, "none", prevScroll);
-        }
-
-        function startTestsPolling() {
-          loadTests();
-          loadTestsDefinitions();
-          if (!testsTimer) testsTimer = setInterval(() => { loadTests(); loadTestsDefinitions(); }, 1500);
-        }
-
-        function stopTestsPolling() {
-          if (testsTimer) { clearInterval(testsTimer); testsTimer = null; }
-        }
-
-        function testSessionHaystack(session) {
-          return [session.title, session.status, session.deviceName].join(" ").toLowerCase();
-        }
-
-        function filteredTestSessions() {
-          const chips = filterChipsByTab.tests;
-          const query = (filterByTab.tests || "").trim().toLowerCase();
-          return testsSessions.filter((session) => matchesFilters(testSessionHaystack(session), chips, query, null, null));
-        }
-
-        function formatOffset(seconds) {
-          if (!isFinite(seconds) || seconds < 0) seconds = 0;
-          return Math.floor(seconds / 60) + ":" + String(Math.floor(seconds % 60)).padStart(2, "0");
-        }
-
-        // Video offset of an entry. The raw offset is the wall-clock span since the
-        // recorder started (at − recordingStartedAt, falling back to startedAt), but
-        // simctl's footage runs shorter than wall-clock — recorder startup/stop
-        // latency plus frame-rate drift under load — so a fixed anchor drifts ahead
-        // of the video and late steps can land past its end. When the real video
-        // length is known, scale the wall-clock span onto it; a no-op when the
-        // clocks agree.
-        function entryOffsetSeconds(session, entry) {
-          const base = Date.parse(session.recordingStartedAt || session.startedAt);
-          const at = Date.parse(entry.at);
-          if (!isFinite(base) || !isFinite(at)) return 0;
-          const raw = Math.max(0, (at - base) / 1000);
-          const dur = session.videoDurationSeconds;
-          const end = Date.parse(session.endedAt || "");
-          if (isFinite(dur) && dur > 0 && isFinite(end)) {
-            const span = (end - base) / 1000;
-            if (span > 0) return Math.min(dur, (raw / span) * dur);
-          }
-          return raw;
-        }
-
-        function sessionDurationSeconds(session) {
-          const dur = session.videoDurationSeconds;
-          if (isFinite(dur) && dur > 0) return dur;
-          const base = Date.parse(session.recordingStartedAt || session.startedAt);
-          const end = Date.parse(session.endedAt || "");
-          return isFinite(base) && isFinite(end) ? Math.max(0, (end - base) / 1000) : 0;
-        }
-
-        function renderTestsList() {
-          testsCountEl.textContent = String(testsSessions.length);
-          if (activeTab !== "tests" || testsSubtab !== "history") return;
-          const sessions = filteredTestSessions();
-          const prevScroll = captureScroll(testsSessionsEl);
-          testsSessionsEl.innerHTML = "";
-          if (!sessions.length) {
-            const empty = document.createElement("div");
-            empty.className = "tests-empty";
-            empty.textContent = testsSessions.length
-              ? "no sessions match the filter"
-              : "no test sessions yet — run a test";
-            testsSessionsEl.appendChild(empty);
-            return;
-          }
-          for (const session of sessions) {
-            const row = document.createElement("div");
-            row.className = "tests-row" + (session.id === selectedTestId ? " selected" : "");
-            const title = document.createElement("span");
-            title.className = "tests-title";
-            title.textContent = session.title;
-            const meta = document.createElement("span");
-            // The verdict colours the row when there is one: a `passed` session and a
-            // reproduced bug are both "finished", and only the verdict says which.
-            meta.className = "tests-meta " + (session.verdict
-              ? "tests-verdict-" + session.verdict
-              : "tests-status-" + session.status);
-            const duration = session.endedAt ? " · " + formatOffset(sessionDurationSeconds(session)) : "";
-            const startedAt = new Date(session.startedAt);
-            const startStamp = isNaN(startedAt.getTime()) ? "" :
-              " · " + String(startedAt.getDate()).padStart(2, "0") + "." + String(startedAt.getMonth() + 1).padStart(2, "0") +
-              " " + String(startedAt.getHours()).padStart(2, "0") + ":" + String(startedAt.getMinutes()).padStart(2, "0");
-            const badge = (TEST_STATUS_LABEL[session.status] || session.status) +
-              (session.verdict ? " " + session.verdict : "");
-            meta.textContent = badge + duration + startStamp;
-            row.append(title, meta);
-            row.addEventListener("click", () => selectTestSession(session.id));
-            row.addEventListener("contextmenu", (event) => {
-              event.preventDefault();
-              // The active recording is protected server-side; don't offer Delete.
-              if (session.status === "running") return;
-              showTestsMenu(event.clientX, event.clientY, session);
-            });
-            testsSessionsEl.appendChild(row);
-          }
-          restoreScroll(testsSessionsEl, "none", prevScroll);
-        }
-
-        function selectTestSession(id) {
-          selectedTestId = id;
-          renderTestsList();
-          renderTestTimeline();
-          const session = testsSessions.find((s) => s.id === id);
-          if (session && session.status !== "running" && !session.videoError) showTestVideo(session);
-          else showLiveStream();
-        }
-
-        // Split a step's text into a short white heading and the detailed tail that goes
-        // into the collapsible block. Cuts at the earliest of " — ", "; " or " (" (the
-        // paren is kept with the tail). No separator → whole text is the heading.
-        function splitStep(text) {
-          const t = (text || "").trim();
-          const dash = t.search(/ — /);
-          const semi = t.indexOf("; ");
-          const paren = t.search(/ \(/);
-          const cands = [];
-          if (dash >= 0) cands.push([dash, dash + 3]);
-          if (semi >= 0) cands.push([semi, semi + 2]);
-          if (paren >= 0) cands.push([paren, paren + 1]);
-          if (!cands.length) return { head: t, tail: "" };
-          cands.sort((a, b) => a[0] - b[0]);
-          const [idx, tailStart] = cands[0];
-          const head = t.slice(0, idx).trim();
-          return { head: head || t, tail: t.slice(tailStart).trim() };
-        }
-
-        // What the run was verifying, above its timeline: the verdict in words, each
-        // criterion with whether it held, and what the declared mocks answered. A
-        // recorded session is read to answer "did the claim hold" — that answer
-        // should not require opening session.json.
-        function renderTestClaim(session) {
-          const verdict = session.verdict;
-          const criteria = session.criteria || [];
-          const mocks = session.mocks || [];
-          if (!verdict && !criteria.length && !mocks.length) return;
-          const box = document.createElement("div");
-          box.className = "tests-claim";
-          if (verdict) {
-            const line = document.createElement("span");
-            line.className = "tests-verdict-" + verdict;
-            const kind = session.kind ? " · " + session.kind : "";
-            const reference = session.reference ? " · " + session.reference : "";
-            line.textContent = (TEST_VERDICT_HEADLINE[verdict] || verdict) + kind + reference;
-            box.appendChild(line);
-          }
-          for (const criterion of criteria) {
-            const line = document.createElement("span");
-            const state = criterion.status === "met" ? "met" : criterion.status === "unmet" ? "unmet" : "unchecked";
-            line.className = "tests-claim-" + state;
-            const mark = state === "met" ? "✓" : state === "unmet" ? "✗" : "–";
-            const step = criterion.step ? " (step " + criterion.step + ")" : "";
-            line.textContent = mark + " " + criterion.label + step + (criterion.detail ? ": " + criterion.detail : "");
-            box.appendChild(line);
-          }
-          for (const mock of mocks) {
-            const line = document.createElement("span");
-            line.className = mock.strict && !mock.hits ? "tests-claim-unmet" : "tests-claim-unchecked";
-            line.textContent = "mock " + mock.method + " — " + mock.hits + (mock.hits === 1 ? " call" : " calls") +
-              (mock.strict ? ", strict" : "");
-            box.appendChild(line);
-          }
-          testsTimelineEl.appendChild(box);
-        }
-
-        function renderTestTimeline() {
-          if (activeTab !== "tests" || testsSubtab !== "history") return;
-          const session = testsSessions.find((s) => s.id === selectedTestId);
-          const prevScroll = captureScroll(testsTimelineEl);
-          testsTimelineEl.innerHTML = "";
-          if (!session) return;
-          const header = document.createElement("div");
-          header.className = "tests-timeline-header";
-          const headerTitle = document.createElement("span");
-          headerTitle.className = "tests-timeline-title";
-          headerTitle.textContent = session.title + (session.videoError ? " · video unavailable" : "");
-          const headerToggle = document.createElement("span");
-          headerToggle.className = "tests-timeline-toggle";
-          header.append(headerTitle, headerToggle);
-          testsTimelineEl.appendChild(header);
-          renderTestClaim(session);
-
-          // Keys of all steps that have a collapsible detail — backs the expand/collapse-all control.
-          const detailKeys = [];
-          (session.entries || []).forEach((entry, index) => {
-            const offset = entryOffsetSeconds(session, entry);
-            if (entry.kind === "step") {
-              const { head } = splitStep(entry.text);
-              const row = document.createElement("div");
-              row.className = "tests-step";
-              row.dataset.index = String(index);
-              const time = document.createElement("span");
-              time.className = "tests-step-t";
-              time.textContent = formatOffset(offset);
-              const text = document.createElement("span");
-              text.className = "tests-step-text";
-              text.textContent = head;
-              row.append(time, text);
-              row.addEventListener("click", () => seekTestVideo(offset));
-              testsTimelineEl.appendChild(row);
-            } else {
-              const logs = entry.logs || [];
-              if (!logs.length) return;
-              // A failure log entry carries the error first and a long screen dump
-              // after it — keep the first line visible, collapse the rest.
-              const collapsible = logs.length > 2;
-              const stepKey = selectedTestId + ":" + index;
-              const expanded = expandedTestSteps.has(stepKey);
-              if (collapsible) detailKeys.push(stepKey);
-
-              const log = document.createElement("div");
-              log.className = "tests-log";
-              const time = document.createElement("span");
-              time.className = "tests-step-t";
-              time.textContent = formatOffset(offset);
-              const text = document.createElement("span");
-              text.textContent = logs[0];
-              log.append(time, text);
-
-              if (!collapsible) {
-                testsTimelineEl.appendChild(log);
-                for (const line of logs.slice(1)) {
-                  const extra = document.createElement("div");
-                  extra.className = "tests-log";
-                  const pad = document.createElement("span");
-                  pad.className = "tests-step-t";
-                  const extraText = document.createElement("span");
-                  extraText.textContent = line;
-                  extra.append(pad, extraText);
-                  testsTimelineEl.appendChild(extra);
-                }
-                return;
-              }
-
-              const toggle = document.createElement("span");
-              toggle.className = "tests-step-toggle";
-              toggle.textContent = (expanded ? "▾" : "▸") + " " + (logs.length - 1);
-              toggle.title = expanded ? "Collapse log lines" : "Show " + (logs.length - 1) + " log lines";
-              log.appendChild(toggle);
-
-              const detail = document.createElement("div");
-              detail.className = "tests-detail";
-              detail.hidden = !expanded;
-              for (const line of logs.slice(1)) {
-                const detailLine = document.createElement("div");
-                detailLine.className = "tests-logline";
-                detailLine.textContent = line;
-                detail.appendChild(detailLine);
-              }
-
-              toggle.addEventListener("click", (domEvent) => {
-                domEvent.stopPropagation();
-                const open = expandedTestSteps.has(stepKey);
-                if (open) expandedTestSteps.delete(stepKey);
-                else expandedTestSteps.add(stepKey);
-                detail.hidden = open;
-                toggle.textContent = (open ? "▸" : "▾") + " " + (logs.length - 1);
-                toggle.title = open ? "Show " + (logs.length - 1) + " log lines" : "Collapse log lines";
-              });
-
-              testsTimelineEl.appendChild(log);
-              testsTimelineEl.appendChild(detail);
-            }
-          });
-
-          // Expand/collapse-all control in the header — collapses all when everything is open,
-          // otherwise opens every step that has detail. Hidden when no step has detail.
-          if (detailKeys.length) {
-            const allOpen = detailKeys.every((k) => expandedTestSteps.has(k));
-            headerToggle.textContent = allOpen ? "▾" : "▸";
-            headerToggle.title = allOpen ? "Свернуть все шаги" : "Развернуть все шаги";
-            headerToggle.addEventListener("click", () => {
-              if (detailKeys.every((k) => expandedTestSteps.has(k))) {
-                detailKeys.forEach((k) => expandedTestSteps.delete(k));
-              } else {
-                detailKeys.forEach((k) => expandedTestSteps.add(k));
-              }
-              renderTestTimeline();
-            });
-          } else {
-            headerToggle.hidden = true;
-          }
-
-          restoreScroll(testsTimelineEl, "bottom", prevScroll);
-        }
-
-        function seekTestVideo(offsetSeconds) {
-          const session = testsSessions.find((s) => s.id === selectedTestId);
-          if (!session || session.status === "running") return;
-          if (playbackTestId !== session.id) showTestVideo(session);
-          testVideo.currentTime = offsetSeconds;
-          testVideo.play().catch(() => {});
-        }
-
-        // ---- Inspector shell: Inspect toggle, tabs, drill-down, resizable drawer ----
-
-        let inspectorOpen = false;
-        let activeTab = "network";
-        let inspectorView = "list";
-        // Empty until /config reports a logApp; the notice stays visible on app-scoped tabs so the
-        // user learns why they are empty instead of watching blank panes. Gated on the config fetch
-        // so it cannot flash before the attached app is known.
-        let attachedApp = "";
-        let attachedAppKnown = false;
-        const APP_SCOPED_TABS = ["network", "logs", "state"];
-
-        function updateInspectorNotice() {
-          inspectorNotice.hidden = !attachedAppKnown || !!attachedApp || !APP_SCOPED_TABS.includes(activeTab);
-        }
-
-        for (const codeEl of [inspectorNoticeCmd, inspectorNoticeRunCmd]) {
-          codeEl.addEventListener("click", () => {
-            if (navigator.clipboard) navigator.clipboard.writeText(codeEl.textContent).catch(() => {});
-          });
-        }
-        const filterByTab = { network: "", logs: "", state: "", ax: "", tests: "" };
-
-        const FILTER_PLACEHOLDER = {
-          network: "filter service / status / host",
-          logs: "filter message / subsystem",
-          state: "filter model id",
-          ax: "filter id / label / role",
-          tests: "filter title / status"
-        };
-
-        function showDetailView(label) {
-          inspectorView = "detail";
-          detailBackLabel.textContent = label;
-          inspectorListView.hidden = true;
-          inspectorDetailView.hidden = false;
-        }
-
-        function showListView() {
-          inspectorView = "list";
-          inspectorDetailView.hidden = true;
-          inspectorListView.hidden = false;
-        }
-
-        function setActiveTab(tab) {
-          activeTab = tab;
-          for (const key in tabButtons) tabButtons[key].classList.toggle("active", key === tab);
-          networkList.hidden = tab !== "network";
-          logsControls.hidden = tab !== "logs";
-          logsList.hidden = tab !== "logs";
-          statePane.hidden = tab !== "state";
-          axPane.hidden = tab !== "ax";
-          testsPane.hidden = tab !== "tests";
-          inspectorFilter.value = filterByTab[tab] || "";
-          inspectorFilter.placeholder = FILTER_PLACEHOLDER[tab] || "";
-          inspectorFilter.disabled = false;
-          renderFilterChips();
-          updateInspectorNotice();
-          if (tab !== "network") { hideNetworkMenu(); hideNetworkLaunchMenu(); }
-          if (tab !== "logs") { hideLogsMenu(); hideLogsLaunchMenu(); }
-          if (tab !== "tests") hideTestsMenu();
-          hideFilterHelp();
-          showListView();
-          if (tab === "network") renderNetworkList();
-          else if (tab === "logs") { renderLogsList(); ensureLogs(); }
-          else if (tab === "state") renderState();
-          else if (tab === "ax") { renderAxTree(); renderAxSelected(); }
-          else if (tab === "tests") { renderTestsDefinitions(); renderTestSteps(); renderTestsList(); renderTestTimeline(); }
-          if (tab === "state") startStatePolling(); else stopStatePolling();
-          if (tab === "ax") startAxPolling(); else stopAxPolling();
-          if (tab === "tests") startTestsPolling(); else { stopTestsPolling(); showLiveStream(); }
-          axUpdateCanvasMode();
-          renderAxOverlay();
-        }
-
-        function setInspectorOpen(open) {
-          inspectorOpen = open;
-          inspector.hidden = !open;
-          stage.classList.toggle("inspector-open", open);
-          inspectToggle.classList.toggle("on", open);
-          inspectToggle.setAttribute("aria-pressed", String(open));
-          if (open) {
-            updateInspectorLayout();
-            startNetworkPolling();
-            if (logsCaptureStarted) startLogsPolling();
-            setActiveTab(activeTab);
-          } else {
-            stopNetworkPolling();
-            stopLogsPolling();
-            stopStatePolling();
-            stopAxPolling();
-            stopTestsPolling();
-            showLiveStream();
-            axUpdateCanvasMode();
-            renderAxOverlay();
-            hideAxMenu();
-            hideNetworkMenu();
-            hideLogsMenu();
-            hideTestsMenu();
-            hideFilterHelp();
-          }
-        }
-
-        inspectToggle.addEventListener("click", () => setInspectorOpen(!inspectorOpen));
-        detailBack.addEventListener("click", showListView);
-        for (const key in tabButtons) {
-          tabButtons[key].addEventListener("click", () => setActiveTab(key));
-        }
-        inspectorFilter.addEventListener("input", () => {
-          filterByTab[activeTab] = inspectorFilter.value;
-          if (activeTab === "network") renderNetworkList();
-          else if (activeTab === "logs") renderLogsList();
-          else if (activeTab === "state") renderState();
-          else if (activeTab === "ax") { axFilter = inspectorFilter.value; renderAxTree(); }
-          else if (activeTab === "tests") { renderTestsList(); renderTestsDefinitions(); }
-        });
-        inspectorFilter.addEventListener("keydown", (event) => {
-          if (event.key === "Enter") {
-            const text = inspectorFilter.value.trim();
-            if (!text) return;
-            event.preventDefault();
-            inspectorFilter.value = "";
-            filterByTab[activeTab] = "";
-            if (activeTab === "ax") axFilter = "";
-            const allowedFields = activeTab === "logs" ? LOGS_FILTER_FIELDS : null;
-            const kind = text.startsWith("-") ? "exclude" : "include";
-            const parsed = parseFieldTerm(kind === "exclude" ? text.slice(1) : text, allowedFields);
-            addFilterChip(kind, parsed.term, parsed.field);
-            rerenderActiveTab();
-          } else if (event.key === "Backspace" && !inspectorFilter.value && filterChipsByTab[activeTab].length) {
-            removeFilterChip(filterChipsByTab[activeTab].length - 1);
-          }
-        });
-
-        // ---- Resizable drawer ----
-
-        const DRAWER_MIN = 120;
-        let savedDrawerHeight = null;
-        try { savedDrawerHeight = parseInt(localStorage.getItem("simtool.drawerHeight") || "", 10) || null; } catch (_) {}
-
-        function clampDrawerHeight(h) {
-          const max = Math.max(DRAWER_MIN, stage.clientHeight - 60);
-          return Math.max(DRAWER_MIN, Math.min(max, h));
-        }
-
-        function applyDrawerHeight(h) {
-          inspector.style.height = clampDrawerHeight(h) + "px";
-        }
-
-        // Wide stage → inspector docks as a right column beside the device; narrow → bottom drawer.
-        const SIDE_MIN_WIDTH = 680;
-        function updateInspectorLayout() {
-          const side = stage.clientWidth >= SIDE_MIN_WIDTH;
-          stage.classList.toggle("layout-side", side);
-          if (side) {
-            inspector.style.height = "";
-          } else {
-            inspector.style.height = savedDrawerHeight ? clampDrawerHeight(savedDrawerHeight) + "px" : "";
-          }
-        }
-
-        let dragging = false;
-        let dragStartY = 0;
-        let dragStartHeight = 0;
-        drawerHandle.addEventListener("pointerdown", (event) => {
-          if (stage.classList.contains("layout-side")) return;
-          dragging = true;
-          dragStartY = event.clientY;
-          dragStartHeight = inspector.getBoundingClientRect().height;
-          try { drawerHandle.setPointerCapture(event.pointerId); } catch (_) {}
-          event.preventDefault();
-        });
-        drawerHandle.addEventListener("pointermove", (event) => {
-          if (!dragging) return;
-          applyDrawerHeight(dragStartHeight - (event.clientY - dragStartY));
-        });
-        function endDrag(event) {
-          if (!dragging) return;
-          dragging = false;
-          try { drawerHandle.releasePointerCapture(event.pointerId); } catch (_) {}
-          const height = Math.round(inspector.getBoundingClientRect().height);
-          savedDrawerHeight = height;
-          try { localStorage.setItem("simtool.drawerHeight", String(height)); } catch (_) {}
-        }
-        drawerHandle.addEventListener("pointerup", endDrag);
-        drawerHandle.addEventListener("pointercancel", endDrag);
-
-        // ---- Resizable card width ----
-
-        const viewerCard = $("viewerCard");
-        const CARD_MIN_WIDTH = 480;
-
-        function applyCardWidth(w) {
-          // The CSS min() against the viewport keeps the card on screen; only the
-          // floor needs enforcing here.
-          viewerCard.style.setProperty("--card-w", Math.max(CARD_MIN_WIDTH, w) + "px");
-          updateInspectorLayout();
-          updateSurfaceSize();
-        }
-
-        try {
-          const saved = parseInt(localStorage.getItem("simtool.cardWidth") || "", 10);
-          if (saved) applyCardWidth(saved);
-        } catch (_) {}
-
-        function wireCardResize(handle, direction) {
-          let drag = null;
-          handle.addEventListener("pointerdown", (event) => {
-            drag = { startX: event.clientX, startWidth: viewerCard.getBoundingClientRect().width };
-            handle.classList.add("active");
-            try { handle.setPointerCapture(event.pointerId); } catch (_) {}
-            event.preventDefault();
-          });
-          handle.addEventListener("pointermove", (event) => {
-            if (!drag) return;
-            // The card stays centered, so the dragged edge tracks the pointer at 2x.
-            applyCardWidth(drag.startWidth + direction * (event.clientX - drag.startX) * 2);
-          });
-          function endCardDrag(event) {
-            if (!drag) return;
-            drag = null;
-            handle.classList.remove("active");
-            try { handle.releasePointerCapture(event.pointerId); } catch (_) {}
-            const width = Math.round(viewerCard.getBoundingClientRect().width);
-            try { localStorage.setItem("simtool.cardWidth", String(width)); } catch (_) {}
-          }
-          handle.addEventListener("pointerup", endCardDrag);
-          handle.addEventListener("pointercancel", endCardDrag);
-        }
-        wireCardResize($("cardResizeLeft"), -1);
-        wireCardResize($("cardResizeRight"), 1);
-
-        // ---- Wiring ----
-
-        homeButton.addEventListener("click", pressHome);
-        shotButton.addEventListener("click", downloadScreenshot);
-        shakeButton.addEventListener("click", pressShake);
-        terminateButton.addEventListener("click", pressTerminate);
-        relaunchButton.addEventListener("click", pressRelaunch);
-        deviceMenuPaste.addEventListener("click", () => { hideDeviceMenu(); pasteFromClipboard(); });
-        deviceMenuPhotos.addEventListener("click", () => { hideDeviceMenu(); addClipboardImageToPhotos(); });
-        deviceMenuPhotoFiles.addEventListener("click", () => { hideDeviceMenu(); photosFileInput.click(); });
-        photosFileInput.addEventListener("change", () => {
-          const files = Array.from(photosFileInput.files || []);
-          photosFileInput.value = "";
-          addToPhotos(files);
-        });
-        // ⌘V anywhere on the page outside an editable field pastes into the simulator;
-        // the paste event hands over the clipboard without a permission prompt.
-        document.addEventListener("paste", (event) => {
-          if (isEditableTarget(event.target)) return;
-          event.preventDefault();
-          const data = event.clipboardData;
-          const text = data ? data.getData("text/plain") : "";
-          const image = data ? Array.from(data.files || []).find((file) => file.type.startsWith("image/")) : null;
-          // A Finder copy of an image file brings the file name as its text; the file is what was meant.
-          if (image && (!text || text === image.name)) pasteImageIntoSimulator(image);
-          else pasteIntoSimulator(text);
-        });
-        axRefreshButton.addEventListener("click", loadAxTree);
-        axCopyButton.addEventListener("click", copyAxSelected);
-        axMenuCopy.addEventListener("click", () => { copyAxNode(axMenuNode); hideAxMenu(); });
-        networkMenuExclude.addEventListener("click", () => { addFilterChip("exclude", networkMenuPath); hideNetworkMenu(); });
-        networkMenuInclude.addEventListener("click", () => { addFilterChip("include", networkMenuPath); hideNetworkMenu(); });
-        networkLaunchMenuDelete.addEventListener("click", async () => {
-          const launchId = networkLaunchMenuId;
-          hideNetworkLaunchMenu();
-          if (launchId == null) return;
-          try {
-            const response = await fetch("/api/v1/network/launches/" + encodeURIComponent(launchId), { method: "DELETE" });
-            if (!response.ok) return;
-          } catch (_) { return; }
-          collapsedNetworkLaunches.delete(String(launchId));
-          const selected = networkEvents.find((event) => event.id === networkSelectedId);
-          if (selected && selected.launchId === launchId) {
-            networkSelectedId = null;
-            showListView();
-          }
-          loadNetwork();
-        });
-        logsLaunchMenuDelete.addEventListener("click", async () => {
-          const launchId = logsLaunchMenuId;
-          hideLogsLaunchMenu();
-          if (launchId == null) return;
-          try {
-            const response = await fetch("/api/v1/logs/launches/" + encodeURIComponent(launchId), { method: "DELETE" });
-            if (!response.ok) return;
-          } catch (_) { return; }
-          collapsedLogLaunches.delete(String(launchId));
-          // Logs accumulate client-side across cursor polls, so drop the launch's entries locally too.
-          logsEntries = logsEntries.filter((entry) => entry.launchId !== launchId);
-          renderLogsList();
-        });
-        logsMenuCopy.addEventListener("click", () => {
-          if (logsMenuEntry) axWriteClipboard(logEntryText(logsMenuEntry));
-          hideLogsMenu();
-        });
-        logsMenuCopySel.addEventListener("click", () => {
-          if (logsMenuSelection) axWriteClipboard(logsMenuSelection);
-          hideLogsMenu();
-        });
-        // Chips are matched against a single-line haystack, so a multi-line
-        // selection is collapsed to one line before it becomes a filter term.
-        function logsSelectionChipTerm() {
-          return logsMenuSelection.replace(/\s+/g, " ").trim();
-        }
-        logsMenuIncludeSel.addEventListener("click", () => {
-          const term = logsSelectionChipTerm();
-          hideLogsMenu();
-          if (term) addFilterChip("include", term);
-        });
-        logsMenuExcludeSel.addEventListener("click", () => {
-          const term = logsSelectionChipTerm();
-          hideLogsMenu();
-          if (term) addFilterChip("exclude", term);
-        });
-        testsMenuDelete.addEventListener("click", async () => {
-          const id = testsMenuSessionId;
-          hideTestsMenu();
-          if (!id) return;
-          try {
-            const response = await fetch("/api/v1/tests/" + encodeURIComponent(id), { method: "DELETE" });
-            if (!response.ok) return;
-          } catch (_) { return; }
-          if (playbackTestId === id) showLiveStream();
-          if (selectedTestId === id) selectedTestId = null;
-          testsLastPayload = "";
-          loadTests();
-        });
-        filterHelp.addEventListener("click", (event) => {
-          event.stopPropagation();
-          if (filterHelpPop.hidden) showFilterHelp(); else hideFilterHelp();
-        });
-        function hidePopups() { hideAxMenu(); hideDeviceMenu(); hideNetworkMenu(); hideNetworkLaunchMenu(); hideLogsMenu(); hideLogsLaunchMenu(); hideTestsMenu(); hideFilterHelp(); }
-        document.addEventListener("click", (event) => {
-          if (!axMenu.hidden && !axMenu.contains(event.target)) hideAxMenu();
-          if (!deviceMenu.hidden && !deviceMenu.contains(event.target)) hideDeviceMenu();
-          if (!networkMenu.hidden && !networkMenu.contains(event.target)) hideNetworkMenu();
-          if (!networkLaunchMenu.hidden && !networkLaunchMenu.contains(event.target)) hideNetworkLaunchMenu();
-          if (!logsMenu.hidden && !logsMenu.contains(event.target)) hideLogsMenu();
-          if (!logsLaunchMenu.hidden && !logsLaunchMenu.contains(event.target)) hideLogsLaunchMenu();
-          if (!testsMenu.hidden && !testsMenu.contains(event.target)) hideTestsMenu();
-          if (!filterHelpPop.hidden && !filterHelpPop.contains(event.target)) hideFilterHelp();
-        });
-        document.addEventListener("keydown", (event) => { if (event.key === "Escape") hidePopups(); });
-        window.addEventListener("scroll", () => hidePopups(), true);
-
-        // Canvas gestures: the finger follows the pointer. Down, every move and up
-        // stream to the device as they happen; nothing waits for a reply.
-        const touchStream = createTouchStream({
-          url: (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/api/v1/input/stream"
-        });
-        const touchOverlay = $("touchOverlay");
-        const LONG_PRESS_MS = 500;   // UIKit's long-press delay: the ring says it has passed
-        const HOLD_SLOP_PX = 8;      // CSS px of movement that rules a long press out
-        const WHEEL_IDLE_MS = 100;   // a wheel scroll lifts its finger after this much silence
-        const WHEEL_INSET = 0.08;    // wheel fingers stay this far inside, clear of the edge gestures
-        let touch = null;            // the live finger(s) under the pointer
-        let axPickPointer = null;    // a press in AX pick mode, which never touches the device
-        let wheel = null;            // the finger a wheel or trackpad scroll is dragging
-
-        const clamp01 = (v) => Math.min(1, Math.max(0, v));
-
-        function canvasRatio(event) {
-          const rect = canvas.getBoundingClientRect();
-          return { x: clamp01((event.clientX - rect.left) / rect.width), y: clamp01((event.clientY - rect.top) / rect.height) };
-        }
-
-        // Alt adds a second finger mirrored through the screen center, so spreading
-        // or circling the pointer pinches or rotates. Alt+Shift keeps the pair's
-        // offset instead: a two-finger pan.
-        function secondFinger(mode, point, offset) {
-          if (mode === "pinch") return { x: clamp01(1 - point.x), y: clamp01(1 - point.y) };
-          if (mode === "pan2") return { x: clamp01(point.x + offset.x), y: clamp01(point.y + offset.y) };
-          return null;
-        }
-
-        const touchDots = [0, 1].map(() => {
-          const dot = document.createElement("div");
-          dot.className = "touch-dot";
-          dot.hidden = true;
-          touchOverlay.appendChild(dot);
-          return dot;
-        });
-
-        function showDots(first, second, state) {
-          [first, second].forEach((point, index) => {
-            const dot = touchDots[index];
-            if (!point) { dot.hidden = true; return; }
-            dot.hidden = false;
-            dot.className = "touch-dot" + (state ? " " + state : "");
-            dot.style.left = (point.x * 100) + "%";
-            dot.style.top = (point.y * 100) + "%";
-          });
-        }
-
-        function hideDots() { for (const dot of touchDots) dot.hidden = true; }
-
-        function touchState() { return touch && touch.held ? "held" : ""; }
-
-        function endTouch() {
-          if (!touch) return;
-          const ending = touch;
-          touch = null;
-          clearTimeout(ending.holdTimer);
-          touchStream.up(ending.point, ending.second);
-          hideDots();
-        }
-
-        canvas.addEventListener("pointerdown", (event) => {
-          if (!streamWidth || !streamHeight) return;
-          if (event.button !== 0) return; // primary button / touch only
-          // A click that dismisses the clipboard menu must not also tap the device.
-          if (!deviceMenu.hidden) { hideDeviceMenu(); event.preventDefault(); return; }
-          try { canvas.setPointerCapture(event.pointerId); } catch (_) {}
-          event.preventDefault();
-          if (axSelectMode()) { axPickPointer = event.pointerId; return; }
-          endWheelDrag();
-          endTouch();
-          const point = canvasRatio(event);
-          const mode = event.altKey ? (event.shiftKey ? "pan2" : "pinch") : "one";
-          const second = mode === "one" ? null : { x: clamp01(1 - point.x), y: clamp01(1 - point.y) };
-          touch = {
-            pointerId: event.pointerId,
-            mode,
-            offset: second ? { x: second.x - point.x, y: second.y - point.y } : null,
-            point,
-            second,
-            startX: event.clientX,
-            startY: event.clientY,
-            held: false,
-            holdTimer: null
-          };
-          touchStream.down(point, second);
-          showDots(point, second, "");
-          touch.holdTimer = setTimeout(() => {
-            if (!touch) return;
-            touch.held = true;
-            showDots(touch.point, touch.second, "held");
-          }, LONG_PRESS_MS);
-        });
-
-        canvas.addEventListener("pointermove", (event) => {
-          if (!touch) {
-            // With Alt held, show where the two fingers would land.
-            if (event.altKey && !wheel && !axSelectMode() && streamWidth) {
-              const point = canvasRatio(event);
-              showDots(point, event.shiftKey ? null : secondFinger("pinch", point), "preview");
-            } else if (!wheel) {
-              hideDots();
-            }
-            return;
-          }
-          if (event.pointerId !== touch.pointerId) return;
-          touch.point = canvasRatio(event);
-          touch.second = secondFinger(touch.mode, touch.point, touch.offset);
-          if (touch.holdTimer && Math.hypot(event.clientX - touch.startX, event.clientY - touch.startY) > HOLD_SLOP_PX) {
-            clearTimeout(touch.holdTimer);
-            touch.holdTimer = null;
-          }
-          touchStream.move(touch.point, touch.second);
-          showDots(touch.point, touch.second, touchState());
-        });
-
-        canvas.addEventListener("pointerup", (event) => {
-          try { canvas.releasePointerCapture(event.pointerId); } catch (_) {}
-          if (axPickPointer === event.pointerId) {
-            axPickPointer = null;
-            const node = axHitTest(event.clientX, event.clientY);
-            if (node) selectAxNode(node._key, true);
-            return;
-          }
-          if (!touch || event.pointerId !== touch.pointerId) return;
-          // The finger lifts where the pointer is now.
-          touch.point = canvasRatio(event);
-          touch.second = secondFinger(touch.mode, touch.point, touch.offset);
-          endTouch();
-        });
-
-        for (const type of ["pointercancel", "lostpointercapture"]) {
-          canvas.addEventListener(type, (event) => {
-            if (axPickPointer === event.pointerId) axPickPointer = null;
-            if (touch && event.pointerId === touch.pointerId) endTouch();
-          });
-        }
-        canvas.addEventListener("pointerleave", () => { if (!touch && !wheel) hideDots(); });
-        // A finger never outlives the page's attention.
-        window.addEventListener("blur", () => { endTouch(); endWheelDrag(); });
-        document.addEventListener("visibilitychange", () => { if (document.hidden) { endTouch(); endWheelDrag(); } });
-
-        // ---- Mac keyboard → simulator ----
-        // Off, the keyboard is the page's: SimTool's shortcuts and the browser's.
-        // On, keys go to the device, except into SimTool's own text fields, ⇧⌘K
-        // (which turns the mode off — Esc is a key iOS uses), ⌘K (Simulator.app's
-        // Toggle Software Keyboard), ⌘V (the paste event pastes the Mac clipboard
-        // as text) and Esc while a SimTool menu is open.
-        const keyboardBridge = createKeyboardBridge({
-          send: (message) => touchStream.key(message),
-          isMac: /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent)
-        });
-        let hardwareKeyboardRequests = Promise.resolve();
-
-        const isKeyboardModeChord = (event) => event.code === "KeyK" && event.shiftKey && (event.metaKey || event.ctrlKey) && !event.altKey;
-        const isSoftKeyboardChord = (event) => event.code === "KeyK" && event.metaKey && !event.shiftKey && !event.ctrlKey && !event.altKey;
-        const isPasteChord = (event) => event.code === "KeyV" && event.metaKey && !event.ctrlKey && !event.altKey;
-
-        function popupOpen() {
-          return [axMenu, deviceMenu, networkMenu, networkLaunchMenu, logsMenu, logsLaunchMenu, testsMenu, filterHelpPop].some((menu) => !menu.hidden);
-        }
-
-        function updateKeyboardIndicator() {
-          const on = keyboardBridge.enabled;
-          const live = on && document.hasFocus() && !isEditableTarget(document.activeElement);
-          keyboardToggle.classList.toggle("on", on);
-          keyboardToggle.setAttribute("aria-pressed", String(on));
-          surface.classList.toggle("kbd-capture", on);
-          surface.classList.toggle("kbd-paused", on && !live);
-          kbdBadge.hidden = !on;
-          kbdBadge.classList.toggle("paused", on && !live);
-          kbdBadge.textContent = live ? "keyboard → simulator" : "keyboard paused";
-        }
-
-        function setKeyboardMode(on) {
-          if (keyboardBridge.enabled === on) return;
-          keyboardBridge.setEnabled(on);
-          updateKeyboardIndicator();
-          // Simulator.app's Connect Hardware Keyboard goes with it, in the order the toggle flips.
-          hardwareKeyboardRequests = hardwareKeyboardRequests.then(async () => {
-            try {
-              await api("/api/v1/input", { method: "POST", body: JSON.stringify({ action: "hardware-keyboard", enabled: on }) });
-            } catch (error) {
-              setStatus(`hardware keyboard ${on ? "connect" : "disconnect"} failed: ${error.message}`, "err");
-            }
-          });
-        }
-
-        async function toggleSoftwareKeyboard() {
-          try {
-            await api("/api/v1/input", { method: "POST", body: JSON.stringify({ action: "software-keyboard" }) });
-          } catch (error) {
-            setStatus(`software keyboard failed: ${error.message}`, "err");
-          }
-        }
-
-        function keepFromPage(event) { event.preventDefault(); event.stopPropagation(); }
-
-        // Capture phase: ahead of the page's own key handlers.
-        window.addEventListener("keydown", (event) => {
-          if (isKeyboardModeChord(event)) {
-            keepFromPage(event);
-            if (!event.repeat) setKeyboardMode(!keyboardBridge.enabled);
-            return;
-          }
-          if (!keyboardBridge.enabled || isEditableTarget(event.target)) return;
-          if (event.code === "Escape" && popupOpen()) return;
-          if (isPasteChord(event)) return;
-          if (isSoftKeyboardChord(event)) {
-            keepFromPage(event);
-            if (!event.repeat) toggleSoftwareKeyboard();
-            return;
-          }
-          if (keyboardBridge.keydown(event)) keepFromPage(event);
-        }, true);
-        window.addEventListener("keyup", (event) => {
-          if (event.code === "CapsLock" && isEditableTarget(event.target)) return;
-          if (keyboardBridge.keyup(event)) keepFromPage(event);
-        }, true);
-        window.addEventListener("focus", updateKeyboardIndicator);
-        window.addEventListener("blur", () => { keyboardBridge.releaseAll(); updateKeyboardIndicator(); });
-        document.addEventListener("visibilitychange", () => { if (document.hidden) keyboardBridge.releaseAll(); });
-        document.addEventListener("focusin", (event) => {
-          if (isEditableTarget(event.target)) keyboardBridge.releaseAll();
-          updateKeyboardIndicator();
-        });
-        document.addEventListener("focusout", () => setTimeout(updateKeyboardIndicator, 0));
-        // A press on the screen hands the keyboard back to the device.
-        canvas.addEventListener("pointerdown", () => {
-          if (keyboardBridge.enabled && isEditableTarget(document.activeElement)) document.activeElement.blur();
-        }, true);
-        keyboardToggle.addEventListener("click", () => setKeyboardMode(!keyboardBridge.enabled));
-        softKeyboardButton.addEventListener("click", toggleSoftwareKeyboard);
-
-        // iOS drops synthetic scroll events, so a wheel or trackpad scroll drags a
-        // finger instead: down under the cursor, moved by each (inverted) delta,
-        // put back down near the cursor when it runs into an edge, lifted after
-        // 100 ms of quiet. The trackpad's own momentum carries the content.
-        canvas.addEventListener("wheel", (event) => {
-          if (!streamWidth || !streamHeight) return;
-          event.preventDefault();
-          if (event.ctrlKey || touch || axSelectMode()) return; // pinch-to-zoom the page: not here
-          const rect = canvas.getBoundingClientRect();
-          const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? rect.height : 1;
-          const dx = -event.deltaX * unit / rect.width;
-          const dy = -event.deltaY * unit / rect.height;
-          const anchor = () => {
-            const point = canvasRatio(event);
-            return { x: Math.min(1 - WHEEL_INSET, Math.max(WHEEL_INSET, point.x)), y: Math.min(1 - WHEEL_INSET, Math.max(WHEEL_INSET, point.y)) };
-          };
-          if (!wheel) {
-            wheel = { point: anchor(), timer: null };
-            touchStream.down(wheel.point);
-          }
-          let next = { x: wheel.point.x + dx, y: wheel.point.y + dy };
-          const inside = (v) => v >= WHEEL_INSET / 2 && v <= 1 - WHEEL_INSET / 2;
-          if (!inside(next.x) || !inside(next.y)) {
-            touchStream.up(wheel.point);
-            const start = anchor();
-            touchStream.down(start);
-            next = { x: clamp01(start.x + dx), y: clamp01(start.y + dy) };
-          }
-          wheel.point = next;
-          touchStream.move(next);
-          showDots(next, null, "wheel");
-          clearTimeout(wheel.timer);
-          wheel.timer = setTimeout(endWheelDrag, WHEEL_IDLE_MS);
-        }, { passive: false });
-
-        function endWheelDrag() {
-          if (!wheel) return;
-          const ending = wheel;
-          wheel = null;
-          clearTimeout(ending.timer);
-          touchStream.up(ending.point);
-          if (!touch) hideDots();
-        }
-
-        // Right-click on the device screen: in AX mode, select the element under the
-        // cursor and open the Copy menu for it; otherwise open the clipboard menu.
-        canvas.addEventListener("contextmenu", (event) => {
-          event.preventDefault();
-          if (!axSelectMode()) {
-            hidePopups();
-            showDeviceMenu(event.clientX, event.clientY);
-            return;
-          }
-          const node = axHitTest(event.clientX, event.clientY);
-          if (!node) return;
-          selectAxNode(node._key, true);
-          showAxMenu(event.clientX, event.clientY, node);
-        });
-        function onResize() { updateInspectorLayout(); updateSurfaceSize(); }
-        window.addEventListener("resize", onResize);
-        updateInspectorLayout();
-
-        // The viewer streams H.264/AVCC over WebCodecs exclusively. There is no JPEG/MJPEG fallback,
-        // so a browser without WebCodecs VideoDecoder surfaces a clear error instead of degrading.
-        startAvcc().catch((error) => {
-          placeholder.textContent = `stream unavailable: ${error.message}`;
-          placeholder.style.display = "grid";
-          setStatus(`stream failed: ${error.message}`, "err");
-        });
-
-        async function bootstrap() {
-          try {
-            const response = await api("/config");
-            const config = await response.json();
-            if (config.device) deviceName.textContent = config.device;
-            attachedApp = config.logApp || "";
-            attachedAppKnown = true;
-            if (attachedApp) {
-              // Pre-scope log capture to the server's default app so logs are already buffering when
-              // the inspector is opened. Polling only starts once the inspector is shown.
-              logsTargetApp = attachedApp;
-              await startLogsCapture();
-              if (inspectorOpen) startLogsPolling();
-            } else {
-              const port = location.port ? ` --port ${location.port}` : "";
-              const device = config.udid ? ` --device ${config.udid}` : "";
-              inspectorNoticeCmd.textContent = `simtool serve --app <bundle-id>${device}${port} --web`;
-            }
-            updateInspectorNotice();
-          } catch (_) {}
-        }
-        bootstrap();
         """#
 }

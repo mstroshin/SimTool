@@ -3,161 +3,187 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#1d2024">
   <title>{{title}}</title>
   <style>{{viewer.css}}</style>
 </head>
 <body>
-  <main>
-    <section id="viewerCard" class="viewer-card">
-      <div id="cardResizeLeft" class="card-resize-handle left" title="Drag to resize"></div>
-      <div id="cardResizeRight" class="card-resize-handle right" title="Drag to resize"></div>
-      <header class="appbar">
-        <div class="brandrow"><p class="brand">SIMTOOL</p></div>
-        <div class="toolrow">
-          <button id="home" class="icon-btn" type="button" title="Home">🏠</button>
-          <button id="shot" class="icon-btn" type="button" title="Screenshot">📸</button>
-          <button id="shake" class="icon-btn" type="button" title="Shake">📳</button>
-          <button id="terminate" class="icon-btn" type="button" title="Terminate app">⏹️</button>
-          <button id="relaunch" class="icon-btn" type="button" title="Relaunch app">▶️</button>
-          <button id="softKeyboard" class="icon-btn" type="button" title="Toggle software keyboard (⌘K while typing into the simulator)">⌨️</button>
-          <button id="keyboardToggle" class="inspect-toggle" type="button" aria-pressed="false" title="Type into the simulator with the Mac keyboard (⇧⌘K)">
-            <span class="dot"></span><span>Keyboard</span>
-          </button>
-          <button id="inspectToggle" class="inspect-toggle" type="button" aria-pressed="false">
-            <span class="dot"></span><span>Inspect</span>
-          </button>
-        </div>
-      </header>
-      <div id="stage" class="stage">
-        <div id="screenWrap" class="screen-wrap fit">
-          <div id="surface" class="surface">
-            <canvas id="screen" aria-label="Simulator stream"></canvas>
-            <div id="axOverlay" class="ax-overlay" hidden></div>
-            <div id="touchOverlay" class="touch-overlay"></div>
-            <div id="testPlayback" class="test-playback" hidden>
-              <button id="testBackLive" class="test-back-live" type="button">← Live</button>
-              <!-- Custom controls: Orca's embedded browser drops clicks on the
-                   <video> element itself, so native controls are unreachable. -->
-              <video id="testVideo" class="test-video" playsinline></video>
-              <div id="testVideoNote" class="test-video-note" hidden>video unavailable</div>
-              <div id="testControls" class="test-controls">
-                <button id="testPlayPause" class="test-ctl-btn" type="button" title="Play/Pause">▶</button>
-                <span id="testTime" class="test-ctl-time">0:00 / 0:00</span>
-                <input id="testSeek" class="test-ctl-seek" type="range" min="0" max="1000" value="0" step="1">
-              </div>
-            </div>
-          </div>
-          <div id="placeholder">connecting…</div>
-          <div class="statusbar">
-            <span id="statusDot" class="status-dot idle"></span>
-            <span id="statusText">opening stream</span>
-            <span id="fps">-- fps</span>
-            <span id="kbdBadge" class="kbd-badge" hidden></span>
-            <span id="deviceName" class="device-name">—</span>
-          </div>
-        </div>
-        <aside id="inspector" class="inspector" hidden>
-          <div id="drawerHandle" class="drawer-handle" title="Drag to resize"><span class="grab"></span></div>
-          <div id="inspectorListView" class="inspector-list-view">
-            <div class="inspector-tabs">
-              <button id="tabNetwork" class="insp-tab active" type="button" data-tab="network">Network <span id="networkCount" class="tab-count">0</span></button>
-              <button id="tabLogs" class="insp-tab" type="button" data-tab="logs">Logs <span id="logsCount" class="tab-count">0</span></button>
-              <button id="tabState" class="insp-tab" type="button" data-tab="state">State <span id="stateCount" class="tab-count">0</span></button>
-              <button id="tabAx" class="insp-tab insp-tab-soon" type="button" data-tab="ax">AX</button>
-              <button id="tabTests" class="insp-tab" type="button" data-tab="tests">Tests <span id="testsCount" class="tab-count">0</span></button>
-            </div>
-            <div class="filter-row">
-              <div id="filterField" class="filter-field">
-                <span id="filterChips" class="filter-chips"></span>
-                <input id="inspectorFilter" class="inspector-filter" type="search" placeholder="filter service / status / host" />
-              </div>
-              <button id="filterHelp" class="filter-help" type="button" title="Filter help">?</button>
-            </div>
-            <div id="inspectorNotice" class="inspector-notice" hidden>
-              <b>No app attached</b> — Network, Logs and State need the app relaunched by simtool.
-              Restart the server as
-              <code id="inspectorNoticeCmd" title="Click to copy">simtool serve --app &lt;bundle-id&gt;</code>
-              or run <code id="inspectorNoticeRunCmd" title="Click to copy">simtool run --web</code> from your project.
-            </div>
-            <div id="logsControls" class="logs-controls" hidden>
-              <span id="logsStatus">idle</span>
-            </div>
-            <ul id="networkList" class="network-list scroll-pane"></ul>
-            <ul id="logsList" class="logs-list scroll-pane" hidden></ul>
-            <div id="axPane" class="ax-pane" hidden>
-              <div class="ax-toolbar">
-                <button id="axRefresh" class="ax-refresh" type="button" title="Refresh tree">⟳</button>
-                <span id="axStatus" class="ax-status">—</span>
-              </div>
-              <div id="axSelectedBar" class="ax-selected-bar" hidden>
-                <span id="axSelectedLabel" class="ax-selected-label">—</span>
-                <button id="axCopy" class="ax-copy" type="button" title="Copy this element's full JSON. Right-click any element on screen or row in the tree for a Copy menu.">Copy JSON</button>
-              </div>
-              <div id="axTree" class="ax-tree"></div>
-            </div>
-            <div id="statePane" class="state-pane" hidden>
-              <div id="stateModels" class="state-models"></div>
-              <div id="stateHistory" class="state-history"></div>
-            </div>
-            <div id="testsPane" class="tests-pane" hidden>
-              <div class="tests-subtabs">
-                <button id="testsSubtabTests" class="tests-subtab active" type="button">Tests</button>
-                <button id="testsSubtabHistory" class="tests-subtab" type="button">History</button>
-              </div>
-              <div id="testsDefinitions" class="tests-defs"></div>
-              <div id="testsSteps" class="tests-steps scroll-pane"></div>
-              <div id="testsHistory" class="tests-history" hidden>
-                <div id="testsSessions" class="tests-sessions"></div>
-                <div id="testsTimeline" class="tests-timeline scroll-pane"></div>
-              </div>
-            </div>
-          </div>
-          <div id="inspectorDetailView" class="inspector-detail-view" hidden>
-            <button id="detailBack" class="detail-back" type="button">‹ <span id="detailBackLabel">Network</span></button>
-            <div id="detailBody" class="network-detail scroll-pane"></div>
-          </div>
-        </aside>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="i-home" viewBox="0 0 16 16"><path d="M2.5 7.2 8 2.5l5.5 4.7V13a.5.5 0 0 1-.5.5H9.5V10h-3v3.5H3a.5.5 0 0 1-.5-.5Z"/></symbol>
+      <symbol id="i-camera" viewBox="0 0 16 16"><path d="M2 5.5A1.5 1.5 0 0 1 3.5 4h1.6l1-1.5h3.8l1 1.5h1.6A1.5 1.5 0 0 1 14 5.5v6a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5Z"/><circle cx="8" cy="8.5" r="2.4"/></symbol>
+      <symbol id="i-shake" viewBox="0 0 16 16"><rect x="5" y="2" width="6" height="12" rx="1.2"/><path d="M2.5 5.5v5M13.5 5.5v5M1 7v2M15 7v2"/></symbol>
+      <symbol id="i-stop" viewBox="0 0 16 16"><rect x="3.5" y="3.5" width="9" height="9" rx="1.5"/></symbol>
+      <symbol id="i-relaunch" viewBox="0 0 16 16"><path d="M13 8a5 5 0 1 1-1.6-3.7"/><path d="M13 2.5v3h-3"/></symbol>
+      <symbol id="i-keyboard" viewBox="0 0 16 16"><rect x="1.5" y="4" width="13" height="8" rx="1.2"/><path d="M4 6.5h.01M6.5 6.5h.01M9 6.5h.01M11.5 6.5h.01M4 9h.01M11.5 9h.01M6 9.5h4"/></symbol>
+      <symbol id="i-pick" viewBox="0 0 16 16"><circle cx="8" cy="8" r="4.5"/><path d="M8 1v3M8 12v3M1 8h3M12 8h3"/></symbol>
+      <symbol id="i-search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3.5 3.5"/></symbol>
+      <symbol id="i-pause" viewBox="0 0 16 16"><path d="M5.5 3.5v9M10.5 3.5v9"/></symbol>
+      <symbol id="i-play" viewBox="0 0 16 16"><path d="M5 3.2v9.6a.4.4 0 0 0 .6.3l7.4-4.8a.4.4 0 0 0 0-.6L5.6 2.9a.4.4 0 0 0-.6.3Z"/></symbol>
+      <symbol id="i-trash" viewBox="0 0 16 16"><path d="M2.5 4.5h11M6 4.5V3a.5.5 0 0 1 .5-.5h3a.5.5 0 0 1 .5.5v1.5M4 4.5l.6 8.6a.5.5 0 0 0 .5.4h5.8a.5.5 0 0 0 .5-.4l.6-8.6"/></symbol>
+      <symbol id="i-copy" viewBox="0 0 16 16"><rect x="5" y="5" width="8.5" height="8.5" rx="1.2"/><path d="M11 5V3.5A1 1 0 0 0 10 2.5H3.5a1 1 0 0 0-1 1V10a1 1 0 0 0 1 1H5"/></symbol>
+      <symbol id="i-more" viewBox="0 0 16 16"><path d="M3.5 8h.01M8 8h.01M12.5 8h.01"/></symbol>
+      <symbol id="i-chev-r" viewBox="0 0 16 16"><path d="m6 3.5 4.5 4.5L6 12.5"/></symbol>
+      <symbol id="i-chev-d" viewBox="0 0 16 16"><path d="m3.5 6 4.5 4.5L12.5 6"/></symbol>
+      <symbol id="i-chev-u" viewBox="0 0 16 16"><path d="m3.5 10 4.5-4.5 4.5 4.5"/></symbol>
+      <symbol id="i-close" viewBox="0 0 16 16"><path d="m4 4 8 8M12 4l-8 8"/></symbol>
+      <symbol id="i-warn" viewBox="0 0 16 16"><path d="M8 2.3 14.2 13a.5.5 0 0 1-.4.8H2.2a.5.5 0 0 1-.4-.8Z"/><path d="M8 6.5v3M8 11.6h.01"/></symbol>
+      <symbol id="i-offline" viewBox="0 0 16 16"><path d="M2 2l12 12M5.4 9.6a3.6 3.6 0 0 1 3-1M3 7a7 7 0 0 1 3-1.8M10.8 6.2A7 7 0 0 1 13 7.4M8 12h.01"/></symbol>
+      <symbol id="i-panel" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="1.2"/><path d="M9.5 2.5v11"/></symbol>
+      <symbol id="i-film" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="1.2"/><path d="M5 3v10M11 3v10M2 6h3M2 10h3M11 6h3M11 10h3"/></symbol>
+      <symbol id="i-check" viewBox="0 0 16 16"><path d="m3 8.5 3.2 3L13 4.5"/></symbol>
+      <symbol id="i-x" viewBox="0 0 16 16"><path d="m4.5 4.5 7 7M11.5 4.5l-7 7"/></symbol>
+      <symbol id="i-ruler" viewBox="0 0 16 16"><rect x="1.5" y="5" width="13" height="6" rx="1"/><path d="M4 5v2.2M6.5 5v3.2M9 5v2.2M11.5 5v3.2"/></symbol>
+      <symbol id="i-follow" viewBox="0 0 16 16"><path d="M8 2.5v10M3.5 8.5 8 13l4.5-4.5"/></symbol>
+      <symbol id="i-paste" viewBox="0 0 16 16"><rect x="3" y="3" width="10" height="11" rx="1.2"/><path d="M6 3V2.4a.4.4 0 0 1 .4-.4h3.2a.4.4 0 0 1 .4.4V3M5.5 7h5M5.5 9.5h5M5.5 12h3"/></symbol>
+      <symbol id="i-photo" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="1.2"/><circle cx="6" cy="6.5" r="1.2"/><path d="m2.5 12 4-3.5 3 2.5 2-1.5 2.5 2"/></symbol>
+      <symbol id="i-mock" viewBox="0 0 16 16"><path d="M3 3.5h10v3.8a5 5 0 0 1-10 0Z"/><path d="M5.8 7h.01M10.2 7h.01M6 9.6c1.2.9 2.8.9 4 0"/></symbol>
+      <symbol id="i-terminal" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="1.2"/><path d="m4.5 6 2.5 2-2.5 2M8.5 10.5h3"/></symbol>
+      <symbol id="i-help" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M6.3 6.3a1.8 1.8 0 1 1 2.4 1.7c-.5.2-.7.6-.7 1.1v.3M8 11.4h.01"/></symbol>
+      <symbol id="i-filter" viewBox="0 0 16 16"><path d="M2.5 3.5h11l-4.2 5v4l-2.6 1v-5Z"/></symbol>
+    </defs>
+  </svg>
+
+  <div class="app" id="app" data-conn="connecting" data-mode="live">
+    <header class="toolbar">
+      <div class="tb-group tb-identity">
+        <span class="brand"><span class="brand-mark" aria-hidden="true"></span><span class="brand-name">SimTool</span></span>
+        <span class="device-id" title="Simulator"><b id="deviceName">Simulator</b><span id="deviceRuntime"></span></span>
+        <span class="conn" role="status" aria-live="polite"><span class="conn-dot" aria-hidden="true"></span><span class="conn-label" id="connLabel">Connecting…</span></span>
       </div>
-    </section>
-    <div id="axMenu" class="ax-menu" hidden>
-      <button id="axMenuCopy" class="ax-menu-item" type="button">Copy element</button>
+
+      <div class="tb-group" role="toolbar" aria-label="Device">
+        <button class="tb-btn" type="button" id="homeButton" aria-label="Home" data-tip="Home" data-key="⇧⌘H" aria-keyshortcuts="Shift+Meta+H"><svg class="ic" aria-hidden="true"><use href="#i-home"/></svg></button>
+        <button class="tb-btn" type="button" id="screenshotButton" aria-label="Save screenshot" data-tip="Save screenshot" data-key="⌘S" aria-keyshortcuts="Meta+S"><svg class="ic" aria-hidden="true"><use href="#i-camera"/></svg></button>
+        <button class="tb-btn" type="button" id="shakeButton" aria-label="Shake" data-tip="Shake" data-key="⌃⌘Z" aria-keyshortcuts="Control+Meta+Z"><svg class="ic" aria-hidden="true"><use href="#i-shake"/></svg></button>
+        <button class="tb-btn" type="button" id="softKeyboardButton" aria-label="Show or hide the software keyboard" data-tip="Software keyboard — ⌘K while typing into the device"><svg class="ic" aria-hidden="true"><use href="#i-keyboard"/></svg></button>
+        <span class="tb-sep" aria-hidden="true"></span>
+        <span class="tb-app" id="appName" title="App under test">No app</span>
+        <button class="tb-btn" type="button" id="terminateButton" aria-label="Terminate app" data-tip="Terminate app"><svg class="ic" aria-hidden="true"><use href="#i-stop"/></svg></button>
+        <button class="tb-btn" type="button" id="relaunchButton" aria-label="Relaunch app" data-tip="Relaunch app"><svg class="ic" aria-hidden="true"><use href="#i-relaunch"/></svg></button>
+      </div>
+
+      <div class="tb-group tb-right">
+        <button class="toggle" type="button" id="keyboardToggle" aria-pressed="false" data-tip="Type into the simulator with the Mac keyboard" data-key="⇧⌘K" aria-keyshortcuts="Shift+Meta+K">
+          <svg class="ic" aria-hidden="true"><use href="#i-keyboard"/></svg><span class="toggle-label">Mac keyboard</span>
+        </button>
+        <button class="cmdk" type="button" id="paletteButton" aria-haspopup="dialog" aria-label="Commands" aria-keyshortcuts="Shift+Meta+P">
+          <svg class="ic" aria-hidden="true"><use href="#i-search"/></svg><span class="cmdk-label">Commands</span><kbd>⇧⌘P</kbd>
+        </button>
+        <button class="tb-btn" type="button" id="inspectorToggle" aria-pressed="true" aria-controls="inspector" aria-label="Inspector" data-tip="Show or hide the inspector" data-key="⌥⌘0" aria-keyshortcuts="Alt+Meta+0"><svg class="ic" aria-hidden="true"><use href="#i-panel"/></svg></button>
+      </div>
+    </header>
+
+    <main class="workspace" id="workspace">
+      <section class="stage" id="stage" aria-label="Simulator">
+        <div class="stage-bar" id="stageBar">
+          <div class="replay-head"><svg class="ic" aria-hidden="true"><use href="#i-film"/></svg><b>Replay</b><span id="replayTitle"></span></div>
+          <button class="btn btn-sm" type="button" id="backToLive">Back to live <kbd>Esc</kbd></button>
+        </div>
+
+        <div class="device-area" id="deviceArea">
+          <div class="device" id="device">
+            <div class="ruler ruler-x" id="rulerX" aria-hidden="true"></div>
+            <div class="ruler ruler-y" id="rulerY" aria-hidden="true"></div>
+            <div class="screen" id="screen">
+              <canvas id="screenCanvas" aria-label="Simulator screen. Press and drag to touch; right-click for paste and photos."></canvas>
+              <svg class="redlines" id="redlines" aria-hidden="true"></svg>
+              <div class="redline-labels" id="redlineLabels" aria-hidden="true"></div>
+              <div class="touch-layer" id="touchLayer" aria-hidden="true"></div>
+              <video class="replay-video" id="replayVideo" playsinline></video>
+              <div class="replay-note" id="replayNote" hidden>The recording is unavailable — the timeline still works.</div>
+              <div class="placeholder" id="placeholder">Connecting to the simulator…</div>
+              <div class="offline-veil" id="offlineVeil">
+                <div class="veil-card" role="alert">
+                  <svg class="ic ic-lg" aria-hidden="true"><use href="#i-offline"/></svg>
+                  <strong id="veilTitle">Connection to simtool lost</strong>
+                  <span id="veilText">Reconnecting…</span>
+                  <button class="btn btn-primary btn-sm" type="button" id="reconnectNow">Reconnect now</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="transport" id="transport">
+          <button class="tb-btn" type="button" id="playPause" aria-label="Play"><svg class="ic" aria-hidden="true"><use href="#i-play"/></svg></button>
+          <span class="t-time mono" id="replayTime">0:00 / 0:00</span>
+          <div class="scrub" id="scrub" role="slider" tabindex="0" aria-label="Recording position" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-valuetext="0:00">
+            <div class="scrub-fill" id="scrubFill"></div>
+            <div id="scrubTicks"></div>
+            <span class="scrub-head" id="scrubHead"></span>
+          </div>
+        </div>
+
+        <div class="readout mono" id="readout" aria-hidden="true">
+          <span id="readSize">—</span><span id="readFps">— fps</span>
+          <span class="readout-ptr" id="readPointer"></span>
+        </div>
+      </section>
+
+      <div class="splitter" id="splitter" role="separator" tabindex="0" aria-orientation="vertical" aria-controls="inspector" aria-label="Resize the inspector"></div>
+
+      <section class="inspector" id="inspector" aria-label="Inspector">
+        <div class="tabs" role="tablist" aria-label="Inspector" id="tabs">
+          <button role="tab" class="tab" type="button" id="tab-network" data-tab="network" aria-controls="panel-network" aria-selected="true" aria-keyshortcuts="Alt+1">Network <span class="count" id="count-network"></span><span class="count-err" id="err-network" hidden></span></button>
+          <button role="tab" class="tab" type="button" id="tab-logs" data-tab="logs" aria-controls="panel-logs" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+2">Logs <span class="count" id="count-logs"></span><span class="count-err" id="err-logs" hidden></span></button>
+          <button role="tab" class="tab" type="button" id="tab-state" data-tab="state" aria-controls="panel-state" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+3">State <span class="count" id="count-state"></span></button>
+          <button role="tab" class="tab" type="button" id="tab-ax" data-tab="ax" aria-controls="panel-ax" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+4">Accessibility</button>
+          <button role="tab" class="tab" type="button" id="tab-tests" data-tab="tests" aria-controls="panel-tests" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+5">Tests <span class="count" id="count-tests"></span><span class="count-err" id="err-tests" hidden></span></button>
+        </div>
+        <div class="panel" role="tabpanel" id="panel-network" aria-labelledby="tab-network"></div>
+        <div class="panel" role="tabpanel" id="panel-logs" aria-labelledby="tab-logs" hidden></div>
+        <div class="panel" role="tabpanel" id="panel-state" aria-labelledby="tab-state" hidden></div>
+        <div class="panel" role="tabpanel" id="panel-ax" aria-labelledby="tab-ax" hidden></div>
+        <div class="panel" role="tabpanel" id="panel-tests" aria-labelledby="tab-tests" hidden></div>
+      </section>
+    </main>
+
+    <footer class="statusbar" id="statusbar">
+      <span class="sb-cell sb-conn"><span class="conn-dot" aria-hidden="true"></span><span id="sbConn">Connecting</span></span>
+      <span class="sb-cell opt" id="sbDevice"></span>
+      <button class="sb-cell sb-btn opt" type="button" id="sbUdid" data-tip="Copy the simulator UDID"></button>
+      <span class="sb-cell opt" id="sbServer"></span>
+      <span class="sb-cell" id="sbApp">No app attached</span>
+      <span class="sb-cell" id="sbKeys">Keys → page</span>
+      <span class="sb-cell grow" id="sbMessage" role="status" aria-live="polite"></span>
+      <span class="sb-cell opt" id="sbVersion"></span>
+    </footer>
+  </div>
+
+  <div class="menu" id="menu" role="menu" hidden></div>
+  <div class="popover" id="popover" role="dialog" hidden></div>
+  <div class="scrim" id="paletteScrim" hidden>
+    <div class="palette" role="dialog" aria-modal="true" aria-label="Commands">
+      <div class="palette-input"><svg class="ic" aria-hidden="true"><use href="#i-search"/></svg><input id="paletteInput" type="text" role="combobox" aria-expanded="true" aria-controls="paletteList" aria-label="Command" placeholder="Type a command or a test name…" autocomplete="off" spellcheck="false"></div>
+      <div class="palette-list" id="paletteList" role="listbox" aria-label="Commands"></div>
+      <div class="palette-foot"><span><kbd>↑</kbd> <kbd>↓</kbd> move</span><span><kbd>↩</kbd> run</span><span><kbd>esc</kbd> close</span></div>
     </div>
-    <div id="networkMenu" class="ax-menu" hidden>
-      <button id="networkMenuExclude" class="ax-menu-item" type="button">Exclude</button>
-      <button id="networkMenuInclude" class="ax-menu-item" type="button">Include</button>
+  </div>
+  <div class="scrim" id="dialogScrim" hidden>
+    <div class="dialog" role="alertdialog" aria-modal="true" aria-labelledby="dialogTitle" aria-describedby="dialogText">
+      <h2 id="dialogTitle"></h2>
+      <p id="dialogText"></p>
+      <div class="row-actions"><button class="btn" type="button" id="dialogCancel">Cancel</button><button class="btn btn-danger" type="button" id="dialogConfirm">Delete</button></div>
     </div>
-    <div id="networkLaunchMenu" class="ax-menu" hidden>
-      <button id="networkLaunchMenuDelete" class="ax-menu-item tests-menu-delete" type="button">Delete section</button>
-    </div>
-    <div id="logsMenu" class="ax-menu" hidden>
-      <button id="logsMenuCopy" class="ax-menu-item" type="button">Copy entry</button>
-      <button id="logsMenuCopySel" class="ax-menu-item" type="button">Copy Selected</button>
-      <button id="logsMenuIncludeSel" class="ax-menu-item" type="button">Include Selected</button>
-      <button id="logsMenuExcludeSel" class="ax-menu-item" type="button">Exclude Selected</button>
-    </div>
-    <div id="logsLaunchMenu" class="ax-menu" hidden>
-      <button id="logsLaunchMenuDelete" class="ax-menu-item tests-menu-delete" type="button">Delete section</button>
-    </div>
-    <div id="testsMenu" class="ax-menu" hidden>
-      <button id="testsMenuDelete" class="ax-menu-item tests-menu-delete" type="button">Delete</button>
-    </div>
-    <div id="deviceMenu" class="ax-menu" hidden>
-      <button id="deviceMenuPaste" class="ax-menu-item" type="button">Paste<span class="ax-menu-key">⌘V</span></button>
-      <button id="deviceMenuPhotos" class="ax-menu-item" type="button">Add Clipboard Image to Photos</button>
-      <button id="deviceMenuPhotoFiles" class="ax-menu-item" type="button">Add Files to Photos…</button>
-    </div>
-    <input id="photosFile" type="file" accept="image/*,video/*" multiple hidden>
-    <div id="filterHelpPop" class="filter-help-pop" hidden>
-      <p><b>type text</b> — live substring filter over the current tab's fields</p>
-      <p><b>Enter</b> — turn the text into an include chip (show only matches)</p>
-      <p><b>-text + Enter</b> — exclude chip (hide matches)</p>
-      <p data-tab="logs"><b>subsystem:text</b> — match that field only; also message / category / process / level</p>
-      <p data-tab="network"><b>right-click a request</b> — include/exclude its path</p>
-      <p data-tab="logs"><b>right-click selected text</b> — copy / include / exclude it</p>
-    </div>
-  </main>
-  <script>{{touch.js}}
-{{keyboard.js}}
-{{viewer.js}}</script>
+  </div>
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  <input id="photosFile" type="file" accept="image/*,video/*" multiple hidden>
+
+  <script>{{js/touch.js}}
+{{js/keyboard.js}}
+{{js/logic.js}}
+{{js/core.js}}
+{{js/list.js}}
+{{js/stream.js}}
+{{js/device.js}}
+{{js/inspector.js}}
+{{js/network.js}}
+{{js/logs.js}}
+{{js/state.js}}
+{{js/ax.js}}
+{{js/tests.js}}
+{{js/palette.js}}
+{{js/main.js}}</script>
 </body>
 </html>
