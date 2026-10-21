@@ -115,6 +115,13 @@ public struct ProjectConfig: Codable, Equatable, Sendable {
             self.host = host
             self.port = port
         }
+
+        /// The base URL an app in the simulator reaches this server at (the
+        /// simulator shares host loopback).
+        public var appFacingURL: String {
+            let host = (host.isEmpty || host == "0.0.0.0") ? "127.0.0.1" : host
+            return "http://\(host):\(port)"
+        }
     }
 
     public struct Deeplink: Codable, Equatable, Sendable, CustomStringConvertible {
@@ -191,10 +198,7 @@ public struct ProjectConfig: Codable, Equatable, Sendable {
 
     /// The base URL the launched app should post network events to: the run
     /// server, addressed from inside the simulator (which shares host loopback).
-    public var appFacingServerURL: String {
-        let host = (server.host.isEmpty || server.host == "0.0.0.0") ? "127.0.0.1" : server.host
-        return "http://\(host):\(server.port)"
-    }
+    public var appFacingServerURL: String { server.appFacingURL }
 
     /// The directory the config was loaded from — the project's `.simtool`
     /// directory. Everything else project-scoped (build checksum metadata,

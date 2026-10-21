@@ -2137,6 +2137,12 @@ struct Serve: AsyncParsableCommand {
     @Flag(name: .long, help: .hidden)
     var noReclaim = false
 
+    @Flag(name: .long, help: "With --app, do not arm the SimTool network logger in the app the server launches (armed by default, as `simtool run` does).")
+    var noNetwork = false
+
+    @Flag(name: .long, help: "With --app, do not arm the SimTool state logger in the app the server launches (armed by default, as `simtool run` does).")
+    var noState = false
+
     @OptionGroup var common: CommonJSON
 
     func run() async throws {
@@ -2166,6 +2172,9 @@ struct Serve: AsyncParsableCommand {
         // evidence land in a project this invocation never named.
         let projectConfig = try? ProjectConfigLoader.loadIfPresent(explicitPath: config)
         let simtoolDirectory = projectConfig?.simtoolDirectory ?? SimToolDirectory.resolve()
+        // Before the server starts: its stdout-capture relaunch of the app is
+        // the first launch that must carry them.
+        for (key, value) in appLoggers(host: parameters.host, port: parameters.port, config: projectConfig) { setenv(key, value, 1) }
         try await runViewer(
             device: booted,
             host: parameters.host,
@@ -2178,6 +2187,20 @@ struct Serve: AsyncParsableCommand {
             sessionId: sessionId,
             reclaimPort: !noReclaim,
             projectConfig: projectConfig
+        )
+    }
+
+    /// What arms the app-side loggers in the app this server launches — its
+    /// stdout-capture relaunch and the viewer's Launch/Relaunch — to report to
+    /// it: with `--app`, the network and state loggers as `simtool run` arms
+    /// them, unless a flag or the config's `networkLogger:` / `stateLogger:`
+    /// turns one off. Without `--app` the server launches no app of its own.
+    func appLoggers(host: String, port: UInt16, config: ProjectConfig?) -> [String: String] {
+        guard let app, !app.isEmpty else { return [:] }
+        return appLoggerEnvironment(
+            network: !noNetwork && (config?.networkLogger ?? true),
+            state: !noState && (config?.stateLogger ?? true),
+            serverURL: ProjectConfig.Server(host: host, port: port).appFacingURL
         )
     }
 
@@ -2198,7 +2221,9 @@ struct Serve: AsyncParsableCommand {
             parameters: parameters,
             app: app,
             verbose: verbose,
-            reclaimPort: !noReclaim
+            reclaimPort: !noReclaim,
+            noNetwork: noNetwork,
+            noState: noState
         )
         try reportDetachedSession(session, json: common.json)
     }
@@ -2234,6 +2259,8 @@ func detachedServerArguments(
     app: String?,
     verbose: Bool,
     reclaimPort: Bool,
+    noNetwork: Bool = false,
+    noState: Bool = false,
     config: String?
 ) -> [String] {
     var args = ["serve", "--port", "\(parameters.port)", "--host", parameters.host, "--session-id", sessionId, "--detached-child"]
@@ -2241,6 +2268,8 @@ func detachedServerArguments(
     if let app, !app.isEmpty { args += ["--app", app] }
     if verbose { args += ["--verbose"] }
     if !reclaimPort { args.append("--no-reclaim") }
+    if noNetwork { args.append("--no-network") }
+    if noState { args.append("--no-state") }
     if let config, !config.isEmpty { args += ["--config", config] }
     return args
 }
@@ -2257,6 +2286,8 @@ func launchDetachedServer(
     app: String?,
     verbose: Bool,
     reclaimPort: Bool = true,
+    noNetwork: Bool = false,
+    noState: Bool = false,
     config: String? = nil
 ) async throws -> SessionInfo {
     let id = UUID().uuidString
@@ -2271,6 +2302,8 @@ func launchDetachedServer(
         app: app,
         verbose: verbose,
         reclaimPort: reclaimPort,
+        noNetwork: noNetwork,
+        noState: noState,
         config: config
     )
     let log = try FileHandle(forWritingTo: logPath.creatingFileIfNeeded())
@@ -2313,6 +2346,18 @@ func reportDetachedSession(_ session: SessionInfo, json: Bool) throws {
 /// server starts and prints its URL regardless.
 func shouldOpenBrowser(webRequested: Bool, json: Bool, detachedChild: Bool) -> Bool {
     webRequested && !json && !detachedChild
+}
+
+/// The exports that arm the app-side SimTool network and state loggers to
+/// report to `serverURL`. Set on this process with the SIMCTL_CHILD_ prefix,
+/// simctl forwards them to every app it launches from here. They are inert for
+/// apps that do not link the logger packages, and compiled out of Release builds.
+func appLoggerEnvironment(network: Bool, state: Bool, serverURL: String) -> [String: String] {
+    var environment: [String: String] = [:]
+    if network { environment["SIMCTL_CHILD_SIMTOOL_NETWORK_LOGGER"] = "1" }
+    if state { environment["SIMCTL_CHILD_SIMTOOL_STATE_LOGGER"] = "1" }
+    if network || state { environment["SIMCTL_CHILD_SIMTOOL_SERVER_URL"] = serverURL }
+    return environment
 }
 
 /// Shared simulator-stream viewer bootstrap used by both `serve` and `run`:
@@ -2523,15 +2568,8 @@ struct Run: AsyncParsableCommand {
         // corresponding logger package and are compiled out of Release builds.
         let networkLoggerEnabled = projectConfig.networkLogger && !noNetwork
         let stateLoggerEnabled = projectConfig.stateLogger && !noState
-        if networkLoggerEnabled {
-            setenv("SIMCTL_CHILD_SIMTOOL_NETWORK_LOGGER", "1", 1)
-        }
-        if stateLoggerEnabled {
-            setenv("SIMCTL_CHILD_SIMTOOL_STATE_LOGGER", "1", 1)
-        }
-        if networkLoggerEnabled || stateLoggerEnabled {
-            setenv("SIMCTL_CHILD_SIMTOOL_SERVER_URL", projectConfig.appFacingServerURL, 1)
-        }
+        let loggers = appLoggerEnvironment(network: networkLoggerEnabled, state: stateLoggerEnabled, serverURL: projectConfig.appFacingServerURL)
+        for (key, value) in loggers { setenv(key, value, 1) }
 
         // `--device` overrides `simulator:` from the config when provided. The
         // simulator is resolved before the build, which is for it alone; with
@@ -2573,12 +2611,14 @@ struct Run: AsyncParsableCommand {
         }
         if detach {
             // The device is already booted, so the child reports quickly. It
-            // inherits the SIMCTL_CHILD_ logger exports set above, keeping the
-            // Network/State panels armed across the stdout-capture relaunch.
+            // arms the same loggers for the stdout-capture relaunch, keeping
+            // the Network/State panels armed — and leaves off what is off here.
             let session = try await launchDetachedServer(
                 parameters: ServeParameters(device: booted.udid, host: projectConfig.server.host, port: projectConfig.server.port),
                 app: projectConfig.bundleId,
-                verbose: verbose
+                verbose: verbose,
+                noNetwork: !networkLoggerEnabled,
+                noState: !stateLoggerEnabled
             )
             try reportDetachedSession(session, json: common.json)
             return

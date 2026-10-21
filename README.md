@@ -798,6 +798,11 @@ corresponding logger package and are compiled out of Release builds. Turn them
 off with `--no-network` / `--no-state` or `networkLogger: false` /
 `stateLogger: false` in the config.
 
+`serve --app <bundle-id>` arms the same loggers, pointed at itself, for the app
+it launches — its stdout-capture relaunch and the viewer's Launch / Relaunch —
+with the same `--no-network` / `--no-state` and config switches. An installed
+build served this way fills the Network and State panels without `run`.
+
 The source fingerprint hashes only git-tracked (and untracked-but-not-ignored)
 files when the project is in a git work tree, falling back to a filesystem walk
 otherwise. This keeps gitignored, generated artifacts — a Tuist-managed

@@ -317,7 +317,9 @@ lit one, or `?display=cover|inner`.
 
 ### Network (app gRPC/HTTP via the logger)
 `simtool network …` covers a system-level snapshot and app-emitted events. App
-events require the app to be **launched with the network logger armed**:
+events require the app to be **launched with the network logger armed** —
+`simtool run` and `simtool serve --app <bundle-id>` (its Launch/Relaunch) arm it
+for you; otherwise:
 
 ```bash
 simtool serve --detach --json --port 3311
