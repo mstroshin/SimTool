@@ -7,13 +7,17 @@ public struct SimulatorDevice: Codable, Equatable, Identifiable, Sendable {
     public var runtime: String
     public var state: String
     public var isAvailable: Bool
+    /// The device type, e.g. `com.apple.CoreSimulator.SimDeviceType.iPhone-Duo`:
+    /// what decides how many screens it has (`SimulatorDisplayLayout`).
+    public var deviceTypeIdentifier: String?
 
-    public init(udid: String, name: String, runtime: String, state: String, isAvailable: Bool) {
+    public init(udid: String, name: String, runtime: String, state: String, isAvailable: Bool, deviceTypeIdentifier: String? = nil) {
         self.udid = udid
         self.name = name
         self.runtime = runtime
         self.state = state
         self.isAvailable = isAvailable
+        self.deviceTypeIdentifier = deviceTypeIdentifier
     }
 }
 
@@ -154,7 +158,8 @@ public enum SimulatorDeviceClient {
                     name: entry.name,
                     runtime: runtime,
                     state: entry.state,
-                    isAvailable: entry.isAvailable ?? true
+                    isAvailable: entry.isAvailable ?? true,
+                    deviceTypeIdentifier: entry.deviceTypeIdentifier
                 ))
             }
         }
@@ -171,4 +176,5 @@ private struct SimctlDevice: Decodable {
     var udid: String
     var state: String
     var isAvailable: Bool?
+    var deviceTypeIdentifier: String?
 }

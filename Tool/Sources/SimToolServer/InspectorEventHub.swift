@@ -12,7 +12,7 @@ import SimToolCore
 /// cover, or from another server instance — starts over from a snapshot.
 public final class InspectorEventHub: @unchecked Sendable {
     public enum Topic: String, CaseIterable, Sendable {
-        case network, logs, state, tests, launches, activity
+        case network, logs, state, tests, launches, activity, device
     }
 
     /// What one `publish` sends: the topics it changed and what changed in each.

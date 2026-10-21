@@ -273,7 +273,10 @@ extension AgentSkill {
         There is no `simtool screenshot` subcommand. Either fetch one from a running
         server (`GET /api/v1/screenshot`, see the viewer below) or use
         `xcrun simctl io <udid> screenshot /tmp/shot.png` and Read the PNG. The first
-        frame is usually the splash — capture again to see the settled screen.
+        frame is usually the splash — capture again to see the settled screen. An iPhone
+        Duo has two screens and simctl refuses to choose: pass `--display=primary` (the
+        cover) or `--display=primary-1` (the inner panel); the server's route takes the
+        lit one, or `?display=cover|inner`.
 
         ### Input · accessibility · logs
         - `simtool input …` — touches, typing, hardware buttons. Coordinates are

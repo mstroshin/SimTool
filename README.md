@@ -825,7 +825,7 @@ GET /api/v1/mocks/ack
 GET /api/v1/activity?since=<revision>&limit=200
 POST /api/v1/activity
 GET /api/v1/tests/<session-id>/evidence/<file>
-GET /api/v1/screenshot?maxDim=800
+GET /api/v1/screenshot?maxDim=800&display=<screen>
 ```
 
 The API answers the viewer's own page and clients that are not browsers — the
@@ -867,14 +867,26 @@ answering from the real backend while the test believes it is mocked.
 the longest edge fits the given pixel size — agents reading the screen pay for
 image pixels, and an 800px screenshot is still perfectly legible.
 
+A device with more than one screen — the iPhone Duo, a cover panel and an inner
+one that opens like a book — streams, screenshots and records the screen that is
+lit, and follows it as the device folds. `/config` lists the screens under
+`displays` (`id` as simctl names it — `primary`, `primary-1` —, `role` `cover` or
+`inner`, the framebuffer `width`/`height`, the picture's `rotation` and its size
+in `points`, `active`) and names the lit one in `activeDisplay`; the event
+stream's `device` topic sends them again whenever they change. `screenshot`
+takes `display=` (an `id`, a `role` or the screen number) for the screen that is
+not lit — which reads black. The inner panel's framebuffer is portrait while it
+shows a landscape picture: `rotation` 90, `points` 951 × 669.
+
 The `logs/capture` routes drive a continuous capture (OSLog plus optional
 stdout/`print`) into a bounded buffer that clients poll incrementally by cursor;
 `GET /api/v1/logs` remains the one-shot bounded snapshot.
 
 `/api/v1/events` pushes what the viewer's inspector shows as it changes — one
 Server-Sent Events stream per page, with the topics `network`, `logs`, `state`,
-`tests`, `launches` and `activity` (an entry of `/api/v1/activity` each time it
-changes, with the log's `revision`). It opens with a `snapshot` event holding all of them,
+`tests`, `launches`, `activity` (an entry of `/api/v1/activity` each time it
+changes, with the log's `revision`) and `device` (the device's screens, as
+`/config` lists them). It opens with a `snapshot` event holding all of them,
 then sends each change once, with `id: <server instance>:<sequence>`. A client
 that reconnects with `Last-Event-ID` (or `?lastEventId=`) gets the events it
 missed; one whose id is too old, or from a previous run of the server, gets a

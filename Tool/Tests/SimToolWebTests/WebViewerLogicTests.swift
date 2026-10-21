@@ -230,6 +230,9 @@ final class WebViewerLogicTests: XCTestCase {
         XCTAssertEqual(value(context, "formatOffset(83.4)"), "1:23")
         XCTAssertEqual(value(context, "plural(1, 'step', 'steps') + ' / ' + plural(2, 'step', 'steps')"), "1 step / 2 steps")
         XCTAssertEqual(value(context, "runtimeName('com.apple.CoreSimulator.SimRuntime.iOS-26-4')"), "iOS 26.4")
+        // The iPhone Duo's device-specific runtime: the OS version, not the model.
+        XCTAssertEqual(value(context, "runtimeName('com.apple.CoreSimulator.SimRuntime.iOS-27-2-iPhone19-4')"), "iOS 27.2")
+        XCTAssertEqual(value(context, "runtimeName('com.apple.CoreSimulator.SimRuntime.watchOS-11-0')"), "watchOS 11.0")
     }
 
     // MARK: - Theme

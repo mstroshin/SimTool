@@ -2484,9 +2484,11 @@ enum WebViewerAssets {
         }
 
         // "com.apple.CoreSimulator.SimRuntime.iOS-26-4" → "iOS 26.4"
+        // A device-specific runtime (iOS-27-2-iPhone19-4, the iPhone Duo's) names the
+        // OS version first and the model after it; the model is the device's, not the OS's.
         function runtimeName(identifier) {
           if (!identifier) return "";
-          const match = /SimRuntime\.([A-Za-z]+)-(\d+(?:-\d+)*)$/.exec(identifier);
+          const match = /SimRuntime\.([A-Za-z]+)-(\d+(?:-\d+)*?)(?:-[A-Za-z]+\d+-\d+)?$/.exec(identifier);
           if (!match) return identifier;
           return match[1] + " " + match[2].replace(/-/g, ".");
         }

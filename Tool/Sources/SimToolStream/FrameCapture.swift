@@ -28,6 +28,10 @@ public final class FrameCapture: @unchecked Sendable {
     private var surfaces: [ObjectIdentifier: IOSurface] = [:]
     private var callbackUUIDs: [ObjectIdentifier: NSUUID] = [:]
     private var ioClient: NSObject?
+    /// The device's own screen sizes, and the one to stream when it has more
+    /// than one (`FramebufferSurfaceSelector`). Read on the capture queue.
+    private var screenSizes: [FramebufferSurfaceSelector.Size] = []
+    private var preferredSize: FramebufferSurfaceSelector.Size?
 
     public init() {
         captureQueue.setSpecific(key: captureQueueKey, value: ())
@@ -68,6 +72,20 @@ public final class FrameCapture: @unchecked Sendable {
         captureQueue.async { [weak self] in
             guard let self else { return }
             try? self.wireUpFramebuffer()
+        }
+    }
+
+    /// Streams the device's own screens only — `screens` are their pixel
+    /// sizes — and, of a foldable's two, the one sized `preferred`. A changed
+    /// choice sends a frame of the new screen at once.
+    public func setScreens(_ screens: [(width: Int, height: Int)], preferred: (width: Int, height: Int)? = nil) {
+        let sizes = screens.map { FramebufferSurfaceSelector.Size(width: $0.width, height: $0.height) }
+        let pinned = preferred.map { FramebufferSurfaceSelector.Size(width: $0.width, height: $0.height) }
+        captureQueue.async { [weak self] in
+            guard let self, self.screenSizes != sizes || self.preferredSize != pinned else { return }
+            self.screenSizes = sizes
+            self.preferredSize = pinned
+            self.captureFrame(forceIdleRefresh: true)
         }
     }
 
@@ -246,16 +264,9 @@ public final class FrameCapture: @unchecked Sendable {
     }
 
     private func bestSurface() -> IOSurface? {
-        var best: IOSurface?
-        var bestArea = 0
-        for surface in surfaces.values {
-            let area = IOSurfaceGetWidth(surface) * IOSurfaceGetHeight(surface)
-            if area > bestArea {
-                best = surface
-                bestArea = area
-            }
-        }
-        return best
+        let candidates = Array(surfaces.values)
+        let sizes = candidates.map { FramebufferSurfaceSelector.Size(width: IOSurfaceGetWidth($0), height: IOSurfaceGetHeight($0)) }
+        return FramebufferSurfaceSelector.select(sizes, screens: screenSizes, preferred: preferredSize).map { candidates[$0] }
     }
 
     private func makeError(_ code: Int, _ message: String) -> NSError {

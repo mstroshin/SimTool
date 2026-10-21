@@ -11,6 +11,11 @@ direct SimulatorKit framebuffer capture, VideoToolbox H.264 encoding, AVCC
 chunk framing, MJPEG fallback encoding, and browser-side AVCC demux/decoding
 logic.
 
+SimTool's iPhone Duo support adapts serve-sim's foldable work (at commit
+`a30d70a`): choosing the framebuffer to stream from the device type's own
+screen sizes (`Tool/Sources/SimToolStream/FramebufferSurfaceSelector.swift`).
+Facts learned from serve-sim — the panels' sizes and names — are used as facts.
+
 `serve-sim` is licensed under the Apache License, Version 2.0. Copyright
 belongs to the original contributors. Modified portions are used under the
 terms of Apache-2.0.

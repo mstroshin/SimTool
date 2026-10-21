@@ -81,6 +81,9 @@ public final class StreamServer: @unchecked Sendable {
     private let testRuns: TestRunController
     /// What was done to the device and by whom, for the viewer's activity feed.
     private let activity = DeviceActivityLog()
+    /// The device's screens and the lit one, once its device type is read.
+    private let displays = DeviceDisplays()
+    private var displayMonitor: DisplayStateMonitor?
     /// OSLog category that, by convention, carries a crash summary of the previous run (apps can
     /// only write it after relaunching - crash handlers cannot safely log at crash time).
     private static let crashReportCategory = "Crash"
@@ -111,10 +114,12 @@ public final class StreamServer: @unchecked Sendable {
     public init(config: StreamServerConfig) {
         self.config = config
         self.server = SameOriginHttpServer(policy: SameOriginPolicy(serverHost: config.host))
+        let displays = displays
         self.testSessions = TestSessionController(
             store: TestSessionStore(root: config.testSessionsRoot),
             device: config.device,
-            makeRecorder: { SimctlVideoRecorder() }
+            // A foldable's recording follows the screen lit when it starts.
+            makeRecorder: { SimctlVideoRecorder(display: { displays.activeDisplay?.id }) }
         )
         self.testRuns = TestRunController(
             testsRoot: config.testsRoot,
@@ -135,10 +140,37 @@ public final class StreamServer: @unchecked Sendable {
         try server.start(config.port, forceIPv4: true, priority: .userInteractive)
         if config.captureEnabled {
             try frameCapture.start(deviceUDID: config.device.udid, onFrame: frameHandler)
+            Task { await self.loadDisplays() }
         }
     }
 
+    /// Reads which screens the device has. A foldable is then watched for the
+    /// screen it lights, and the stream follows it.
+    private func loadDisplays() async {
+        var deviceType = config.device.deviceTypeIdentifier
+        if deviceType == nil {
+            deviceType = (try? await SimulatorDeviceClient.listDevices())?.first { $0.udid == config.device.udid }?.deviceTypeIdentifier
+        }
+        guard let deviceType, let layout = await SimulatorDisplayLayout.load(deviceType: deviceType) else { return }
+        displays.set(layout: layout)
+        frameCapture.setScreens(layout.displays.map { ($0.width, $0.height) })
+        guard layout.isFoldable else { return }
+        let monitor = DisplayStateMonitor(deviceUDID: config.device.udid, layout: layout) { [weak self] state in
+            self?.displayStateChanged(state)
+        }
+        stateLock.withLock { displayMonitor = monitor }
+        monitor.start()
+    }
+
+    private func displayStateChanged(_ state: SimulatorDisplayState) {
+        guard displays.set(state: state), let layout = displays.current.layout else { return }
+        let lit = layout.display(named: state.active)
+        frameCapture.setScreens(layout.displays.map { ($0.width, $0.height) }, preferred: lit.map { ($0.width, $0.height) })
+        inspectorEvents.publish(.device, displays.topic)
+    }
+
     public func stop() {
+        stateLock.withLock { displayMonitor }?.stop()
         inspectorEvents.closeAll()
         testDefinitionsWatcher?.stop()
         testDefinitionsWatcher = nil
@@ -625,9 +657,16 @@ public final class StreamServer: @unchecked Sendable {
             if let maxDimension, maxDimension <= 0 {
                 return self.errorResponse(SimToolError("maxDim must be positive"), statusCode: 400, reason: "Bad Request")
             }
+            // A foldable's screenshot is of the lit screen unless `display` names another.
+            let display: SimulatorDisplay?
+            do {
+                display = try self.displays.display(named: request.queryValue("display")?.removingPercentEncoding)
+            } catch {
+                return self.errorResponse(error, statusCode: 400, reason: "Bad Request")
+            }
             do {
                 let data = try self.waitForAsync {
-                    try await SimulatorScreenshotClient.png(deviceUDID: self.config.device.udid, maxDimension: maxDimension)
+                    try await SimulatorScreenshotClient.png(deviceUDID: self.config.device.udid, display: display?.id, maxDimension: maxDimension)
                 }
                 return self.dataResponse(data, contentType: "image/png")
             } catch {
@@ -714,7 +753,8 @@ public final class StreamServer: @unchecked Sendable {
             activity: {
                 let page = activity.query(since: nil)
                 return ActivityTopicPayload(entries: page.entries, revision: page.revision)
-            }()
+            }(),
+            device: displays.topic
         )
     }
 
@@ -802,7 +842,10 @@ public final class StreamServer: @unchecked Sendable {
             testSessionsPath: config.testSessionsRoot.path,
             instanceId: inspectorEvents.instanceId,
             runtime: config.device.runtime,
-            version: SimToolVersion.current
+            version: SimToolVersion.current,
+            deviceType: displays.current.layout?.deviceType ?? config.device.deviceTypeIdentifier,
+            displays: displays.current.layout == nil ? nil : displays.payloads,
+            activeDisplay: displays.activeDisplay?.id
         )
     }
 

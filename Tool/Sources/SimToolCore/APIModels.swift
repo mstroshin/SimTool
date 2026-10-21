@@ -136,6 +136,12 @@ public struct ServerConfigPayload: Codable, Equatable, Sendable {
     public var runtime: String?
     /// The serving simtool's version.
     public var version: String?
+    /// The device type, e.g. `com.apple.CoreSimulator.SimDeviceType.iPhone-Duo`.
+    public var deviceType: String?
+    /// The device's screens — two on a foldable — as they read right now.
+    public var displays: [ServerDisplayPayload]?
+    /// The lit screen's id, the one the stream shows and touches land on.
+    public var activeDisplay: String?
 
     public init(
         device: String,
@@ -148,7 +154,10 @@ public struct ServerConfigPayload: Codable, Equatable, Sendable {
         testSessionsPath: String? = nil,
         instanceId: String? = nil,
         runtime: String? = nil,
-        version: String? = nil
+        version: String? = nil,
+        deviceType: String? = nil,
+        displays: [ServerDisplayPayload]? = nil,
+        activeDisplay: String? = nil
     ) {
         self.device = device
         self.udid = udid
@@ -161,6 +170,52 @@ public struct ServerConfigPayload: Codable, Equatable, Sendable {
         self.instanceId = instanceId
         self.runtime = runtime
         self.version = version
+        self.deviceType = deviceType
+        self.displays = displays
+        self.activeDisplay = activeDisplay
+    }
+}
+
+/// One screen of the device as `/config` and the `device` event describe it:
+/// what it is, and how its picture reads right now.
+public struct ServerDisplayPayload: Codable, Equatable, Sendable {
+    /// simctl's name (`primary`, `primary-1`): what `?display=` takes.
+    public var id: String
+    /// `cover` or `inner` on a foldable.
+    public var role: String?
+    public var screenID: Int
+    /// The framebuffer, in pixels: what the stream carries for this screen.
+    public var width: Int
+    public var height: Int
+    public var scale: Double
+    /// Degrees clockwise the picture is turned from the framebuffer.
+    public var rotation: Int
+    /// The screen in points as its picture reads — the space taps use.
+    public var points: SimulatorScreenSize
+    /// Corner radii in points, clockwise from the picture's top-left.
+    public var cornerRadii: [Double]?
+    public var active: Bool
+
+    public init(display: SimulatorDisplay, rotation: Int, active: Bool) {
+        id = display.id
+        role = display.role
+        screenID = display.screenID
+        width = display.width
+        height = display.height
+        scale = display.scale
+        self.rotation = rotation
+        points = display.points(rotation: rotation)
+        cornerRadii = display.cornerRadii(rotation: rotation)
+        self.active = active
+    }
+
+    /// Every screen of `layout`, lit and turned as `state` says. A one-screen
+    /// device's screen is always lit and never turned.
+    public static func all(layout: SimulatorDisplayLayout, state: SimulatorDisplayState?) -> [ServerDisplayPayload] {
+        layout.displays.map { display in
+            let active = layout.isFoldable ? state?.active == display.id : true
+            return ServerDisplayPayload(display: display, rotation: state?.rotation(of: display.id) ?? 0, active: active)
+        }
     }
 }
 

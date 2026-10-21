@@ -164,12 +164,16 @@ struct Doctor: AsyncParsableCommand {
         async let simctl = check(executable: "/usr/bin/xcrun", arguments: ["--find", "simctl"])
         async let axe = check(executable: "/usr/bin/which", arguments: ["axe"])
         let developerDir = DeveloperFrameworks.developerDir()
-        let checks = [
+        var checks = [
             ToolCheck(name: "simctl", available: await simctl.available, detail: await simctl.detail),
             ToolCheck(name: "axe", available: await axe.available, detail: await axe.detail),
             framework(named: "CoreSimulator", developerDir: developerDir),
             framework(named: "SimulatorKit", developerDir: developerDir),
         ]
+        // Foldables: a runtime that runs one, and Device Hub's hold on each booted one's input.
+        var foldable = [await FoldableReadiness.runtimeCheck()]
+        foldable += await FoldableReadiness.inputChecks(for: (try? await SimulatorDeviceClient.listDevices()) ?? [])
+        checks += foldable.map { ToolCheck(name: $0.name, available: $0.available, detail: $0.detail) }
         if common.json {
             try printJSON(["checks": checks])
         } else {
