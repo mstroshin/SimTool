@@ -204,6 +204,32 @@ final class TestDefinitionParserTests: XCTestCase {
         }
     }
 
+    // The camera shows a file from launch, a step changes it or turns it off;
+    // the Mac's webcam has no place in a test.
+    func testParsesTheCamera() throws {
+        let test = try TestDefinitionParser.parse("""
+        camera: fixtures/code.png
+        steps:
+          - camera: fixtures/card.mov
+          - camera: off
+        """)
+        XCTAssertEqual(test.camera, "fixtures/code.png")
+        XCTAssertEqual(test.steps.map(\.action), [.camera("fixtures/card.mov"), .camera("off")])
+        XCTAssertEqual(test.steps.map(\.description), ["Camera: card.mov", "Camera off"])
+        XCTAssertTrue(test.usesCamera)
+        XCTAssertTrue(try TestDefinitionParser.parse("steps:\n  - camera: code.jpg\n").usesCamera, "a step alone launches the app with the camera")
+        XCTAssertFalse(try TestDefinitionParser.parse("steps:\n  - wait: 1\n").usesCamera)
+        for (yaml, expected) in [
+            ("steps:\n  - camera: webcam\n", "a test cannot use the Mac"),
+            ("steps:\n  - camera: notes.txt\n", "`camera:` takes an image"),
+            ("camera: off\nsteps:\n  - wait: 1\n", "leave it out for no camera"),
+        ] {
+            XCTAssertThrowsError(try TestDefinitionParser.parse(yaml), yaml) { error in
+                XCTAssertTrue("\(error)".contains(expected), "\(yaml) → \(error)")
+            }
+        }
+    }
+
     func testLongPressDurationIsOptional() throws {
         let test = try TestDefinitionParser.parse("""
         steps:

@@ -378,7 +378,13 @@ public final class SimulatorLogCapture: @unchecked Sendable {
 
     private func startStdout(bundleID: String) throws {
         let arguments = ["simctl", "launch", "--console-pty", "--terminate-running-process", options.deviceUDID, bundleID]
-        try spawn(arguments: arguments, onLine: { [weak self] line in self?.emitStdout(line: line) })
+        // This launch is the app's: with the simulator's camera on, it has the camera.
+        let camera = SimulatorCamera.launchEnvironment(deviceUDID: options.deviceUDID)
+        try spawn(
+            arguments: arguments,
+            environment: camera.isEmpty ? nil : SimulatorAppLifecycleClient.simctlChildEnvironment(launchEnvironment: camera),
+            onLine: { [weak self] line in self?.emitStdout(line: line) }
+        )
     }
 
     private func emitStdout(line: String) {
@@ -388,10 +394,11 @@ public final class SimulatorLogCapture: @unchecked Sendable {
 
     // MARK: - Process plumbing
 
-    private func spawn(arguments: [String], onLine: @escaping @Sendable (String) -> Void) throws {
+    private func spawn(arguments: [String], environment: [String: String]? = nil, onLine: @escaping @Sendable (String) -> Void) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
         process.arguments = arguments
+        if let environment { process.environment = environment }
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()

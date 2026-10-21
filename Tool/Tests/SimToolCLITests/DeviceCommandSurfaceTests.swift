@@ -64,6 +64,17 @@ final class DeviceCommandSurfaceTests: XCTestCase {
         XCTAssertNil(try Input.Rotate.parse([]).orientation)
     }
 
+    func testTheCameraTakesAFileTheWebcamOffOrNothing() throws {
+        let names = SimTool.configuration.subcommands.map { $0.configuration.commandName ?? "" }
+        XCTAssertTrue(names.contains("camera"))
+        XCTAssertNil(try Camera.parse([]).source)
+        XCTAssertEqual(try Camera.parse(["fixtures/code.png"]).source, "fixtures/code.png")
+        let webcam = try Camera.parse(["webcam", "--camera", "iPhone"])
+        XCTAssertEqual(webcam.source, "webcam")
+        XCTAssertEqual(webcam.camera, "iPhone")
+        XCTAssertThrowsError(try Camera.parse(["code.png", "--camera", "iPhone"]), "--camera goes with webcam")
+    }
+
     func testALocationTakesAnActionAndItsPoints() throws {
         let route = try Location.parse(["route", "1,2", "3,4", "--speed", "15"])
         XCTAssertEqual(route.action, "route")

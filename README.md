@@ -204,6 +204,8 @@ swift run simtool permissions deny notifications --app com.example.MyApp   # gra
 swift run simtool keychain add-root-cert ~/Downloads/proxy-ca.pem   # add-cert | reset
 swift run simtool app info --app com.example.MyApp --reveal data     # the card; --reveal bundle|data opens Finder
 swift run simtool app install Build/MyApp.ipa     # an .app, an .ipa, or a tar of an .app
+swift run simtool camera fixtures/code.png        # the camera shows an image; a .mov/.mp4 loops
+swift run simtool camera webcam                   # the Mac's camera (--camera <name>); off; env
 ```
 
 The colours are the guest render server's own debug options, which CoreSimulator
@@ -351,6 +353,23 @@ turns the device left (⌘←; ⌘→ turns it right), and the stream, touches,
 accessibility frames and screenshots follow the turned picture. Files dropped
 on the screen go where Simulator.app sent them: images and videos to Photos, an
 `.app` bundle or an `.ipa` installed on the device.
+
+**The camera.** The simulator has none, so SimTool gives one to the apps it
+launches — `simtool app launch`, `simtool run`, the viewer's Launch and
+Relaunch, test runs: it loads a small library of its own into the app
+(`DYLD_INSERT_LIBRARIES`, built for the simulator on first use) that answers
+AVFoundation's camera with a back and a front camera whose picture is an image,
+a video played in a loop, or the Mac's webcam. Previews
+(`AVCaptureVideoPreviewLayer`), video frames (`AVCaptureVideoDataOutput`, in
+the pixel format the app asks for), photos (`AVCapturePhotoOutput`), QR and
+barcode scanning (`AVCaptureMetadataOutput`, read with Vision) and
+`UIImagePickerController`'s camera all see it. A new picture reaches running
+apps at once; an app launched while the camera was off gets it at its next
+launch. The Device tab's Camera section takes an image or a video, or the
+Mac's camera, and lists the apps that have it; the server runs the webcam
+(macOS asks once, for the app that started simtool). An app run from Xcode
+gets the camera with the variables `simtool camera env` prints, in its scheme's
+environment.
 
 The **Accessibility** tab shows the served accessibility tree, with anonymous
 containers folded away, and picks elements on the screen: the picked element is
@@ -1130,6 +1149,15 @@ file's bytes in base64). `GET /api/v1/app` is the app's card — `installed`,
 (`{"bundleId", "what": "bundle"|"data"}`) shows one in the Finder of the Mac the
 server runs on; `POST /api/v1/app/install` installs the build in the body — an
 `.ipa`, or a tar of an `.app` — and answers its `bundleId` and `name`.
+
+`GET /api/v1/camera` is the simulator's camera: `source` (`none`, `image`,
+`video`, `webcam`), `name` (the file's, or the Mac camera's), `apps` (each with
+`bundleId`, `pid`, `running` — whether it captures now) and `macCameras` (`id`,
+`name`). `POST /api/v1/camera` takes an image or a video as the raw body, typed
+by `Content-Type` or `X-SimTool-Filename`; `POST /api/v1/camera/webcam`
+(`{"camera": id or a part of the name}`, optional) captures the Mac's camera
+until another source or `DELETE /api/v1/camera`, which turns it off. Each
+answers the new state.
 
 `/api/v1/input/stream` is the viewer's live finger and keyboard: a WebSocket
 taking one JSON frame per touch event, `{"t": "down"|"move"|"up", "x": 0.5,

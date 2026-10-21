@@ -73,6 +73,9 @@ function deviceSettingCommands() {
     ["Settings", "battery", "Status bar: clear the overrides", "", () => statusBarPreset("clear")],
     ["Settings", "pin", "Clear the simulated location", "", clearLocation],
     ["Settings", "bell", "Send a push notification…", "", () => { openTab("device"); pushPayload.focus(); }],
+    ["Settings", "camera", "Camera: show an image or a video…", "", () => cameraFile.click()],
+    ["Settings", "camera", "Camera: the Mac's camera", "", () => useMacCamera("")],
+    ...(camera.data && camera.data.source !== "none" ? [["Settings", "camera", "Camera: turn off", "", cameraOff]] : []),
     ["Settings", "key", "Keychain: add a root certificate…", "", () => certificateFile.click()],
     ["Settings", "trash", "Keychain: reset", "", resetKeychain]
   ];

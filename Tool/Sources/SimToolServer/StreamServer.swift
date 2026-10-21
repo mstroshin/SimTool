@@ -90,6 +90,8 @@ public final class StreamServer: @unchecked Sendable {
     private var displayMonitor: DisplayStateMonitor?
     private var foldMonitor: FoldMonitor?
     private var orientationMonitor: OrientationMonitor?
+    /// The Mac's webcam, while it is the simulator's camera.
+    private var cameraFeed: MacCameraFeed?
     /// A foldable's 3D preview, rendered while a viewer watches it.
     private var duo3D: Duo3DStream?
     /// The fold last told to the activity feed, and a viewer update or a
@@ -297,6 +299,11 @@ public final class StreamServer: @unchecked Sendable {
         stateLock.withLock { displayMonitor }?.stop()
         stateLock.withLock { foldMonitor }?.stop()
         stateLock.withLock { orientationMonitor }?.stop()
+        // A webcam this server ran stops with it: the apps would hold its last frame.
+        if let feed = stateLock.withLock({ cameraFeed }) {
+            feed.stop()
+            _ = try? SimulatorCamera.off(deviceUDID: config.device.udid)
+        }
         stateLock.withLock { duo3D }?.stop()
         inspectorEvents.closeAll()
         testDefinitionsWatcher?.stop()
@@ -432,6 +439,24 @@ public final class StreamServer: @unchecked Sendable {
             }
         }
         server.POST["/api/v1/app/install"] = { request in self.handleInstall(request) }
+        // The simulator's camera: an image or a video, the Mac's webcam, or off.
+        server.GET["/api/v1/camera"] = { _ in
+            do { return try self.jsonEncodedResponse(self.cameraState()) } catch { return self.errorResponse(error) }
+        }
+        server.POST["/api/v1/camera"] = { request in self.handleCameraFile(request) }
+        server.POST["/api/v1/camera/webcam"] = { request in self.handleWebcam(request) }
+        server.DELETE["/api/v1/camera"] = { request in
+            do {
+                let udid = self.config.device.udid
+                _ = try self.recordingActivity(of: request, kind: "camera", title: "Camera off") {
+                    self.stopCameraFeed()
+                    return try SimulatorCamera.off(deviceUDID: udid)
+                }
+                return try self.jsonEncodedResponse(self.cameraState())
+            } catch {
+                return self.errorResponse(error, statusCode: 400, reason: "Bad Request")
+            }
+        }
         server.POST["/api/v1/input/paste-image"] = { request in self.handlePasteImage(request) }
         server.POST["/api/v1/photos"] = { request in self.handleAddToPhotos(request) }
 
@@ -1156,6 +1181,85 @@ public final class StreamServer: @unchecked Sendable {
         }
     }
 
+    // MARK: - the simulator's camera
+
+    private func cameraState() -> SimulatorCameraState {
+        var state = SimulatorCamera.state(deviceUDID: config.device.udid)
+        state.macCameras = MacCameraFeed.cameras()
+        return state
+    }
+
+    private func stopCameraFeed() {
+        let feed = stateLock.withLock {
+            defer { cameraFeed = nil }
+            return cameraFeed
+        }
+        feed?.stop()
+    }
+
+    /// One camera change as an activity: its title names the new source, its
+    /// detail which apps see it — an app launched while the camera was off
+    /// gets it only at its next launch through SimTool.
+    private func cameraActivity(of request: HttpRequest, title: String, _ body: () throws -> SimulatorCameraState) throws -> SimulatorCameraState {
+        let (actor, via) = activityActor(of: request)
+        let entry = activity.begin(actor: actor, via: via, kind: "camera", title: title)
+        do {
+            let state = try body()
+            activity.update(id: entry.id) { entry in
+                entry.title = "Camera: " + state.summary
+                entry.detail = state.apps.isEmpty
+                    ? "No app has it yet: an app gets it when SimTool launches it — relaunch \(self.config.defaultLogApp ?? "the app")"
+                    : state.apps.map(\.bundleId).joined(separator: ", ") + " sees it"
+            }
+            activity.finish(id: entry.id)
+            return state
+        } catch {
+            activity.finish(id: entry.id, error: error.localizedDescription)
+            throw error
+        }
+    }
+
+    /// An image or a video in the body becomes the camera's picture.
+    private func handleCameraFile(_ request: HttpRequest) -> HttpResponse {
+        do {
+            let file = try receiveMedia(request, accepting: [.image, .video])
+            defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+            let udid = config.device.udid
+            _ = try cameraActivity(of: request, title: "Camera: " + file.lastPathComponent) {
+                let state = try self.waitForAsync { try await SimulatorCamera.setFile(file, deviceUDID: udid) }
+                self.stopCameraFeed()
+                return state
+            }
+            return try jsonEncodedResponse(cameraState())
+        } catch {
+            return errorResponse(error, statusCode: 400, reason: "Bad Request")
+        }
+    }
+
+    /// The Mac's webcam — the one the body names (`{"camera": id or name}`),
+    /// else the default — becomes the camera's picture.
+    private func handleWebcam(_ request: HttpRequest) -> HttpResponse {
+        do {
+            let requested = request.body.isEmpty ? nil : try decodeJSON([String: String].self, from: request)["camera"]
+            let udid = config.device.udid
+            _ = try cameraActivity(of: request, title: "Camera: the Mac's camera") {
+                self.stopCameraFeed()
+                let feed = try self.waitForAsync { try await MacCameraFeed.start(camera: requested, deviceUDID: udid) }
+                do {
+                    let state = try self.waitForAsync { try await SimulatorCamera.setWebcam(name: feed.camera.name, deviceUDID: udid) }
+                    self.stateLock.withLock { self.cameraFeed = feed }
+                    return state
+                } catch {
+                    feed.stop()
+                    throw error
+                }
+            }
+            return try jsonEncodedResponse(cameraState())
+        } catch {
+            return errorResponse(error, statusCode: 400, reason: "Bad Request")
+        }
+    }
+
     /// The app a request names, or the server's own.
     private func bundleId(_ requested: String?) throws -> String {
         guard let bundleId = requested.flatMap({ $0.isEmpty ? nil : $0 }) ?? config.defaultLogApp else {
@@ -1646,7 +1750,13 @@ public final class StreamServer: @unchecked Sendable {
             guard let bundleId = input.name.flatMap({ $0.isEmpty ? nil : $0 }) ?? config.defaultLogApp else {
                 throw SimToolError("Launch requires an app bundle id: start the server with --app or pass name")
             }
-            return try await ProcessRunner.runXcrun(["simctl", "launch", "--terminate-running-process", config.device.udid, bundleId])
+            // With the simulator's camera on, the app is launched with it.
+            let camera = SimulatorCamera.launchEnvironment(deviceUDID: config.device.udid)
+            return try await ProcessRunner.run(
+                executable: URL(fileURLWithPath: "/usr/bin/xcrun"),
+                arguments: ["simctl", "launch", "--terminate-running-process", config.device.udid, bundleId],
+                environment: camera.isEmpty ? nil : SimulatorAppLifecycleClient.simctlChildEnvironment(launchEnvironment: camera)
+            )
         case "software-keyboard":
             guard let visible = input.visible else {
                 return try await SimulatorInputClient.toggleSoftwareKeyboard(deviceUDID: config.device.udid)

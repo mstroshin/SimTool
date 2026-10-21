@@ -165,7 +165,17 @@ public final class TestRunExecutor: @unchecked Sendable {
 
     // MARK: - run
 
+    /// Runs the test. A test that gives the app a camera leaves it off
+    /// afterwards when it was off before: the next run, or the person at the
+    /// viewer, should not find a picture someone else chose.
     public func run(_ test: TestDefinition) async -> TestRunResult {
+        guard test.usesCamera, let before = try? await client.camera() else { return await runStaged(test) }
+        let result = await runStaged(test)
+        if before.source == .none { _ = try? await client.cameraOff() }
+        return result
+    }
+
+    private func runStaged(_ test: TestDefinition) async -> TestRunResult {
         var criteria = test.criteria.map { TestCriterionResult(label: $0, status: .unchecked) }
         var failures: [TestStepFailure] = []
         var declaredMocks: [(id: String, method: String, strict: Bool)] = []
@@ -346,10 +356,35 @@ public final class TestRunExecutor: @unchecked Sendable {
             }
         }
 
+        // 6 — the camera, before the launch: the app takes it when it starts.
+        // A test that turns it on only in a step still launches the app with
+        // it, dark until then.
+        if test.usesCamera {
+            do {
+                _ = try await SimulatorCamera.injectorURL()
+                if let camera = test.camera {
+                    let file = TestRunner.cameraFile(camera, relativeTo: options.testFile?.deletingLastPathComponent())
+                    try await client.setCamera(file: file)
+                    await narrate("Camera: \(file.lastPathComponent)")
+                }
+            } catch {
+                return await finish(
+                    verdict: .infra,
+                    test: test,
+                    criteria: criteria,
+                    failures: failures,
+                    mocks: [],
+                    completedSteps: 0,
+                    session: session,
+                    infraReason: "Cannot set the camera: \(message(of: error))"
+                )
+            }
+        }
+
         // 6 — launch.
         if let app {
             do {
-                try await launchApp(app, launch: launch, udid: config.udid)
+                try await launchApp(app, launch: launch, udid: config.udid, camera: test.usesCamera)
                 launchedAt = Date()
                 await rearmLogCapture(app: app, udid: config.udid)
                 // The recorded launch, not the one used: the timeline is part of
@@ -403,11 +438,12 @@ public final class TestRunExecutor: @unchecked Sendable {
             // brings it back as it launched it, logs re-armed.
             relaunch: app.map { app in
                 { [self] in
-                    try await self.launchApp(app, launch: launch, udid: config.udid)
+                    try await self.launchApp(app, launch: launch, udid: config.udid, camera: test.usesCamera)
                     await self.rearmLogCapture(app: app, udid: config.udid)
                     await self.narrate("Relaunched \(app) after the permission change")
                 }
-            }
+            },
+            baseDirectory: options.testFile?.deletingLastPathComponent()
         )
         var completedSteps = 0
         var stagingFailed = false
@@ -577,7 +613,7 @@ public final class TestRunExecutor: @unchecked Sendable {
         return (used, recorded)
     }
 
-    private func launchApp(_ app: String, launch: ResolvedLaunch, udid: String) async throws {
+    private func launchApp(_ app: String, launch: ResolvedLaunch, udid: String, camera: Bool) async throws {
         var environment = launch.environment
         // Arming the loggers is what makes mock verification and network
         // evidence possible, so the run does it unless the test set the
@@ -594,7 +630,7 @@ public final class TestRunExecutor: @unchecked Sendable {
                 bundleIdentifier: app,
                 launchArguments: launch.arguments
             ),
-            environment: SimulatorAppLifecycleClient.simctlChildEnvironment(launchEnvironment: environment),
+            environment: SimulatorAppLifecycleClient.simctlChildEnvironment(launchEnvironment: SimulatorCamera.launchEnvironment(deviceUDID: udid, merging: environment, evenWhenOff: camera)),
             timeoutSeconds: 120
         )
         guard output.status == 0 else {

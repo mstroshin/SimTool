@@ -84,6 +84,9 @@ public struct TestDefinition: Equatable, Sendable {
     public var mocks: [TestMock]
     public var setup: [String]
     public var stepTimeout: Double
+    /// An image or a video the simulator's camera shows from launch, relative
+    /// to the test file.
+    public var camera: String?
     public var steps: [TestStep]
 
     public init(
@@ -98,6 +101,7 @@ public struct TestDefinition: Equatable, Sendable {
         mocks: [TestMock] = [],
         setup: [String] = [],
         stepTimeout: Double = 10,
+        camera: String? = nil,
         steps: [TestStep]
     ) {
         self.name = name
@@ -111,7 +115,13 @@ public struct TestDefinition: Equatable, Sendable {
         self.mocks = mocks
         self.setup = setup
         self.stepTimeout = stepTimeout
+        self.camera = camera
         self.steps = steps
+    }
+
+    /// The test gives the app a camera — from launch, or from a step on.
+    public var usesCamera: Bool {
+        camera != nil || steps.contains { if case .camera = $0.action { true } else { false } }
     }
 
     /// The variables a run substitutes, in precedence order: an explicit
@@ -389,13 +399,16 @@ public enum TestStepAction: Equatable, Sendable, CustomStringConvertible {
     case device(DeviceControlPayload)
     /// Turns the device: an orientation, or `left` / `right` a quarter.
     case rotate(String)
+    /// The camera's picture from here on: an image or a video relative to the
+    /// test file, or `off`.
+    case camera(String)
     case pause(Double)
 
     /// Whether this action checks a result, and so may carry a `criterion:`.
     public var isAssertion: Bool {
         switch self {
         case .waitFor, .assertHidden: true
-        case .tap, .longPress, .type, .swipe, .scroll, .fling, .drag, .keyboard, .pose, .device, .rotate, .pause: false
+        case .tap, .longPress, .type, .swipe, .scroll, .fling, .drag, .keyboard, .pose, .device, .rotate, .camera, .pause: false
         }
     }
 
@@ -417,6 +430,7 @@ public enum TestStepAction: Equatable, Sendable, CustomStringConvertible {
         case .pose(let pose): "Fold to \(pose)"
         case .device(let control): DeviceActivityWording.describe(control: control).title
         case .rotate(let orientation): DeviceActivityWording.describe(SimulatorInputPayload(action: "rotate", name: orientation), action: "rotate").title
+        case .camera(let source): source == "off" ? "Camera off" : "Camera: " + (source as NSString).lastPathComponent
         case .pause(let seconds): "Pause \(seconds.formatted())s"
         }
     }
@@ -582,7 +596,7 @@ public enum TestDefinitionParser {
 
         let knownKeys: Set<String> = [
             "name", "description", "kind", "reference", "app", "variables", "launch",
-            "reset", "mocks", "setup", "launchArguments", "timeout", "steps",
+            "reset", "mocks", "setup", "launchArguments", "timeout", "camera", "steps",
         ]
         if let unknown = dictionary.keys.first(where: { !knownKeys.contains($0) }) {
             throw SimToolError("Unknown test key `\(unknown)`. Known keys: \(knownKeys.sorted().joined(separator: ", ")).")
@@ -642,6 +656,11 @@ public enum TestDefinitionParser {
             mocks: try parseMocks(dictionary["mocks"]),
             setup: setup,
             stepTimeout: try dictionary["timeout"].map { try seconds($0, context: "timeout") } ?? 10,
+            camera: try dictionary["camera"].map { raw in
+                let file = try cameraSource(raw, context: "`camera`")
+                guard file != "off" else { throw SimToolError("`camera:` at the top names the image or the video the camera shows from launch; leave it out for no camera.") }
+                return file
+            },
             steps: steps
         )
     }
@@ -926,13 +945,29 @@ public enum TestDefinitionParser {
                 throw SimToolError("\(context): `rotate:` takes portrait, landscape-left, landscape-right, upside-down, left or right.")
             }
             action = .rotate(orientation.lowercased())
+        case "camera":
+            action = .camera(try cameraSource(value, context: context))
         default:
-            throw SimToolError("Step \(index + 1): unknown step `\(keyword)`. Known steps: tap, longPress, type, swipe, scroll, fling, drag, keyboard, pose, rotate, appearance, textSize, contrast, biometrics, push, location, statusBar, permission, waitFor, assertVisible, assertHidden, wait.")
+            throw SimToolError("Step \(index + 1): unknown step `\(keyword)`. Known steps: tap, longPress, type, swipe, scroll, fling, drag, keyboard, pose, rotate, camera, appearance, textSize, contrast, biometrics, push, location, statusBar, permission, waitFor, assertVisible, assertHidden, wait.")
         }
         if criterion != nil, !action.isAssertion {
             throw SimToolError("\(context): `criterion:` marks the assertion that checks the claim, so it belongs on assertVisible, assertHidden or waitFor — not on `\(keyword)`.")
         }
         return TestStep(action: action, criterion: criterion)
+    }
+
+    /// An image or a video file, or `off` (YAML reads a bare off as false).
+    /// The Mac's webcam has no place in a test: no two runs would see the same.
+    private static func cameraSource(_ value: Any, context: String) throws -> String {
+        let text = scalarString(value).trimmingCharacters(in: .whitespacesAndNewlines)
+        if ["off", "false", "none", "no"].contains(text.lowercased()) { return "off" }
+        if text.lowercased() == "webcam" {
+            throw SimToolError("\(context): a test cannot use the Mac's webcam — no two runs would see the same picture. Give it an image or a video.")
+        }
+        guard SimulatorCamera.sourceKind(ofFile: text) != nil else {
+            throw SimToolError("\(context): `camera:` takes \(SimulatorCamera.acceptedFiles) relative to the test file, or off.")
+        }
+        return text
     }
 
     // MARK: - the device's settings

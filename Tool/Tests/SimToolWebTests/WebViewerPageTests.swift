@@ -86,6 +86,24 @@ final class WebViewerPageTests: XCTestCase {
             XCTAssertTrue(page.contains(route), "missing \(route)")
         }
         XCTAssertTrue(page.contains(#"action: "rotate", name"#), "a turn goes as input")
+        let config = try XCTUnwrap(page.range(of: "function applyConfig(config) {"))
+        XCTAssertTrue(page[config.upperBound...].prefix(3000).contains(#"if (activeTab("device")) loadDeviceSettings();"#), "a tab open before the config came reads the app's card then")
+    }
+
+    // The camera is changed as the viewer, so it lands in Activity as a person's;
+    // a camera the app has not taken yet offers a relaunch.
+    func testTheDeviceTabSetsTheCamera() throws {
+        XCTAssertTrue(page.contains(#"apiJSON("/api/v1/camera")"#))
+        let change = try XCTUnwrap(page.range(of: "async function changeCamera("))
+        let body = page[change.upperBound...].prefix(500)
+        XCTAssertTrue(body.contains("manualInputAllowed("))
+        XCTAssertTrue(body.contains(#""X-SimTool-Source": "viewer""#))
+        XCTAssertTrue(page.contains(#""X-SimTool-Filename": encodeURIComponent(file.name)"#))
+        XCTAssertTrue(page.contains(#""/api/v1/camera/webcam", { method: "POST""#))
+        XCTAssertTrue(page.contains(#""/api/v1/camera", { method: "DELETE" }"#))
+        XCTAssertTrue(page.contains(#"devSection("Camera","#))
+        XCTAssertTrue(page.contains(#"cameraRelaunch.hidden = !on || !deviceInfo.app"#))
+        XCTAssertTrue(page.contains(#""Camera: the Mac's camera", "", () => useMacCamera("")"#), "the palette has it")
     }
 
     // Device sits after Accessibility; the ⌥ keys stay each tab's own, so

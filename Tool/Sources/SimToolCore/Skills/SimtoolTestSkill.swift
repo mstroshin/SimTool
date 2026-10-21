@@ -198,6 +198,7 @@ extension AgentSkill {
         setup:                         # escape hatch: shell before launch
           - xcrun simctl spawn {udid} defaults delete …  # {udid} {app} {server} substituted; exits recorded, never fatal
         timeout: 10                    # default per-step wait, seconds
+        camera: fixtures/code.png      # the simulator's camera shows this from launch: an image or a video (looped), relative to this file
         steps:
           - waitFor: { id: settingsButton, timeout: 20 }
           - tap: { id: settingsButton }
@@ -218,6 +219,7 @@ extension AgentSkill {
           - statusBar: clean           # 9:41, full Wi-Fi, charged — or { time: "9:41", batteryLevel: 20 } or clear
           - permission: { camera: deny }          # one permission of the test's app: grant | deny | reset (location: always)
           - rotate: landscape-left     # portrait | landscape-left | landscape-right | upside-down | left | right
+          - camera: fixtures/card.mov  # what the camera shows from here on, or off
           - assertVisible: { text: "Welcome", criterion: AC-1 }   # alias of waitFor
           - assertHidden: { label: "Loading" }
           - wait: 2                    # escape hatch; prefer waitFor / assertHidden
@@ -253,6 +255,16 @@ extension AgentSkill {
         stay changed after the run: a test that sets one puts it back in its last steps
         (`appearance: light`, `statusBar: clear`, `location: clear`), or the next test
         starts in its state.
+
+        **The camera is a file.** The simulator has no camera; SimTool gives the app
+        one — previews, video frames, photos, QR and barcode scanning, the image
+        picker's camera — that shows an image or a video in a loop. `camera:` at the
+        top shows a file from launch; a `camera:` step changes the picture mid-run (the
+        next code to scan), or turns it `off`. Keep the files next to the test
+        (`fixtures/`), so the test carries them. The app must be launched by the run
+        for the camera to reach it — it is, whenever the test uses `camera:` — and a
+        camera that was off before the run is off after it. The Mac's webcam is
+        refused: no two runs would see the same picture.
 
         **Only assertions may carry `criterion:`** (`assertVisible`, `waitFor`,
         `assertHidden`). On a `tap:` it is a parse error. Two more the parser refuses,

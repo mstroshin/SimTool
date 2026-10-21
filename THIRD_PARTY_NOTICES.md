@@ -36,6 +36,11 @@ where SpringBoard keeps notification permission. The layout of the
 device-orientation GraphicsServices event is the one facebook/idb (MIT)
 documents.
 
+The simulated camera (`SimulatorCamera.swift`, the library it builds and loads
+into an app, and `MacCameraFeed.swift`) is SimTool's own code. The approach —
+a library inserted at launch that answers AVFoundation's camera with a picture
+the host provides — is the one serve-sim takes; no serve-sim code is used.
+
 `serve-sim` is licensed under the Apache License, Version 2.0. Copyright
 belongs to the original contributors. Modified portions are used under the
 terms of Apache-2.0.

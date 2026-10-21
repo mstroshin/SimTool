@@ -39,6 +39,7 @@ struct SimTool: AsyncParsableCommand {
             Settings.self,
             Permissions.self,
             Keychain.self,
+            Camera.self,
             AppCommand.self,
             TestCommand.self,
             Run.self,
@@ -1576,6 +1577,8 @@ struct TestCommand: AsyncParsableCommand {
               setup:                          # optional; shell commands run before launch,
                 - xcrun simctl spawn {udid} … #   {udid}/{app}/{server} substituted, exits recorded
               timeout: 10                     # default per-step wait, seconds
+              camera: fixtures/code.png       # optional; what the camera shows from launch,
+                                              #   an image or a video, relative to the file
               steps:
                 - waitFor: { id: settingsButton, timeout: 20 }
                 - tap: { id: settingsButton }
@@ -1593,6 +1596,7 @@ struct TestCommand: AsyncParsableCommand {
                 - statusBar: clean            # or { time: "9:41", batteryLevel: 20 } or clear
                 - permission: { camera: deny }     # grant | deny | reset; relaunches an app it ended
                 - rotate: landscape-left      # or right / left: a quarter turn
+                - camera: fixtures/card.mov   # a new picture from here on, or off
                 - assertVisible: { text: "Welcome", criterion: AC-1 }
                 - assertHidden: { label: "Loading" }
                 - wait: 2

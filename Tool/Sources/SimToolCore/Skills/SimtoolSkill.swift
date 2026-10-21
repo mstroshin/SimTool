@@ -366,6 +366,16 @@ extension AgentSkill {
           as iOS does; `notifications` resprings the simulator (~8 s, every app ends).
         - `simtool keychain add-root-cert <ca.pem>` — trust a proxy's CA (Proxyman,
           Charles, mitmproxy); `add-cert`, `reset`.
+        - `simtool camera <image|video>` · `webcam [--camera <name>]` · `off` — the
+          simulator has no camera; SimTool gives one to the apps **it launches**
+          (`simtool app launch`, `simtool run`, the viewer's Relaunch, test runs):
+          previews, video frames, photos, QR/barcode scanning and the image picker's
+          camera show the image, the video in a loop, or the Mac's webcam. A new
+          picture reaches running apps at once; an app launched while the camera was
+          off needs a relaunch. `simtool camera` prints the source and which apps have
+          it. The webcam runs in the server watching the device (without one, until
+          Ctrl+C); macOS asks once for camera access. `simtool camera env` prints the
+          variables for an Xcode scheme.
         - `simtool app info [--app …] [--reveal bundle|data]` — version, build, minimum
           iOS, pid, bundle and data-container paths, permissions; `--reveal` opens it in
           the Finder. `simtool app install <.app|.ipa>` installs a build.
@@ -373,7 +383,8 @@ extension AgentSkill {
         The same changes are `POST /api/v1/device` (`{"action": "appearance", "value":
         "dark"}`, …; `GET /api/v1/device` reads them), `POST /api/v1/input`
         (`{"action": "rotate", "name": "left"}`), `GET /api/v1/app` (the app card) and
-        YAML steps (`simtool-test`). In the viewer they are the Device tab (⌥7), the
+        YAML steps (`simtool-test`); the camera is `GET|POST|DELETE /api/v1/camera`
+        and `POST /api/v1/camera/webcam`. In the viewer they are the Device tab (⌥7), the
         toolbar's rotate button (⌘← / ⌘→), and a drop on the screen: images and videos
         go to Photos, an `.app` or `.ipa` is installed.
 

@@ -2,15 +2,18 @@
 // reports them — appearance, text size, accessibility, orientation, the render
 // server's debug colours, slow animations, Face ID or Touch ID, the status
 // bar, the location — with the controls that change them, the actions
-// Simulator.app kept in its menus (a memory warning, a push), and the app
-// under test: its card, its permissions, the keychain. A change goes to
-// POST /api/v1/device (a turn to /api/v1/input) and lands in Activity like any
+// Simulator.app kept in its menus (a memory warning, a push), the camera
+// SimTool gives the apps it launches, and the app under test: its card, its
+// permissions, the keychain. A change goes to POST /api/v1/device (a turn to
+// /api/v1/input, the camera to /api/v1/camera) and lands in Activity like any
 // other action; the tab reads the device again after it, while it is open,
 // and when Activity says something else changed a setting.
 
 const deviceSettings = { data: null, error: "", loaded: false, loading: null };
 // Activity kinds that change what this tab shows.
-const DEVICE_SETTING_KINDS = new Set(["appearance", "text-size", "contrast", "debug", "biometrics", "status-bar", "location", "accessibility", "rotate", "permission", "install", "keychain"]);
+const DEVICE_SETTING_KINDS = new Set(["appearance", "text-size", "contrast", "debug", "biometrics", "status-bar", "location", "accessibility", "rotate", "permission", "install", "keychain", "camera"]);
+// The camera: its source, the apps that have it, the Mac's cameras.
+const camera = { data: null, error: "" };
 const AX_SWITCHES = [
   ["reduce-motion", "reduceMotion", "Reduce Motion", "Apps replace zooms and slides with fades"],
   ["reduce-transparency", "reduceTransparency", "Reduce Transparency", "Blurs and translucent materials turn opaque"],
@@ -42,6 +45,7 @@ const TEXT_SIZES = [
 
 async function loadDeviceSettings() {
   loadAppCard();
+  loadCamera();
   if (deviceSettings.loading) return deviceSettings.loading;
   deviceSettings.loading = (async () => {
     try {
@@ -75,7 +79,11 @@ async function postDevice(payload, label) {
 
 // What Activity brings: a setting changed by an agent, a test or another viewer.
 function deviceActivitySeen(entries) {
-  if (activeTab("device") && entries.some((entry) => entry.status !== "running" && DEVICE_SETTING_KINDS.has(entry.kind))) loadDeviceSettings();
+  if (!activeTab("device")) return;
+  const done = entries.filter((entry) => entry.status !== "running");
+  if (done.some((entry) => DEVICE_SETTING_KINDS.has(entry.kind))) loadDeviceSettings();
+  // An app that starts or ends takes the camera with it.
+  else if (done.some((entry) => entry.kind === "launch" || entry.kind === "terminate")) loadCamera();
 }
 
 function setDebugOption(option, enabled) {
@@ -154,6 +162,48 @@ function resetKeychain() {
   });
 }
 
+async function loadCamera() {
+  try {
+    camera.data = await apiJSON("/api/v1/camera");
+    camera.error = "";
+  } catch (error) {
+    camera.error = error.message || String(error);
+  }
+  syncCamera();
+}
+
+// Sets the camera's picture: a file, the Mac's camera, or nothing.
+async function changeCamera(label, path, options) {
+  if (!manualInputAllowed(() => changeCamera(label, path, options))) return;
+  try {
+    const headers = { "X-SimTool-Source": "viewer", ...(options.headers || {}) };
+    camera.data = await apiJSON(path, { ...options, headers });
+    camera.error = "";
+    toast(label + (camera.data.source !== "none" && !camera.data.apps.length && deviceInfo.app ? " — relaunch " + deviceInfo.app + " to give it the camera" : ""));
+  } catch (error) {
+    fail(label + " failed", error);
+  }
+  syncCamera();
+}
+
+function setCameraFile(file) {
+  if (!file) return;
+  changeCamera("Camera: " + file.name, "/api/v1/camera", { method: "POST", body: file, headers: { "Content-Type": file.type || "application/octet-stream", "X-SimTool-Filename": encodeURIComponent(file.name) } });
+}
+
+function useMacCamera(id) {
+  toast("Starting the Mac's camera — macOS may ask to allow it");
+  changeCamera("Camera: the Mac's camera", "/api/v1/camera/webcam", { method: "POST", body: JSON.stringify(id ? { camera: id } : {}) });
+}
+
+function cameraOff() { changeCamera("Camera off", "/api/v1/camera", { method: "DELETE" }); }
+
+function cameraSummary(data) {
+  if (!data || data.source === "none") return "Off";
+  if (data.source === "webcam") return "Shows the Mac's " + (data.name || "camera");
+  return "Shows " + (data.name || "a file") + (data.source === "video" ? ", in a loop" : "");
+}
+
 function textSizeName(value) { const size = TEXT_SIZES.find(([name]) => name === value); return size ? size[1].split(" ")[0] : value; }
 function biometryName() { const kind = deviceSettings.data && deviceSettings.data.biometrics && deviceSettings.data.biometrics.kind; return kind === "touch" ? "Touch ID" : "Face ID"; }
 function biometryThing() { return biometryName() === "Touch ID" ? "finger" : "face"; }
@@ -215,6 +265,20 @@ const certificateAdd = el("button", { class: "btn btn-sm", type: "button", text:
 certificateAdd.addEventListener("click", () => certificateFile.click());
 const keychainReset = el("button", { class: "btn btn-sm btn-danger", type: "button", text: "Reset the keychain" });
 keychainReset.addEventListener("click", resetKeychain);
+
+const cameraNow = el("div", { class: "dev-row" });
+const cameraApps = el("div", { class: "dev-now" });
+const cameraFile = el("input", { type: "file", accept: "image/*,video/mp4,video/quicktime,.mov,.mp4,.m4v,.heic", hidden: true });
+cameraFile.addEventListener("change", () => { const file = cameraFile.files && cameraFile.files[0]; cameraFile.value = ""; setCameraFile(file); });
+const cameraPick = el("button", { class: "btn btn-sm", type: "button", text: "Image or video…", title: "The camera shows an image, or a video in a loop — a QR code, a document, a face" });
+cameraPick.addEventListener("click", () => cameraFile.click());
+const cameraMac = select([], "Mac camera");
+const cameraWebcam = el("button", { class: "btn btn-sm", type: "button", text: "Use the Mac's camera", title: "The server captures the Mac's camera; macOS asks once" });
+cameraWebcam.addEventListener("click", () => useMacCamera(cameraMac.value));
+const cameraOffButton = el("button", { class: "btn btn-sm", type: "button", text: "Turn off" });
+cameraOffButton.addEventListener("click", cameraOff);
+const cameraRelaunch = el("button", { class: "btn btn-sm btn-primary", type: "button", text: "Relaunch the app" });
+cameraRelaunch.addEventListener("click", () => relaunchApp());
 
 const debugSwitches = {};
 for (const [option, title, description] of DEBUG_OPTIONS) debugSwitches[option] = switchButton(title, description, (on) => setDebugOption(option, on));
@@ -317,6 +381,11 @@ const deviceBody = el("div", { class: "dev-body" },
     el("div", { class: "dev-inline" }, locationPoint, locationSet),
     field("Route", locationRoute),
     el("div", { class: "dev-actions" }, field("Speed, m/s", locationSpeed), locationStart, locationClear)),
+  devSection("Camera",
+    cameraNow,
+    cameraApps,
+    el("div", { class: "dev-actions" }, cameraPick, cameraOffButton, cameraRelaunch, cameraFile),
+    el("div", { class: "dev-inline" }, cameraMac, cameraWebcam)),
   devSection("Push notification",
     field("App", pushApp),
     field("Payload", pushPayload),
@@ -416,6 +485,33 @@ function syncAppCard(force) {
   }
 }
 
+// The camera SimTool gives the apps it launches: what it shows, who has it.
+function syncCamera() {
+  const data = camera.data;
+  cameraNow.textContent = camera.error ? "Could not read the camera: " + camera.error : cameraSummary(data);
+  const on = !!data && data.source !== "none";
+  const apps = (data && data.apps) || [];
+  const holders = apps.map((client) => client.bundleId + (client.running ? " (capturing)" : "")).join(", ");
+  cameraApps.textContent = !on
+    ? apps.length
+      ? holders + (apps.length === 1 ? " sees" : " see") + " black until the camera shows something again."
+      : "The apps SimTool launches get a back and a front camera showing an image, a video or the Mac's camera — previews, photos, code scanning."
+    : apps.length
+      ? holders + (apps.length === 1 ? " has it." : " have it.")
+      : "No app has it yet: an app gets the camera when SimTool launches it.";
+  cameraRelaunch.hidden = !on || !deviceInfo.app || apps.some((client) => client.bundleId === deviceInfo.app);
+  cameraOffButton.disabled = !on;
+  const cameras = (data && data.macCameras) || [];
+  const shown = JSON.stringify(cameras);
+  if (cameraMac.dataset.shown !== shown) {
+    cameraMac.dataset.shown = shown;
+    cameraMac.innerHTML = "";
+    for (const mac of cameras) cameraMac.append(el("option", { value: mac.id, text: mac.name }));
+    if (!cameras.length) cameraMac.append(el("option", { value: "", text: "This Mac has no camera" }));
+  }
+  cameraMac.disabled = cameraWebcam.disabled = !cameras.length;
+}
+
 function statusBarSummary(bar) {
   const parts = [];
   if (bar.time) parts.push(bar.time);
@@ -433,5 +529,6 @@ function locationSummary(location) {
   return "a route of " + points.length + " points" + (location.speed ? " at " + location.speed + " m/s" : "");
 }
 
-tabHandlers.device = { show() { syncDeviceSettings(); loadDeviceSettings(); } };
+tabHandlers.device = { show() { syncDeviceSettings(); syncCamera(); loadDeviceSettings(); } };
 syncDeviceSettings();
+syncCamera();
