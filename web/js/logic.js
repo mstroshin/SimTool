@@ -525,6 +525,38 @@ function axScreenFrame(tree) {
   return best;
 }
 
+// ---- A screen's picture on its framebuffer ----
+
+// How far to turn a decoded frame for the screen it shows: the screen's
+// rotation once the frame's shape is that screen's (a frame of the panel
+// before a fold, still in flight, is not turned).
+function frameRotation(frameWidth, frameHeight, display) {
+  if (!display || !display.rotation || !display.width || !display.height || !frameWidth || !frameHeight) return 0;
+  // The cover (0.687) and the inner panel (0.703) differ by little; the encoder rounds by less.
+  const sameShape = Math.abs(frameWidth / frameHeight - display.width / display.height) < 0.006;
+  return sameShape ? ((display.rotation % 360) + 360) % 360 : 0;
+}
+
+// The canvas transform that draws a frame turned clockwise by `rotation` into
+// a canvas of width × height, and the size to draw the untransformed frame at.
+function canvasTurn(rotation, width, height) {
+  switch (rotation) {
+    case 90: return { a: 0, b: 1, c: -1, d: 0, e: width, f: 0, width: height, height: width };
+    case 180: return { a: -1, b: 0, c: 0, d: -1, e: width, f: height, width, height };
+    case 270: return { a: 0, b: -1, c: 1, d: 0, e: 0, f: height, width: height, height: width };
+    default: return { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0, width, height };
+  }
+}
+
+// The screen's corner radii as CSS for a picture `cssWidth` wide: its points,
+// clockwise from the top-left as the picture reads.
+function screenRadius(display, cssWidth) {
+  const radii = display && display.cornerRadii, points = display && display.points;
+  if (!Array.isArray(radii) || radii.length !== 4 || !points || !points.width || !cssWidth) return "";
+  const scale = cssWidth / points.width;
+  return radii.map((radius) => Math.round(radius * scale) + "px").join(" ");
+}
+
 // ---- Theme ----
 
 // The theme a click on the theme button pins: the other one — or none, so the page

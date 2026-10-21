@@ -8,9 +8,12 @@ const canvasContext = canvas.getContext("2d", { alpha: false, desynchronized: tr
 const maxCanvasDPR = 1.5;
 
 const screenState = {
-  width: 0,         // stream size in pixels
+  width: 0,         // the picture's size in pixels (the stream's frame, turned as the screen reads)
   height: 0,
-  points: null,     // screen size in points, once known (AX root frame)
+  points: null,     // screen size in points, once known (/config, else the AX root frame)
+  display: null,    // the lit screen as /config describes it: id, rotation, points, cornerRadii
+  foldable: false,  // more than one screen: touches name the one shown
+  rotation: 0,      // degrees the frame on the canvas is turned (the lit screen's, once frames match it)
   connection: "connecting",  // connecting | live | reconnecting | offline
   attempt: 0,
   retryAt: 0,
@@ -87,10 +90,15 @@ function updateBacking() {
 }
 
 function paint(frame) {
-  const width = frame.displayWidth, height = frame.displayHeight;
-  if (width !== screenState.width || height !== screenState.height) {
+  // The stream carries the lit screen's framebuffer; a picture turned on it
+  // (the open inner panel of an iPhone Duo) is turned back upright here.
+  const rotation = frameRotation(frame.displayWidth, frame.displayHeight, screenState.display);
+  const quarter = rotation % 180 !== 0;
+  const width = quarter ? frame.displayHeight : frame.displayWidth, height = quarter ? frame.displayWidth : frame.displayHeight;
+  if (width !== screenState.width || height !== screenState.height || rotation !== screenState.rotation) {
     screenState.width = width;
     screenState.height = height;
+    screenState.rotation = rotation;
     $("placeholder").hidden = true;
     fitDevice();
     updateBacking();
@@ -100,7 +108,14 @@ function paint(frame) {
     canvas.width = backing.width;
     canvas.height = backing.height;
   }
-  canvasContext.drawImage(frame, 0, 0, backing.width, backing.height);
+  if (rotation === 0) {
+    canvasContext.drawImage(frame, 0, 0, backing.width, backing.height);
+  } else {
+    const turn = canvasTurn(rotation, backing.width, backing.height);
+    canvasContext.setTransform(turn.a, turn.b, turn.c, turn.d, turn.e, turn.f);
+    canvasContext.drawImage(frame, 0, 0, turn.width, turn.height);
+    canvasContext.setTransform(1, 0, 0, 1, 0, 0);
+  }
   const now = performance.now();
   frameTimes.push(now);
 }
@@ -239,8 +254,9 @@ function fitDevice() {
   const device = $("device");
   device.style.setProperty("--dev-w", Math.floor(width) + "px");
   device.style.setProperty("--dev-h", Math.floor(height) + "px");
-  // The screen's own corner radius, in proportion: ~55 pt on a 402 pt wide phone.
-  device.style.setProperty("--dev-radius", Math.round(width * 0.137) + "px");
+  // The screen's own corner radii from its device type, in proportion — the
+  // Duo's cover is tight on the hinge side; else ~55 pt on a 402 pt wide phone.
+  device.style.setProperty("--dev-radius", screenRadius(screenState.display, width) || Math.round(width * 0.137) + "px");
   updateBacking();
   updateReadoutSize();
   if (typeof drawRulers === "function") drawRulers();
@@ -253,6 +269,19 @@ function updateReadoutSize() {
 }
 
 new ResizeObserver(fitDevice).observe($("deviceArea"));
+
+// The device's screens from /config or the event stream's `device` topic: the
+// lit one sets the points, the corners and how its frames turn.
+function applyDisplays(displays, activeDisplay) {
+  if (!Array.isArray(displays) || !displays.length) return;
+  const lit = displays.find((display) => display.id === activeDisplay) || displays.find((display) => display.active) || displays[0];
+  screenState.foldable = displays.length > 1;
+  screenState.display = lit;
+  if (lit.points && lit.points.width && lit.points.height) screenState.points = { x: 0, y: 0, width: lit.points.width, height: lit.points.height };
+  touchStream.setDisplay(screenState.foldable ? lit.id : null);
+  fitDevice();
+  updateReadoutSize();
+}
 
 // Pointer position in points (or pixels until the point size is known).
 function pointerReadout(clientX, clientY) {

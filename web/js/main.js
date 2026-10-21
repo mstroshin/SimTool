@@ -27,6 +27,7 @@ function applyConfig(config) {
   $("sbServer").textContent = location.host;
   $("sbApp").textContent = deviceInfo.app || "No app attached";
   $("sbVersion").textContent = config.version ? "simtool " + config.version : "";
+  applyDisplays(config.displays, config.activeDisplay);
 }
 
 // A new server: everything numbered by the old one is stale.
@@ -57,7 +58,7 @@ async function bootstrap() {
 // The screen's size in points, for the pointer readout and the rulers; the
 // Accessibility tab refines it with the full tree.
 async function loadScreenPoints() {
-  if (screenState.points) return;
+  if (screenState.points || screenState.display) return;
   try {
     const flat = await apiJSON("/api/v1/ax/tree?format=flat");
     const root = (flat.nodes || []).find((node) => node.depth === 0 && Array.isArray(node.frame));

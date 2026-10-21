@@ -456,7 +456,9 @@ enum WebViewerAssets {
           };
           (tree.roots || []).forEach((root, index) => walk(root, null, 0, String(index)));
           ax.nodes = nodes;
-          const screen = axScreenFrame(tree);
+          // The server's own screen size wins: an iPhone Duo's app root keeps the
+          // cover's or a portrait frame while its children read the lit panel.
+          const screen = screenState.display ? null : axScreenFrame(tree);
           if (screen) {
             screenState.points = { width: screen.width, height: screen.height, x: screen.x, y: screen.y };
             updateReadoutSize();
@@ -1739,6 +1741,12 @@ enum WebViewerAssets {
           on("tests", (payload) => applyTestsTopic(payload, false));
           on("launches", (payload) => { applyLaunchesTopic(payload); renderSoon(renderNetwork); renderSoon(renderLogs); });
           on("activity", (payload) => applyActivityTopic(payload, false));
+          on("device", applyDeviceTopic);
+        }
+
+        // The device's screens changed: a foldable folded, or a screen turned.
+        function applyDeviceTopic(payload) {
+          if (payload && payload.displays) applyDisplays(payload.displays, payload.activeDisplay);
         }
 
         // Everything the server holds, in place of what the page had: the stream's
@@ -1752,6 +1760,7 @@ enum WebViewerAssets {
           applyStateTopic(snapshot.state || {}, true);
           applyTestsTopic(snapshot.tests || {}, true);
           applyActivityTopic(snapshot.activity || {}, true);
+          applyDeviceTopic(snapshot.device);
           // A restarted server captures the app's logs once asked again.
           ensureLogsCapture().catch(() => renderLogs());
         }
@@ -2944,6 +2953,38 @@ enum WebViewerAssets {
           return best;
         }
 
+        // ---- A screen's picture on its framebuffer ----
+
+        // How far to turn a decoded frame for the screen it shows: the screen's
+        // rotation once the frame's shape is that screen's (a frame of the panel
+        // before a fold, still in flight, is not turned).
+        function frameRotation(frameWidth, frameHeight, display) {
+          if (!display || !display.rotation || !display.width || !display.height || !frameWidth || !frameHeight) return 0;
+          // The cover (0.687) and the inner panel (0.703) differ by little; the encoder rounds by less.
+          const sameShape = Math.abs(frameWidth / frameHeight - display.width / display.height) < 0.006;
+          return sameShape ? ((display.rotation % 360) + 360) % 360 : 0;
+        }
+
+        // The canvas transform that draws a frame turned clockwise by `rotation` into
+        // a canvas of width × height, and the size to draw the untransformed frame at.
+        function canvasTurn(rotation, width, height) {
+          switch (rotation) {
+            case 90: return { a: 0, b: 1, c: -1, d: 0, e: width, f: 0, width: height, height: width };
+            case 180: return { a: -1, b: 0, c: 0, d: -1, e: width, f: height, width, height };
+            case 270: return { a: 0, b: -1, c: 1, d: 0, e: 0, f: height, width: height, height: width };
+            default: return { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0, width, height };
+          }
+        }
+
+        // The screen's corner radii as CSS for a picture `cssWidth` wide: its points,
+        // clockwise from the top-left as the picture reads.
+        function screenRadius(display, cssWidth) {
+          const radii = display && display.cornerRadii, points = display && display.points;
+          if (!Array.isArray(radii) || radii.length !== 4 || !points || !points.width || !cssWidth) return "";
+          const scale = cssWidth / points.width;
+          return radii.map((radius) => Math.round(radius * scale) + "px").join(" ");
+        }
+
         // ---- Theme ----
 
         // The theme a click on the theme button pins: the other one — or none, so the page
@@ -3436,6 +3477,7 @@ enum WebViewerAssets {
           $("sbServer").textContent = location.host;
           $("sbApp").textContent = deviceInfo.app || "No app attached";
           $("sbVersion").textContent = config.version ? "simtool " + config.version : "";
+          applyDisplays(config.displays, config.activeDisplay);
         }
 
         // A new server: everything numbered by the old one is stale.
@@ -3466,7 +3508,7 @@ enum WebViewerAssets {
         // The screen's size in points, for the pointer readout and the rulers; the
         // Accessibility tab refines it with the full tree.
         async function loadScreenPoints() {
-          if (screenState.points) return;
+          if (screenState.points || screenState.display) return;
           try {
             const flat = await apiJSON("/api/v1/ax/tree?format=flat");
             const root = (flat.nodes || []).find((node) => node.depth === 0 && Array.isArray(node.frame));
@@ -4492,9 +4534,12 @@ enum WebViewerAssets {
         const maxCanvasDPR = 1.5;
 
         const screenState = {
-          width: 0,         // stream size in pixels
+          width: 0,         // the picture's size in pixels (the stream's frame, turned as the screen reads)
           height: 0,
-          points: null,     // screen size in points, once known (AX root frame)
+          points: null,     // screen size in points, once known (/config, else the AX root frame)
+          display: null,    // the lit screen as /config describes it: id, rotation, points, cornerRadii
+          foldable: false,  // more than one screen: touches name the one shown
+          rotation: 0,      // degrees the frame on the canvas is turned (the lit screen's, once frames match it)
           connection: "connecting",  // connecting | live | reconnecting | offline
           attempt: 0,
           retryAt: 0,
@@ -4571,10 +4616,15 @@ enum WebViewerAssets {
         }
 
         function paint(frame) {
-          const width = frame.displayWidth, height = frame.displayHeight;
-          if (width !== screenState.width || height !== screenState.height) {
+          // The stream carries the lit screen's framebuffer; a picture turned on it
+          // (the open inner panel of an iPhone Duo) is turned back upright here.
+          const rotation = frameRotation(frame.displayWidth, frame.displayHeight, screenState.display);
+          const quarter = rotation % 180 !== 0;
+          const width = quarter ? frame.displayHeight : frame.displayWidth, height = quarter ? frame.displayWidth : frame.displayHeight;
+          if (width !== screenState.width || height !== screenState.height || rotation !== screenState.rotation) {
             screenState.width = width;
             screenState.height = height;
+            screenState.rotation = rotation;
             $("placeholder").hidden = true;
             fitDevice();
             updateBacking();
@@ -4584,7 +4634,14 @@ enum WebViewerAssets {
             canvas.width = backing.width;
             canvas.height = backing.height;
           }
-          canvasContext.drawImage(frame, 0, 0, backing.width, backing.height);
+          if (rotation === 0) {
+            canvasContext.drawImage(frame, 0, 0, backing.width, backing.height);
+          } else {
+            const turn = canvasTurn(rotation, backing.width, backing.height);
+            canvasContext.setTransform(turn.a, turn.b, turn.c, turn.d, turn.e, turn.f);
+            canvasContext.drawImage(frame, 0, 0, turn.width, turn.height);
+            canvasContext.setTransform(1, 0, 0, 1, 0, 0);
+          }
           const now = performance.now();
           frameTimes.push(now);
         }
@@ -4723,8 +4780,9 @@ enum WebViewerAssets {
           const device = $("device");
           device.style.setProperty("--dev-w", Math.floor(width) + "px");
           device.style.setProperty("--dev-h", Math.floor(height) + "px");
-          // The screen's own corner radius, in proportion: ~55 pt on a 402 pt wide phone.
-          device.style.setProperty("--dev-radius", Math.round(width * 0.137) + "px");
+          // The screen's own corner radii from its device type, in proportion — the
+          // Duo's cover is tight on the hinge side; else ~55 pt on a 402 pt wide phone.
+          device.style.setProperty("--dev-radius", screenRadius(screenState.display, width) || Math.round(width * 0.137) + "px");
           updateBacking();
           updateReadoutSize();
           if (typeof drawRulers === "function") drawRulers();
@@ -4737,6 +4795,19 @@ enum WebViewerAssets {
         }
 
         new ResizeObserver(fitDevice).observe($("deviceArea"));
+
+        // The device's screens from /config or the event stream's `device` topic: the
+        // lit one sets the points, the corners and how its frames turn.
+        function applyDisplays(displays, activeDisplay) {
+          if (!Array.isArray(displays) || !displays.length) return;
+          const lit = displays.find((display) => display.id === activeDisplay) || displays.find((display) => display.active) || displays[0];
+          screenState.foldable = displays.length > 1;
+          screenState.display = lit;
+          if (lit.points && lit.points.width && lit.points.height) screenState.points = { x: 0, y: 0, width: lit.points.width, height: lit.points.height };
+          touchStream.setDisplay(screenState.foldable ? lit.id : null);
+          fitDevice();
+          updateReadoutSize();
+        }
 
         // Pointer position in points (or pixels until the point size is known).
         function pointerReadout(clientX, clientY) {
@@ -5342,6 +5413,7 @@ enum WebViewerAssets {
           let frameScheduled = false;
           let retryMs = 250;
           let closed = false;
+          let display = null;   // the screen shown, on a device with several
 
           function connect() {
             if (closed) return;
@@ -5378,6 +5450,7 @@ enum WebViewerAssets {
           function message(t, first, second) {
             const m = { t, x: round(first.x), y: round(first.y) };
             if (second) { m.x2 = round(second.x); m.y2 = round(second.y); }
+            if (display) m.d = display;
             return m;
           }
 
@@ -5399,6 +5472,8 @@ enum WebViewerAssets {
             },
             up(first, second) { flushMove(); send(message("up", first, second)); },
             key(message) { flushMove(); send(message); },
+            // A foldable's viewer names the panel it shows; touches go there.
+            setDisplay(id) { display = id || null; },
             get connected() { return open; },
             close() { closed = true; if (socket) socket.close(); }
           };

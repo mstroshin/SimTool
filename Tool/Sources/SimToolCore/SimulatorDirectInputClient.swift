@@ -16,10 +16,16 @@ import Foundation
 /// An answered touch first makes sure iOS still takes the helper's touches on
 /// this boot (`SimulatorTouchScreen`), and fails instead of reporting a touch
 /// that went nowhere.
+///
+/// On a foldable (iPhone Duo) touches go to the lit panel: its own Indigo
+/// target, in points of its picture as screenshots and the accessibility tree
+/// read it, turned onto its framebuffer (`SimulatorDisplayRotation`). Which
+/// panel is lit comes from the server that watches it (`setDisplayState`) or,
+/// without one, from CoreDevice per command.
 public actor SimulatorDirectInputClient {
     public static let shared = SimulatorDirectInputClient()
 
-    private static let helperVersion = "5"
+    private static let helperVersion = "6"
     /// Part of the cached binary's name, so any change to the helper's source
     /// compiles a fresh one instead of reusing a stale build of the same version.
     private static let helperFingerprint = SHA256.hash(data: Data(SimulatorDirectInputHelperSource.source.utf8))
@@ -37,7 +43,14 @@ public actor SimulatorDirectInputClient {
     /// The helper session whose touch screen has been checked, and the verdict:
     /// a session touches one boot of one device.
     private weak var touchScreenChecked: SimulatorDirectInputSession?
-    private var touchScreenCutOff = false
+    /// Its verdicts: one for a phone's screen (key ""), one per foldable panel.
+    private var touchScreenVerdicts: [String: Bool] = [:]
+    /// Each device's screens, read once through the helper; nil when the
+    /// device type declares none.
+    private var layouts: [String: SimulatorDisplayLayout?] = [:]
+    /// A foldable's lit panel: pushed by a server watching it, which keeps it
+    /// current, or read for a command and trusted for half a second.
+    private var displayStates: [String: (state: SimulatorDisplayState, at: Date, pushed: Bool)] = [:]
 
     public init() {}
 
@@ -49,8 +62,11 @@ public actor SimulatorDirectInputClient {
     }
 
     public func tap(xRatio: Double, yRatio: Double, deviceUDID: String) async throws {
+        let route = try await route(deviceUDID: deviceUDID)
+        let point = route?.framebuffer(TouchRatio(x: xRatio, y: yRatio)) ?? TouchRatio(x: xRatio, y: yRatio)
         try await touch(
-            SimulatorDirectInputCommand.tap(x: xRatio, y: yRatio).line,
+            SimulatorDirectInputCommand.tap(x: point.x, y: point.y).line,
+            route: route,
             deviceUDID: deviceUDID,
             timeoutSeconds: 2
         )
@@ -58,7 +74,8 @@ public actor SimulatorDirectInputClient {
 
     /// Plays a timed path and returns once the finger has lifted.
     public func perform(_ path: TouchPath, deviceUDID: String) async throws {
-        try await touch(path.helperLine, deviceUDID: deviceUDID, timeoutSeconds: path.duration + 3)
+        let route = try await route(deviceUDID: deviceUDID)
+        try await touch((route?.framebuffer(path) ?? path).helperLine, route: route, deviceUDID: deviceUDID, timeoutSeconds: path.duration + 3)
     }
 
     /// Plays a stroke given in screen points.
@@ -71,7 +88,12 @@ public actor SimulatorDirectInputClient {
     /// Events reach the helper in the order of these calls; a failure drops the
     /// helper, and the next event starts a fresh one.
     public func stream(_ event: LiveTouchEvent, deviceUDID: String) async {
-        await stream(line: event.helperLine, deviceUDID: deviceUDID)
+        // A viewer touches the panel it shows: the lit one, or the one it names.
+        guard let route = try? await route(deviceUDID: deviceUDID, display: event.display) else {
+            await stream(line: event.helperLine, deviceUDID: deviceUDID)
+            return
+        }
+        await stream(line: route.framebuffer(event).helperLine, target: route.targetLine, deviceUDID: deviceUDID)
     }
 
     /// Writes one live key event, in order with the live touches.
@@ -100,33 +122,86 @@ public actor SimulatorDirectInputClient {
     /// An answered touch, refused up front on a boot whose touch screen iOS has
     /// dropped. Live touches are not checked: they cannot wait the second or two
     /// a first check takes, nor report what it finds.
-    private func touch(_ line: String, deviceUDID: String, timeoutSeconds: TimeInterval) async throws {
-        if try await touchScreenIsCutOff(deviceUDID: deviceUDID) {
+    private func touch(_ line: String, route: SimulatorTouchRoute?, deviceUDID: String, timeoutSeconds: TimeInterval) async throws {
+        if route?.overDTUHID != true, try await touchScreenIsCutOff(deviceUDID: deviceUDID, screen: route?.checkedScreen) {
             throw SimToolError(SimulatorTouchScreen.cutOffMessage(deviceUDID: deviceUDID))
         }
-        try await answered(line, deviceUDID: deviceUDID, timeoutSeconds: timeoutSeconds)
+        try await answered(line, target: route?.targetLine, deviceUDID: deviceUDID, timeoutSeconds: timeoutSeconds)
     }
 
-    /// Once per helper session: the helper has claimed the screen by then, so
-    /// the verdict holds for as long as the session lives. A toolchain whose
+    /// Once per helper session and screen: the helper has claimed the screen
+    /// by then, so the verdict holds for as long as the session lives. A
+    /// foldable's panels are checked each on its own. A toolchain whose
     /// CoreSimulator cannot say when the device booted is not checked.
-    private func touchScreenIsCutOff(deviceUDID: String) async throws -> Bool {
+    private func touchScreenIsCutOff(deviceUDID: String, screen: String?) async throws -> Bool {
         let current = try await session(for: deviceUDID)
-        if touchScreenChecked === current { return touchScreenCutOff }
+        if touchScreenChecked !== current {
+            touchScreenChecked = current
+            touchScreenVerdicts = [:]
+        }
+        if let known = touchScreenVerdicts[screen ?? ""] { return known }
         var cutOff = false
         if let answer = try? await answered(SimulatorDirectInputCommand.boot.line, deviceUDID: deviceUDID, timeoutSeconds: 2),
            let bootedAt = SimulatorDirectInputCommand.bootedAt(fromAnswer: answer) {
-            cutOff = await touchScreenCheck.isCutOff(deviceUDID: deviceUDID, bootedAt: bootedAt)
-            DirectInputLog.write("touch screen udid=\(deviceUDID) bootedAt=\(bootedAt) cutOff=\(cutOff)")
+            cutOff = await touchScreenCheck.isCutOff(deviceUDID: deviceUDID, bootedAt: bootedAt, screen: screen)
+            DirectInputLog.write("touch screen udid=\(deviceUDID) screen=\(screen ?? "-") bootedAt=\(bootedAt) cutOff=\(cutOff)")
         }
-        touchScreenChecked = current
-        touchScreenCutOff = cutOff
+        touchScreenVerdicts[screen ?? ""] = cutOff
         return cutOff
     }
 
-    private func stream(line: String, deviceUDID: String) async {
+    // MARK: - a foldable's panels
+
+    /// The lit panel of a foldable as a server watching it reads it; nil
+    /// forgets it, and commands read CoreDevice again.
+    public func setDisplayState(_ state: SimulatorDisplayState?, deviceUDID: String) {
+        displayStates[deviceUDID] = state.map { ($0, Date(), true) }
+    }
+
+    /// The device's screens, read once through the helper.
+    public func displayLayout(deviceUDID: String) async -> SimulatorDisplayLayout? {
+        if let known = layouts[deviceUDID] { return known }
+        var layout: SimulatorDisplayLayout?
+        if let answer = try? await answered(SimulatorDirectInputCommand.deviceType.line, deviceUDID: deviceUDID, timeoutSeconds: 2),
+           let type = SimulatorDirectInputCommand.deviceType(fromAnswer: answer) {
+            layout = SimulatorDisplayLayout.load(bundlePath: type.bundlePath, deviceType: type.identifier)
+        }
+        layouts[deviceUDID] = .some(layout)
+        return layout
+    }
+
+    /// Where a touch of a foldable goes: the panel `display` names, else the
+    /// lit one. Nil for a one-screen device, whose touches go as they always
+    /// have.
+    private func route(deviceUDID: String, display: String? = nil) async throws -> SimulatorTouchRoute? {
+        guard let layout = await displayLayout(deviceUDID: deviceUDID), layout.isFoldable else { return nil }
+        let state = try await displayState(deviceUDID: deviceUDID, layout: layout)
+        guard let panel = display.flatMap(layout.display(named:)) ?? layout.display(named: state.active) else { return nil }
+        return SimulatorTouchRoute(
+            target: layout.touchTarget(of: panel),
+            display: panel,
+            rotation: state.rotation(of: panel.id),
+            uniqueID: state.uniqueIDs[panel.id],
+            overDTUHID: !layout.takesIndigoTouches(panel)
+        )
+    }
+
+    private func displayState(deviceUDID: String, layout: SimulatorDisplayLayout) async throws -> SimulatorDisplayState {
+        if let known = displayStates[deviceUDID], known.pushed || Date().timeIntervalSince(known.at) < 0.5 {
+            return known.state
+        }
+        let state = try await SimulatorDisplayState.read(deviceUDID: deviceUDID, layout: layout)
+        if displayStates[deviceUDID]?.pushed != true { displayStates[deviceUDID] = (state, Date(), false) }
+        return state
+    }
+
+    private func stream(line: String, target: String? = nil, deviceUDID: String) async {
         do {
             let current = try await session(for: deviceUDID)
+            if let target, current.target != target {
+                try current.write(target)
+                current.target = target
+            }
             try current.write(line)
         } catch {
             DirectInputLog.write("stream failed command=\(line) error=\(error.localizedDescription)")
@@ -134,8 +209,10 @@ public actor SimulatorDirectInputClient {
         }
     }
 
-    /// The screen in points, read once per device from its device type.
+    /// The screen in points, read once per device from its device type. A
+    /// foldable's is the lit panel's picture, which turns as the panel does.
     public func screenSize(deviceUDID: String) async throws -> SimulatorScreenSize {
+        if let route = try await route(deviceUDID: deviceUDID) { return route.display.points(rotation: route.rotation) }
         if let cached = screenSizes[deviceUDID] { return cached }
         let answer = try await answered("size", deviceUDID: deviceUDID, timeoutSeconds: 2)
         guard let size = SimulatorDirectInputCommand.screenSize(fromAnswer: answer) else {
@@ -157,18 +234,24 @@ public actor SimulatorDirectInputClient {
     /// Sends a command the helper answers, and returns the answer. A helper that
     /// died or went silent is replaced and the command sent once more; an
     /// explicit refusal (`err`) is not retried.
+    /// `target` — a `target` line — goes first when the helper's touches are
+    /// aimed elsewhere: at another panel, or nowhere yet in a fresh helper.
     @discardableResult
-    private func answered(_ line: String, deviceUDID: String, timeoutSeconds: TimeInterval, retry: Bool = true) async throws -> String {
+    private func answered(_ line: String, target: String? = nil, deviceUDID: String, timeoutSeconds: TimeInterval, retry: Bool = true) async throws -> String {
         await acquireAnswerSlot()
         defer { releaseAnswerSlot() }
-        return try await exchange(line, deviceUDID: deviceUDID, timeoutSeconds: timeoutSeconds, retry: retry)
+        return try await exchange(line, target: target, deviceUDID: deviceUDID, timeoutSeconds: timeoutSeconds, retry: retry)
     }
 
-    private func exchange(_ line: String, deviceUDID: String, timeoutSeconds: TimeInterval, retry: Bool) async throws -> String {
+    private func exchange(_ line: String, target: String?, deviceUDID: String, timeoutSeconds: TimeInterval, retry: Bool) async throws -> String {
         DirectInputLog.write("send begin command=\(line.prefix(80)) udid=\(deviceUDID) retry=\(retry)")
         let current = try await session(for: deviceUDID)
         let response: String
         do {
+            if let target, current.target != target {
+                try current.write(target)
+                current.target = target
+            }
             try current.write(line)
             guard let answer = try await current.readLine(timeoutSeconds: timeoutSeconds) else {
                 DirectInputLog.write("response eof message=\(current.exitMessage())")
@@ -180,7 +263,7 @@ public actor SimulatorDirectInputClient {
             current.stop()
             if session === current { session = nil }
             if retry {
-                return try await exchange(line, deviceUDID: deviceUDID, timeoutSeconds: timeoutSeconds, retry: false)
+                return try await exchange(line, target: target, deviceUDID: deviceUDID, timeoutSeconds: timeoutSeconds, retry: false)
             }
             throw error
         }
@@ -335,6 +418,22 @@ struct SimulatorDirectInputCommand: Equatable {
 
     static let boot = Self(line: "boot")
 
+    static let deviceType = Self(line: "type")
+
+    /// Reads `ok IDENTIFIER BUNDLEPATH`, the helper's answer to `type`; the
+    /// bundle path may hold spaces (`iPhone Duo.simdevicetype`).
+    static func deviceType(fromAnswer answer: String) -> (identifier: String, bundlePath: String)? {
+        let parts = answer.split(separator: " ", maxSplits: 2)
+        guard parts.count == 3, parts[0] == "ok", !parts[1].isEmpty, !parts[2].isEmpty else { return nil }
+        return (String(parts[1]), String(parts[2]))
+    }
+
+    /// Aims later touches at a panel: its Indigo target, or — `overDTUHID` —
+    /// its screen number through dtuhidd: `target T W H D`.
+    static func target(_ target: UInt32, width: Int, height: Int, overDTUHID: Bool = false) -> Self {
+        Self(line: "target \(target) \(width) \(height) \(overDTUHID ? 1 : 0)")
+    }
+
     /// Reads `ok SECONDS`, the helper's answer to `boot`: when the device last
     /// booted, in seconds since 1970.
     static func bootedAt(fromAnswer answer: String) -> Date? {
@@ -351,8 +450,44 @@ struct SimulatorDirectInputCommand: Equatable {
     }
 }
 
+/// Where a foldable's touch goes — the panel's Indigo target, or its screen
+/// through dtuhidd — and how to turn a point of its picture onto its
+/// framebuffer.
+struct SimulatorTouchRoute: Equatable {
+    var target: UInt32
+    var display: SimulatorDisplay
+    var rotation: Int
+    /// The panel's unique id, which backboardd names its touch screen by.
+    var uniqueID: String?
+    /// Touched through dtuhidd (`SimulatorDisplayLayout.takesIndigoTouches`).
+    var overDTUHID = false
+
+    var targetLine: String {
+        SimulatorDirectInputCommand.target(overDTUHID ? UInt32(display.screenID) : target, width: display.width, height: display.height, overDTUHID: overDTUHID).line
+    }
+
+    /// SimulatorHID's touch screen of the panel, which iOS can stand down; a
+    /// panel touched through dtuhidd has dtuhidd's own.
+    var checkedScreen: String? { overDTUHID ? nil : uniqueID }
+
+    func framebuffer(_ ratio: TouchRatio) -> TouchRatio {
+        SimulatorDisplayRotation.framebufferRatio(ratio, rotation: rotation)
+    }
+
+    func framebuffer(_ path: TouchPath) -> TouchPath {
+        TouchPath(samples: path.samples.map { TouchPath.Sample(phase: $0.phase, time: $0.time, point: framebuffer($0.point)) })
+    }
+
+    func framebuffer(_ event: LiveTouchEvent) -> LiveTouchEvent {
+        LiveTouchEvent(phase: event.phase, first: framebuffer(event.first), second: event.second.map(framebuffer), display: event.display)
+    }
+}
+
 private final class SimulatorDirectInputSession: @unchecked Sendable {
     let deviceUDID: String
+    /// The `target` line the helper's touches are aimed by; nil until one is
+    /// sent (the shared digitizer slot). Touched by the client actor only.
+    var target: String?
 
     private let helperURL: URL
     private let process = Process()
@@ -541,6 +676,7 @@ enum SimulatorDirectInputHelperSource {
     //                           from the start; the finger is lifted even on error
     //   size                    "ok W H SCALE" — the screen in points
     //   boot                    "ok SECONDS" — when the device last booted (since 1970)
+    //   type                    "ok IDENTIFIER BUNDLEPATH" — the device type and its bundle
     //   press K [M …]           key K with up to three modifier keys M held
     //   button PAGE USAGE       presses one HID usage of another page; 12 184
     //                           (Eject) toggles the software keyboard
@@ -549,6 +685,10 @@ enum SimulatorDirectInputHelperSource {
     //   down X Y | move X Y | up X Y
     //   down2 X1 Y1 X2 Y2 | move2 … | up2 …     two fingers
     //   key K 1|0               key K down (1) or up (0)
+    //   target T W H [D]        later touches go to Indigo target T, a screen
+    //                           W×H pixels (a foldable's panel) — or, with D 1,
+    //                           through dtuhidd to screen number T; a finger
+    //                           still down on another target is lifted first
     // q (or end of input) lifts any finger, releases any key and exits.
     //
     // Everything that builds or sends a message runs on one worker thread: the
@@ -643,6 +783,9 @@ enum SimulatorDirectInputHelperSource {
     static id device;
     static id client;
     static double pixelX = 0.001, pixelY = 0.001; // one device pixel, in screen fractions
+    // The shared digitizer slot. A foldable registers each panel under its own
+    // target (0x40000000 | screen number), which `target` selects.
+    static unsigned int touchTarget = 0x32;
     static void (*sendMessage)(id, SEL, void *, BOOL, dispatch_queue_t, id);
     static SEL sendSelector;
     static void *(*buildMouse)(CGPoint *, CGPoint *, unsigned int, int, CGFloat, CGFloat, unsigned int);
@@ -657,7 +800,11 @@ enum SimulatorDirectInputHelperSource {
     // sends one as it starts, before its own keys or anything later can start
     // dtuhidd: an unassigned Consumer usage addressed to the digitizer, which
     // nothing in iOS acts on. (A lone touch-up also works on 26.4, but on 27 it
-    // never reaches the screen.)
+    // never reaches the screen.) Only the shared slot is claimed: the same
+    // usage sent to a foldable panel's own target aborts backboardd
+    // (SimHIDVirtualService dispatchEvent: asserts), and iOS 27.2 — the first
+    // runtime with foldables — connects a stood-down panel again with its
+    // next Indigo touch.
     static void claimTouchScreen(void) {
       void *msg = buildUsage ? buildUsage(0x32, 12, 0, 2) : NULL;
       if (msg) { sendMessage(client, sendSelector, msg, YES, nil, nil); }
@@ -820,7 +967,7 @@ enum SimulatorDirectInputHelperSource {
 
     // Waits until XPC has handed over everything sent so far.
     static void settleKeys(void) {
-      if (!keysOverDTUHID || !dtuhid) { return; }
+      if (!dtuhid) { return; }
       dispatch_semaphore_t sent = dispatch_semaphore_create(0);
       xpc_connection_send_barrier(dtuhid, ^{ dispatch_semaphore_signal(sent); });
       dispatch_semaphore_wait(sent, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC));
@@ -842,6 +989,34 @@ enum SimulatorDirectInputHelperSource {
     // MARK: - the finger (worker thread only)
 
     typedef struct { double x, y, x2, y2; } Spot;
+
+    // A foldable's panel SimulatorHID takes no Indigo touches for while dtuhidd
+    // runs: it revives only its main digitizer (the inner panel) on an Indigo
+    // event, and an Indigo event dispatched into another stood-down panel
+    // aborts backboardd. That panel is touched the way Device Hub touches it:
+    // IndigoDigitizerEvent messages to dtuhidd, aimed by screen number, the
+    // point a fraction of the framebuffer; eventType 0 is down, 1 a move, 2 up.
+    static BOOL touchOverDTUHID = NO;
+    static unsigned int dtuhidScreen = 0;
+
+    static xpc_object_t digitizerPoint(double x, double y) {
+      xpc_object_t point = xpc_dictionary_create(NULL, NULL, 0);
+      xpc_dictionary_set_double(point, "x", x);
+      xpc_dictionary_set_double(point, "y", y);
+      return point;
+    }
+
+    static BOOL emitOverDTUHID(int type, int count, Spot s) {
+      if (dtuhidConnect()) { return NO; }
+      xpc_object_t payload = xpc_dictionary_create(NULL, NULL, 0);
+      xpc_dictionary_set_value(payload, "pointOne", digitizerPoint(s.x, s.y));
+      if (count == 2) { xpc_dictionary_set_value(payload, "pointTwo", digitizerPoint(s.x2, s.y2)); }
+      xpc_dictionary_set_uint64(payload, "eventType", type == DownType ? 0 : type == UpType ? 2 : 1);
+      xpc_dictionary_set_uint64(payload, "edge", 0);
+      xpc_dictionary_set_uint64(payload, "target", dtuhidScreen);
+      xpc_connection_send_message(dtuhid, dtuhidMessage("IndigoDigitizerEvent", payload, false));
+      return YES;
+    }
     static int fingers = 0;          // 0 when lifted, else 1 or 2
     static Spot last;
     static uint64_t lastBuildNs = 0;
@@ -864,11 +1039,16 @@ enum SimulatorDirectInputHelperSource {
     static BOOL emit(int type, int count, Spot s) {
       if (!inRange(s.x) || !inRange(s.y) || (count == 2 && (!inRange(s.x2) || !inRange(s.y2)))) { return NO; }
       if (type == DragType) { sleepUntil(lastBuildNs + DragGapNs); }
+      if (touchOverDTUHID) {
+        if (!emitOverDTUHID(type, count, s)) { return NO; }
+        lastBuildNs = nowNs();
+        return YES;
+      }
       CGPoint p = CGPointMake(s.x, s.y), q = CGPointMake(s.x2, s.y2);
-      void *msg = buildMouse(&p, count == 2 ? &q : NULL, 0x32, type, 1.0, 1.0, 0);
+      void *msg = buildMouse(&p, count == 2 ? &q : NULL, touchTarget, type, 1.0, 1.0, 0);
       for (int attempt = 0; !msg && type == DragType && attempt < 50; attempt++) {
         usleep(2000);
-        msg = buildMouse(&p, count == 2 ? &q : NULL, 0x32, type, 1.0, 1.0, 0);
+        msg = buildMouse(&p, count == 2 ? &q : NULL, touchTarget, type, 1.0, 1.0, 0);
       }
       if (!msg) { return NO; }
       sendMessage(client, sendSelector, msg, YES, nil, nil);
@@ -918,7 +1098,7 @@ enum SimulatorDirectInputHelperSource {
 
     // MARK: - commands
 
-    typedef enum { CmdDown, CmdMove, CmdUp, CmdTap, CmdSwipe, CmdPath, CmdSize, CmdBoot, CmdKey, CmdPress, CmdButton, CmdHardwareKeyboard, CmdQuit } Kind;
+    typedef enum { CmdDown, CmdMove, CmdUp, CmdTap, CmdSwipe, CmdPath, CmdSize, CmdBoot, CmdType, CmdTarget, CmdKey, CmdPress, CmdButton, CmdHardwareKeyboard, CmdQuit } Kind;
     typedef struct {
       Kind kind; int count; Spot spot; double x2, y2; int ms; char *text;
       unsigned usage, page, mods[3]; int modCount; BOOL on;   // keyboard commands
@@ -1000,11 +1180,26 @@ enum SimulatorDirectInputHelperSource {
           streamed = NO;
           BOOL ok = fingerDown(1, c->spot);
           usleep((useconds_t)MAX(0, c->ms) * 1000);
-          reply(fingerUp(c->spot) && ok);
+          ok = fingerUp(c->spot) && ok;
+          if (touchOverDTUHID) { settleKeys(); }   // answered once dtuhidd has it all
+          reply(ok);
           return YES;
         }
-        case CmdSwipe: streamed = NO; reply(runSwipe(c)); return YES;
-        case CmdPath: streamed = NO; reply(runPath(c->text)); free(c->text); return YES;
+        case CmdSwipe: {
+          streamed = NO;
+          BOOL ok = runSwipe(c);
+          if (touchOverDTUHID) { settleKeys(); }
+          reply(ok);
+          return YES;
+        }
+        case CmdPath: {
+          streamed = NO;
+          BOOL ok = runPath(c->text);
+          free(c->text);
+          if (touchOverDTUHID) { settleKeys(); }
+          reply(ok);
+          return YES;
+        }
         case CmdSize: {
           id type = ((id (*)(id, SEL))objc_msgSend)(device, sel_registerName("deviceType"));
           CGSize size = ((CGSize (*)(id, SEL))objc_msgSend)(type, sel_registerName("mainScreenSize"));
@@ -1012,6 +1207,23 @@ enum SimulatorDirectInputHelperSource {
           if (size.width <= 0 || size.height <= 0 || scale <= 0) { printf("err\n"); }
           else { printf("ok %.3f %.3f %.3f\n", size.width / scale, size.height / scale, scale); }
           fflush(stdout);
+          return YES;
+        }
+        case CmdType: {
+          id type = ((id (*)(id, SEL))objc_msgSend)(device, sel_registerName("deviceType"));
+          NSString *identifier = [type respondsToSelector:@selector(identifier)] ? ((id (*)(id, SEL))objc_msgSend)(type, @selector(identifier)) : nil;
+          NSString *bundlePath = [type respondsToSelector:sel_registerName("bundlePath")] ? ((id (*)(id, SEL))objc_msgSend)(type, sel_registerName("bundlePath")) : nil;
+          if (identifier.length > 0 && bundlePath.length > 0) { printf("ok %s %s\n", identifier.UTF8String, bundlePath.UTF8String); }
+          else { printf("err\n"); }
+          fflush(stdout);
+          return YES;
+        }
+        case CmdTarget: {
+          BOOL changed = c->on ? (!touchOverDTUHID || dtuhidScreen != c->usage) : (touchOverDTUHID || touchTarget != c->usage);
+          if (changed && fingers != 0) { fingerUp(last); }
+          touchOverDTUHID = c->on;
+          if (c->on) { dtuhidScreen = c->usage; } else { touchTarget = c->usage; }
+          if (c->spot.x > 0 && c->spot.y > 0) { pixelX = 1.0 / c->spot.x; pixelY = 1.0 / c->spot.y; }
           return YES;
         }
         case CmdBoot: {
@@ -1116,6 +1328,11 @@ enum SimulatorDirectInputHelperSource {
       if (!strcmp(name, "path")) { c->kind = CmdPath; c->text = strdup(rest); return YES; }
       if (!strcmp(name, "size")) { c->kind = CmdSize; return YES; }
       if (!strcmp(name, "boot")) { c->kind = CmdBoot; return YES; }
+      if (!strcmp(name, "type")) { c->kind = CmdType; return YES; }
+      if (!strcmp(name, "target") && n >= 1 && v[0] > 0) {
+        c->kind = CmdTarget; c->usage = (unsigned)v[0]; c->spot.x = n >= 3 ? v[1] : 0; c->spot.y = n >= 3 ? v[2] : 0;
+        c->on = n >= 4 && v[3] != 0; return YES;
+      }
       if (!strcmp(name, "q") || !strcmp(name, "quit")) { c->kind = CmdQuit; return YES; }
       if (!strcmp(name, "tap") && n >= 2) {
         c->kind = CmdTap; c->spot.x = v[0]; c->spot.y = v[1]; c->ms = n >= 3 ? (int)v[2] : 60; return YES;
@@ -1158,7 +1375,7 @@ enum SimulatorDirectInputHelperSource {
           if (parse(line, &c)) {
             enqueue(c);
             if (c.kind == CmdQuit) { break; }
-          } else if (strncmp(line, "down", 4) && strncmp(line, "move", 4) && strncmp(line, "up", 2) && strncmp(line, "key ", 4)) {
+          } else if (strncmp(line, "down", 4) && strncmp(line, "move", 4) && strncmp(line, "up", 2) && strncmp(line, "key ", 4) && strncmp(line, "target", 6)) {
             // Malformed acked commands still get their answer; streamed ones stay silent.
             printf("err\n");
             fflush(stdout);

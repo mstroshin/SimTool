@@ -13,7 +13,8 @@ logic.
 
 SimTool's iPhone Duo support adapts serve-sim's foldable work (at commit
 `a30d70a`): choosing the framebuffer to stream from the device type's own
-screen sizes (`Tool/Sources/SimToolStream/FramebufferSurfaceSelector.swift`).
+screen sizes (`Tool/Sources/SimToolStream/FramebufferSurfaceSelector.swift`),
+and each panel's own Indigo touch target (`0x40000000 | screen number`).
 Facts learned from serve-sim — the panels' sizes and names — are used as facts.
 
 `serve-sim` is licensed under the Apache License, Version 2.0. Copyright

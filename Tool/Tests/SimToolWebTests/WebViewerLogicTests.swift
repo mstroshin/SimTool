@@ -235,6 +235,46 @@ final class WebViewerLogicTests: XCTestCase {
         XCTAssertEqual(value(context, "runtimeName('com.apple.CoreSimulator.SimRuntime.watchOS-11-0')"), "watchOS 11.0")
     }
 
+    // MARK: - A screen's picture
+
+    // The open inner panel of an iPhone Duo streams a portrait framebuffer
+    // under a landscape picture: its frames are turned once their shape is
+    // the panel's, and a cover frame still in flight is not.
+    func testAFrameTurnsWithTheScreenItShows() throws {
+        let context = try makeContext()
+        context.evaluateScript("var inner = { id: 'primary-1', width: 2007, height: 2853, rotation: 90 };")
+        XCTAssertEqual(value(context, "frameRotation(900, 1280, inner)"), "90", "the encoder scales, the shape stays")
+        XCTAssertEqual(value(context, "frameRotation(880, 1280, inner)"), "0", "a cover frame (1398×2034) is not the inner panel's")
+        XCTAssertEqual(value(context, "frameRotation(900, 1280, null)"), "0")
+        XCTAssertEqual(value(context, "frameRotation(900, 1280, { width: 2007, height: 2853, rotation: -90 })"), "270")
+    }
+
+    // The canvas transform must put the framebuffer's bottom-left corner at
+    // the top-left of a picture turned 90° clockwise.
+    func testTheCanvasTurnPutsEachCornerWhereThePictureHasIt() throws {
+        let context = try makeContext()
+        context.evaluateScript("""
+        function place(rotation, x, y) {
+          var t = canvasTurn(rotation, 300, 200);
+          return Math.round(t.a * x + t.c * y + t.e) + "," + Math.round(t.b * x + t.d * y + t.f);
+        }
+        """)
+        // Drawn at (turn.width × turn.height) = (200 × 300) in frame space.
+        XCTAssertEqual(value(context, "place(90, 0, 300)"), "0,0", "the frame's bottom-left lands top-left")
+        XCTAssertEqual(value(context, "place(90, 0, 0)"), "300,0", "the frame's top-left lands top-right")
+        XCTAssertEqual(value(context, "[canvasTurn(90, 300, 200).width, canvasTurn(90, 300, 200).height].join('x')"), "200x300")
+        XCTAssertEqual(value(context, "place(180, 0, 0)"), "300,200")
+        XCTAssertEqual(value(context, "place(270, 0, 0)"), "0,200")
+        XCTAssertEqual(value(context, "place(0, 10, 20)"), "10,20")
+    }
+
+    func testTheScreensCornersComeFromItsDeviceTypeInProportion() throws {
+        let context = try makeContext()
+        XCTAssertEqual(value(context, "screenRadius({ cornerRadii: [8, 59, 59, 8], points: { width: 466, height: 678 } }, 233)"), "4px 30px 30px 4px")
+        XCTAssertEqual(value(context, "screenRadius({ points: { width: 466, height: 678 } }, 233)"), "", "no radii: the page's own heuristic")
+        XCTAssertEqual(value(context, "screenRadius(null, 233)"), "")
+    }
+
     // MARK: - Theme
 
     // The theme button pins the other theme, and forgets the pin once the other

@@ -274,8 +274,10 @@ lit one, or `?display=cover|inner`.
 
 ### Input · accessibility · logs
 - `simtool input …` — touches, typing, hardware buttons. Coordinates are
-  screen **points** (the frames `simtool ax` reports), and every touch is played
-  by SimTool's own HID helper as a timed path:
+  screen **points** (the frames `simtool ax` reports) — on an iPhone Duo, points
+  of the lit panel as its screenshot reads (the open inner panel is 951 × 669,
+  landscape) —, and every touch is played by SimTool's own HID helper as a
+  timed path:
   - `tap` / `long-press` — by label, a11y-id or coordinates. A long press under
     ~0.6 s may land as a tap (warns); the default 1 s is safe.
   - `scroll up|down|left|right [--distance <pt>]` — the direction is **the way

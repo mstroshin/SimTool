@@ -77,6 +77,16 @@ public struct SimulatorDisplayLayout: Codable, Equatable, Sendable {
         isFoldable ? 0x4000_0000 | UInt32(display.screenID) : 0x32
     }
 
+    /// Whether Indigo touches reach a screen in every state of the boot.
+    /// SimulatorHID stands its touch screens down while the simulator's HID
+    /// daemon (dtuhidd) runs and revives only its main digitizer on an Indigo
+    /// event — on the iPhone Duo the inner panel (Xcode 27.2: the cover's
+    /// stays down, and an Indigo event dispatched into it aborts backboardd).
+    /// The other panels are touched through dtuhidd, as Device Hub does.
+    public func takesIndigoTouches(_ display: SimulatorDisplay) -> Bool {
+        !isFoldable || display.role == "inner"
+    }
+
     /// A screen by any of its names: simctl's (`primary-1`), its role
     /// (`inner`) or its screen number (`3`).
     public func display(named raw: String) -> SimulatorDisplay? {

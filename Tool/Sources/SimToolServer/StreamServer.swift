@@ -164,6 +164,9 @@ public final class StreamServer: @unchecked Sendable {
 
     private func displayStateChanged(_ state: SimulatorDisplayState) {
         guard displays.set(state: state), let layout = displays.current.layout else { return }
+        // Touches follow the panel without asking CoreDevice each time.
+        let directInput = directInput, udid = config.device.udid
+        Task { await directInput.setDisplayState(state, deviceUDID: udid) }
         let lit = layout.display(named: state.active)
         frameCapture.setScreens(layout.displays.map { ($0.width, $0.height) }, preferred: lit.map { ($0.width, $0.height) })
         inspectorEvents.publish(.device, displays.topic)

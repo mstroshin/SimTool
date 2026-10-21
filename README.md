@@ -166,6 +166,17 @@ swift run simtool input swipe --start-x 200 --start-y 700 --end-x 200 --end-y 30
 swift run simtool input drag --start-x 200 --start-y 140 --end-x 200 --end-y 290
 ```
 
+On an iPhone Duo every touch — the CLI's, the API's, a test's and the viewer's
+live finger — lands on the panel that is lit, in points of its picture as a
+screenshot and `ax tree` show it: the open inner panel reads 951 × 669 pt
+(landscape) although its framebuffer is portrait, and SimTool turns each point
+onto it. The viewer shows the lit panel upright, with its own corners, and
+follows it as the device folds. The inner panel takes SimTool's own Indigo touches (target
+`0x40000003`); the cover is touched through the simulator's HID daemon,
+dtuhidd, as Device Hub does — while dtuhidd runs, SimulatorHID keeps the cover's
+own touch screen stood down, and an Indigo event sent into it would abort
+backboardd.
+
 Directions are the way the finger moves: `scroll up` drags the content up,
 revealing what is below. A `scroll` (and a `swipe`, unless `--hold 0`) slows
 down and rests a quarter second before lifting, which leaves the content where
