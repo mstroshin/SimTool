@@ -2224,7 +2224,7 @@ enum WebViewerAssets {
         // ---- The filter field: live text plus include/exclude chips, per tab ----
 
         const FILTER_HELP = {
-          network: '<p><b>Type</b> to filter by name, host, path, status.</p><p><b>Enter</b> keeps the text as an include chip — show only matches; <b>-text Enter</b> makes an exclude chip.</p><p><b>Right-click</b> a request to show or hide its path.</p>',
+          network: '<p><b>Type</b> to search URLs, methods, statuses, headers and bodies; the matches are marked, and a call found only in its headers or body says where. <b>url:</b>, <b>method:</b>, <b>status:</b>, <b>host:</b>, <b>header:</b> or <b>body:</b> searches one of them.</p><p><b>Enter</b> keeps the text as an include chip — show only matches; <b>-text Enter</b> makes an exclude chip.</p><p><b>Right-click</b> a request to show or hide its path.</p>',
           logs: '<p><b>Type</b> to filter messages; <b>subsystem:text</b> (or category, process, level, message) matches one field.</p><p><b>Enter</b> keeps it as an include chip; <b>-text Enter</b> excludes.</p><p><b>Select text</b> in a line and right-click to show or hide it.</p>',
           state: '<p><b>Type</b> to filter models by name and their keys and values.</p>',
           ax: '<p><b>Type</b> to filter by identifier, label, role; matches keep their ancestors visible.</p>',
@@ -2875,13 +2875,6 @@ enum WebViewerAssets {
           return size == null ? null : size;
         }
 
-        function networkHaystack(event) {
-          const request = event.request || {};
-          const status = networkStatus(event);
-          return [requestPath(event), request.method, request.host, status.text, status.title, event.protocol,
-            event.mocked ? "mocked " + (event.mockRuleId || "") : ""].filter(Boolean).join(" ").toLowerCase();
-        }
-
         function shellQuote(value) {
           return "'" + String(value).replace(/'/g, "'\\''") + "'";
         }
@@ -2942,6 +2935,171 @@ enum WebViewerAssets {
         }
 
         // ---- Filters: live text + include/exclude chips ----
+
+        // ---- A call's detail: bodies as trees, search hits, what its status says ----
+
+        const HTTP_STATUS_TEXT = {
+          100: "Continue", 101: "Switching Protocols", 200: "OK", 201: "Created", 202: "Accepted", 204: "No Content", 206: "Partial Content",
+          301: "Moved Permanently", 302: "Found", 303: "See Other", 304: "Not Modified", 307: "Temporary Redirect", 308: "Permanent Redirect",
+          400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found", 405: "Method Not Allowed", 406: "Not Acceptable",
+          408: "Request Timeout", 409: "Conflict", 410: "Gone", 412: "Precondition Failed", 413: "Content Too Large", 415: "Unsupported Media Type",
+          422: "Unprocessable Content", 429: "Too Many Requests", 500: "Internal Server Error", 501: "Not Implemented", 502: "Bad Gateway",
+          503: "Service Unavailable", 504: "Gateway Timeout"
+        };
+
+        function httpStatusText(code) {
+          return HTTP_STATUS_TEXT[Number(code)] || "";
+        }
+
+        // An URL's query as [name, value] pairs, decoded, in order; none for gRPC paths.
+        function queryParams(url) {
+          const raw = String(url || "");
+          const start = raw.indexOf("?");
+          if (start < 0) return [];
+          const query = raw.slice(start + 1).split("#")[0];
+          const decode = (part) => { try { return decodeURIComponent(part.replace(/\+/g, " ")); } catch (_) { return part; } };
+          return query.split("&").filter(Boolean).map((pair) => {
+            const equals = pair.indexOf("=");
+            return equals < 0 ? [decode(pair), ""] : [decode(pair.slice(0, equals)), decode(pair.slice(equals + 1))];
+          });
+        }
+
+        // A body as a tree a person can fold: JSON, or the protobuf text format gRPC
+        // loggers print (`Type:\nfield: value\nnested {\n…\n}`). A logger keeps only
+        // a preview, so a body cut short still reads as far as it goes: `complete`
+        // says whether it ended where it should.
+        // A node: { key, kind: "object" | "array" | "message" | "value", type: "str" | "num" | "lit" | "null" | "enum", text, children }.
+        function parseBodyTree(text) {
+          const body = String(text == null ? "" : text);
+          if (!body.trim()) return { format: "empty", root: null, complete: true };
+          const trimmed = body.trim();
+          if (trimmed[0] === "{" || trimmed[0] === "[") {
+            try { return { format: "json", root: jsonNode(null, JSON.parse(trimmed)), complete: true }; } catch (_) { /* a cut preview or not JSON */ }
+          }
+          const proto = parseProtoText(body);
+          if (proto) return proto;
+          return { format: "text", root: null, complete: true };
+        }
+
+        function jsonNode(key, value) {
+          if (Array.isArray(value)) return { key, kind: "array", children: value.map((item, index) => jsonNode(String(index), item)) };
+          if (value && typeof value === "object") return { key, kind: "object", children: Object.keys(value).map((name) => jsonNode(name, value[name])) };
+          if (typeof value === "string") return { key, kind: "value", type: "str", text: JSON.stringify(value), value };
+          if (typeof value === "number") return { key, kind: "value", type: "num", text: String(value), value: String(value) };
+          if (value === null) return { key, kind: "value", type: "null", text: "null", value: "null" };
+          return { key, kind: "value", type: "lit", text: String(value), value: String(value) };
+        }
+
+        // Protobuf text format, line by line. Null when the text does not read as it.
+        function parseProtoText(body) {
+          const lines = body.split("\n");
+          let index = 0;
+          let typeName = null;
+          const first = lines[0].trim();
+          if (/^[A-Za-z_][\w.]*:$/.test(first)) { typeName = first.slice(0, -1); index = 1; }
+          const root = { key: null, kind: "message", typeName, children: [] };
+          const stack = [root];
+          let fields = 0;
+          let complete = true;
+          for (; index < lines.length; index++) {
+            const line = lines[index].trim();
+            if (!line) continue;
+            if (line === "}") {
+              if (stack.length === 1) return null;
+              stack.pop();
+              continue;
+            }
+            let match = /^([A-Za-z_][\w.\[\]/]*)\s*:?\s*\{$/.exec(line);
+            if (match) {
+              const node = { key: match[1], kind: "message", children: [] };
+              stack[stack.length - 1].children.push(node);
+              stack.push(node);
+              fields++;
+              continue;
+            }
+            match = /^([A-Za-z_][\w.\[\]/]*)\s*:\s*(.*)$/.exec(line);
+            if (match) {
+              const raw = match[2];
+              let type = "enum";
+              let value = raw;
+              if (/^".*"$/.test(raw) && raw.length > 1) { type = "str"; value = unquoteProto(raw.slice(1, -1)); }
+              else if (raw[0] === '"') { type = "str"; value = unquoteProto(raw.slice(1)); complete = false; }
+              else if (/^-?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?f?$/.test(raw) || /^-?(inf|nan)$/i.test(raw)) type = "num";
+              else if (raw === "true" || raw === "false") type = "lit";
+              else if (!/^[A-Za-z_][\w]*$/.test(raw)) type = "raw";
+              stack[stack.length - 1].children.push({ key: match[1], kind: "value", type, text: raw, value });
+              fields++;
+              continue;
+            }
+            // The last line of a cut preview may stop anywhere.
+            if (index === lines.length - 1 || lines.slice(index + 1).every((rest) => !rest.trim())) { complete = false; continue; }
+            return null;
+          }
+          if (!fields && !typeName) return null;
+          if (stack.length > 1) complete = false;
+          return { format: "proto", root, complete };
+        }
+
+        function unquoteProto(text) {
+          return text.replace(/\\(["'\\])/g, "$1").replace(/\\n/g, "\n").replace(/\\t/g, "\t");
+        }
+
+        // How many nodes a tree holds, itself included.
+        function treeSize(node) {
+          if (!node) return 0;
+          return 1 + (node.children || []).reduce((sum, child) => sum + treeSize(child), 0);
+        }
+
+        // What a search runs over in a call, field by field (lowercased): its URL or
+        // method path, method, status, host, both sides' headers or metadata, both bodies.
+        function networkSearchFields(event) {
+          const request = event.request || {};
+          const response = event.response || {};
+          const status = networkStatus(event);
+          const headerLines = (entries) => Object.entries(entries || {}).map(([name, value]) => name + ": " + value).join("\n");
+          const fields = {
+            url: requestPath(event),
+            method: event.protocol === "grpc" ? "grpc " + (request.grpcMethod || "") : request.method || "",
+            status: [status.text, status.title, response.statusCode, response.grpcStatusCode, response.grpcStatusMessage, event.error && event.error.message].filter((part) => part != null && part !== "").join(" "),
+            host: request.host || request.grpcAuthority || "",
+            reqheader: headerLines(event.protocol === "grpc" ? request.metadata : request.headers),
+            resheader: headerLines(event.protocol === "grpc" ? response.metadata : response.headers),
+            reqbody: request.bodyPreview || "",
+            resbody: response.bodyPreview || "",
+            mock: event.mocked ? "mocked " + (event.mockRuleId || "") : ""
+          };
+          for (const name of Object.keys(fields)) fields[name] = String(fields[name]).toLowerCase();
+          fields.header = fields.reqheader + "\n" + fields.resheader;
+          fields.body = fields.reqbody + "\n" + fields.resbody;
+          return fields;
+        }
+
+        const NETWORK_FILTER_FIELDS = ["url", "method", "status", "host", "header", "body"];
+
+        // Where a term is found in a call, in the order the detail shows them: the
+        // first is where the detail opens. Empty when it is not there.
+        function networkHits(fields, term, field) {
+          const needle = String(term || "").toLowerCase();
+          if (!needle) return [];
+          const places = [["url", "url"], ["method", "method"], ["status", "status"], ["host", "host"], ["reqheader", "request headers"],
+            ["reqbody", "request body"], ["resheader", "response headers"], ["resbody", "response body"], ["mock", "mock"]];
+          const scope = field === "header" ? ["reqheader", "resheader"] : field === "body" ? ["reqbody", "resbody"] : field ? [field] : null;
+          return places.filter(([name]) => (!scope || scope.includes(name)) && fields[name].indexOf(needle) >= 0).map(([, label]) => label);
+        }
+
+        // Text with every case-insensitive occurrence of `needle` marked, escaped for HTML.
+        function markHTML(text, needle) {
+          const escape = (value) => String(value).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+          const source = String(text == null ? "" : text);
+          if (!needle) return escape(source);
+          const lower = source.toLowerCase(), find = String(needle).toLowerCase();
+          let out = "", at = 0, hit;
+          while (find && (hit = lower.indexOf(find, at)) >= 0) {
+            out += escape(source.slice(at, hit)) + "<mark>" + escape(source.slice(hit, hit + find.length)) + "</mark>";
+            at = hit + find.length;
+          }
+          return out + escape(source.slice(at));
+        }
 
         // "field:text" scopes a term to one field instead of the whole haystack.
         // Only fields from the allowed list count; anything else (say, an URL's
@@ -3910,13 +4068,36 @@ enum WebViewerAssets {
           pausedNew: 0,
           cleared: new Set(),
           detailTab: "response",
+          split: stored("network.split", false),          // Request and Response side by side
+          bodyView: stored("network.bodyView", "tree"),  // tree | raw
+          sections: stored("network.sections", {}),      // a detail section's name → open
+          folds: new Map(),                              // a body node's place → open, as a person left it
+          openedFor: "",                                 // the call and term the detail last opened at a hit
           selected: null
         };
 
         const networkFilter = createFilter("network", {
-          placeholder: "Filter name, host, status — Enter keeps it",
-          onChange: () => renderNetwork()
+          placeholder: "Search URL, method, status, headers, bodies — Enter keeps it",
+          fields: NETWORK_FILTER_FIELDS,
+          onChange: () => { renderNetwork(); renderNetworkDetail(); }
         });
+
+        // What a search reads in a call, made once per call object the server sent.
+        const networkSearchCache = new WeakMap();
+        function searchFieldsOf(event) {
+          let fields = networkSearchCache.get(event);
+          if (!fields) {
+            fields = networkSearchFields(event);
+            fields.all = [fields.url, fields.method, fields.status, fields.host, fields.header, fields.body, fields.mock].join("\n");
+            networkSearchCache.set(event, fields);
+          }
+          return fields;
+        }
+
+        // The live search: its text and the field it names, if any.
+        function networkQuery() {
+          return parseFieldTerm(networkFilter.text, NETWORK_FILTER_FIELDS);
+        }
 
         // Pressed states follow the model: sync() re-reads it after a change made elsewhere.
         function segmented(label, options, current, onPick) {
@@ -3992,7 +4173,7 @@ enum WebViewerAssets {
         const networkList = createList(networkView.list, {
           header: createSortHeader("net-grid", NETWORK_COLUMNS, network.sort, () => renderNetwork()),
           key: (event) => event.id,
-          version: (event) => [event.response ? 1 : 0, event.error ? 1 : 0, event.launchId, event.durationMilliseconds, event._wf, newestLaunchId() === event.launchId].join("|"),
+          version: (event) => [event.response ? 1 : 0, event.error ? 1 : 0, event.launchId, event.durationMilliseconds, event._wf, newestLaunchId() === event.launchId, networkFilter.text].join("|"),
           // A reviewed run is one launch's story: no launch groups, nothing reads as earlier.
           rowClass: (event) => "net-grid" + (event.mocked ? " mocked" : "") + (!reviewActive() && event.launchId != null && event.launchId !== newestLaunchId() ? " retired" : ""),
           group: (event) => !reviewActive() && event.launchId != null ? String(event.launchId) : null,
@@ -4011,12 +4192,18 @@ enum WebViewerAssets {
         function renderNetworkRow(event, row) {
           const status = networkStatus(event);
           const where = requestWhere(event);
+          // The search marks what the row shows, and names where else it found the term.
+          const query = networkQuery();
+          const shown = !query.field || query.field === "url" || query.field === "host" ? query.term : "";
+          const hits = query.term ? networkHits(searchFieldsOf(event), query.term, query.field) : [];
+          const elsewhere = hits.length && !hits.some((hit) => hit === "url" || hit === "host") ? hits.filter((hit) => /header|body/.test(hit)) : [];
           row.innerHTML =
             '<span class="cell time">' + escapeHTML(formatClock(event.timestamp, true)) + "</span>" +
             '<span class="cell method c-method ' + escapeHTML(event.protocol) + '">' + escapeHTML(event.protocol === "grpc" ? "gRPC" : (event.request && event.request.method) || "") + "</span>" +
-            '<span class="cell name" translate="no"><b>' + escapeHTML(requestName(event)) + "</b>" +
+            '<span class="cell name" translate="no"><b>' + markHTML(requestName(event), shown) + "</b>" +
               (event.mocked ? '<span class="tag tag-course" title="' + escapeHTML(event.mockRuleId ? "Answered by mock " + event.mockRuleId : "Answered by a mock") + '">Mock</span>' : "") +
-              "<span>" + escapeHTML(where) + "</span></span>" +
+              (elsewhere.length ? '<span class="tag tag-hit" title="' + escapeHTML("Found in the " + elsewhere.join(", ")) + '">' + escapeHTML(elsewhere[0]) + "</span>" : "") +
+              "<span>" + markHTML(where, shown) + "</span></span>" +
             '<span class="cell"><span class="st st-' + status.severity + '" title="' + escapeHTML(status.title) + '">' + (status.severity === "err" ? icon("warn") : "") + escapeHTML(status.text) + "</span></span>" +
             '<span class="cell num c-size">' + escapeHTML(formatBytes(networkSize(event))) + "</span>" +
             '<span class="cell num">' + escapeHTML(formatDuration(event.durationMilliseconds)) + "</span>" +
@@ -4044,13 +4231,15 @@ enum WebViewerAssets {
         }
 
         function networkVisible() {
-          const query = networkFilter.text;
+          const query = networkQuery();
           const chips = networkFilter.chips;
           return networkRows().filter((event) => {
             if (network.protocol !== "all" && event.protocol !== network.protocol) return false;
             if (network.failedOnly && !isNetworkProblem(event)) return false;
             if (network.mockedOnly && !event.mocked) return false;
-            return (!query && !chips.length) || matchesFilters(networkHaystack(event), chips, query);
+            if (!query.term && !chips.length) return true;
+            const fields = searchFieldsOf(event);
+            return matchesFilters(fields.all, chips, query.term, fields, query.field);
           });
         }
 
@@ -4145,70 +4334,213 @@ enum WebViewerAssets {
         }
 
         // ---- Detail ----
+        // Request and Response, as tabs or side by side: each with its headers or
+        // metadata and its body — JSON or protobuf text as a tree that folds, or as
+        // raw text — and the Response with its status. A search marks what it found
+        // and opens the side it is on.
 
         function renderNetworkDetail() {
           const event = network.selected;
           showDetail(networkView.panel, !!event);
           if (!event) return;
-          const status = networkStatus(event);
-          const request = event.request || {};
-          const response = event.response || null;
           const grpc = event.protocol === "grpc";
-          const tabs = [["headers", "Headers"], ["request", "Request"], ["response", "Response"]].concat(event.mocked ? [["mock", "Mock rule"]] : []);
+          const request = event.request || {};
+          const query = networkQuery();
+          const hits = query.term ? networkHits(searchFieldsOf(event), query.term, query.field) : [];
+          // A search opens the side it found the term on — once, so a tab picked afterwards stays.
+          const opened = event.id + "|" + query.term;
+          if (network.openedFor !== opened) networkMatchIndex = -1;
+          if (hits.length && network.openedFor !== opened) {
+            const side = hits.find((hit) => /^(request|response) /.test(hit));
+            if (side && !network.split) network.detailTab = side.split(" ")[0];
+          }
+          network.openedFor = opened;
+          const tabs = [["request", "Request"], ["response", "Response"]].concat(event.mocked && !network.split ? [["mock", "Mock rule"]] : []);
           if (!tabs.some(([key]) => key === network.detailTab)) network.detailTab = "response";
-          let body = "";
-          if (status.severity === "err" || status.severity === "warn") {
-            const headline = event.error ? "Request failed" : grpc ? "gRPC " + (response && response.grpcStatusCode) + " " + status.text : "HTTP " + status.text;
-            const detail = event.error ? event.error.message : grpc ? (response && response.grpcStatusMessage) || "" : "";
-            body += '<div class="callout ' + status.severity + '">' + icon("warn") + "<div><b>" + escapeHTML(headline) + "</b>" + (detail ? "<br>" + escapeHTML(detail) : "") + "</div></div>";
-          }
-          if (event.mocked) {
-            body += '<div class="callout course">' + icon("mock") + "<div>Answered by mock <b class=\"mono\">" + escapeHTML(event.mockRuleId || "") + "</b>. The app never reached the server.</div></div>";
-          }
-          if (network.detailTab === "headers") {
-            body += '<div class="sec">General</div>' + kvHTML({
-              [grpc ? "Method" : "URL"]: requestPath(event),
-              ...(grpc ? { Authority: request.grpcAuthority } : { "HTTP method": request.method, Host: request.host }),
-              Status: status.title,
-              Started: event.timestamp ? formatClock(new Date(Date.parse(event.timestamp) - (event.durationMilliseconds || 0)), true) : "",
-              Finished: event.timestamp ? formatClock(event.timestamp, true) + " (" + new Date(event.timestamp).toISOString() + ")" : "",
-              Duration: formatDuration(event.durationMilliseconds),
-              App: event.appBundleID,
-              Launch: event.launchId != null && launchesById[event.launchId] ? "pid " + launchesById[event.launchId].pid : ""
-            }) +
-              '<div class="sec">Request ' + (grpc ? "metadata" : "headers") + "</div>" + kvHTML(grpc ? request.metadata : request.headers) +
-              '<div class="sec">Response ' + (grpc ? "metadata" : "headers") + "</div>" + (response ? kvHTML(grpc ? response.metadata : response.headers) : '<p class="muted small">No response</p>');
+          const needle = query.term;
+          let body;
+          if (network.split) {
+            body = '<div class="net-split"><section class="net-side" aria-label="Request"><h3 class="side-title">Request</h3>' + requestSideHTML(event, needle, query.field) + "</section>" +
+              '<section class="net-side" aria-label="Response"><h3 class="side-title">Response</h3>' + responseSideHTML(event, needle, query.field) + (event.mocked ? mockSectionHTML(event) : "") + "</section></div>";
           } else if (network.detailTab === "request") {
-            const size = grpc ? request.messageByteCount : request.bodyByteCount;
-            body += (size != null ? '<p class="muted small">' + escapeHTML(formatBytes(size)) + (request.bodyPreview && size > request.bodyPreview.length ? " — preview shown" : "") + "</p>" : "") +
-              '<pre class="code" translate="no">' + highlightJSON(request.bodyPreview) + "</pre>";
-          } else if (network.detailTab === "response") {
-            if (!response) body += '<p class="muted">No response — the request did not complete.</p>';
-            else {
-              const size = networkSize(event);
-              body += (size != null ? '<p class="muted small">' + escapeHTML(formatBytes(size)) + (response.bodyPreview && size > response.bodyPreview.length ? " — preview shown" : "") + "</p>" : "") +
-                '<pre class="code" translate="no">' + (response.bodyPreview ? highlightJSON(response.bodyPreview) : '<span class="muted">' + (event.mocked ? "The mock returned no body" : "No body") + "</span>") + "</pre>";
-            }
+            body = requestSideHTML(event, needle, query.field);
           } else if (network.detailTab === "mock") {
-            const rule = event.mockRuleId ? network.mockRules[event.mockRuleId] : null;
-            body += rule ? '<pre class="code" translate="no">' + highlightJSON(JSON.stringify(rule)) + "</pre>" : '<p class="muted">The rule ' + escapeHTML(event.mockRuleId || "") + " is no longer active on this server.</p>";
+            body = mockSectionHTML(event);
+          } else {
+            body = responseSideHTML(event, needle, query.field);
           }
+          const status = networkStatus(event);
+          const statusText = grpc ? status.text : status.code ? status.code + " " + httpStatusText(status.code) : status.text;
+          const sizes = [grpc ? request.messageByteCount : request.bodyByteCount, networkSize(event)];
+          const started = event.timestamp ? new Date(Date.parse(event.timestamp) - (event.durationMilliseconds || 0)) : null;
           // Polling hands over fresh objects every time; the pane changes only with what it shows.
-          patchPane(networkView.detail, event.id + "|" + network.detailTab,
+          patchPane(networkView.detail, event.id + "|" + (network.split ? "split" : network.detailTab),
             '<div class="dhead"><span class="method ' + escapeHTML(event.protocol) + '">' + (grpc ? "gRPC" : escapeHTML(request.method || "")) + "</span>" +
-              '<span class="dtitle" translate="no" title="' + escapeHTML(requestPath(event)) + '">' + escapeHTML(requestPath(event)) + "</span>" +
+              '<span class="dtitle" translate="no" title="' + escapeHTML(requestPath(event)) + '">' + markHTML(requestPath(event), !query.field || query.field === "url" ? needle : "") + "</span>" +
               '<div class="dactions">' +
                 '<button class="btn btn-sm" type="button" data-act="curl">' + icon("terminal", "ic-sm") + "Copy as " + (grpc ? "grpcurl" : "cURL") + "</button>" +
                 '<button class="btn btn-sm btn-course" type="button" data-act="mock" title="A mocks: entry for a YAML test that answers this call the same way">' + icon("mock", "ic-sm") + "Copy as YAML mock</button>" +
                 '<button class="tb-btn" type="button" data-act="close" aria-label="Close the details">' + icon("close") + "</button>" +
               "</div></div>" +
-            '<div class="dmeta"><span class="st st-' + status.severity + '">' + (status.severity === "err" ? icon("warn") : "") + escapeHTML(status.text) + "</span>" +
+            '<div class="dmeta"><span class="st st-' + status.severity + '" title="' + escapeHTML(status.title) + '">' + (status.severity === "err" ? icon("warn") : "") + escapeHTML(statusText) + "</span>" +
               "<span>Duration <span class=\"mono\">" + escapeHTML(formatDuration(event.durationMilliseconds)) + "</span></span>" +
-              "<span>Size <span class=\"mono\">" + escapeHTML(formatBytes(networkSize(event))) + "</span></span>" +
-              "<span>" + escapeHTML(formatClock(event.timestamp, true)) + "</span></div>" +
-            '<div class="dtabs" role="tablist" aria-label="Request details">' + tabs.map(([key, label]) =>
-              '<button type="button" role="tab" data-dtab="' + key + '" aria-selected="' + (network.detailTab === key) + '" tabindex="' + (network.detailTab === key ? 0 : -1) + '">' + label + "</button>").join("") + "</div>" +
-            '<div class="dbody" role="tabpanel">' + body + "</div>");
+              "<span>Sent <span class=\"mono\">" + escapeHTML(formatBytes(sizes[0])) + "</span> · received <span class=\"mono\">" + escapeHTML(formatBytes(sizes[1])) + "</span></span>" +
+              "<span class=\"mono\">" + escapeHTML(started ? formatClock(started, true) + " → " + formatClock(event.timestamp, true) : formatClock(event.timestamp, true)) + "</span>" +
+              (event.mocked ? '<span class="tag tag-course">Mock</span>' : "") +
+              (hits.length ? '<span class="hits">Found in the ' + escapeHTML(hits.join(", ")) + "</span>" : "") + "</div>" +
+            '<div class="dbar">' +
+              (network.split ? "" : '<div class="dtabs" role="tablist" aria-label="Request details">' + tabs.map(([key, label]) =>
+                '<button type="button" role="tab" data-dtab="' + key + '" aria-selected="' + (network.detailTab === key) + '" tabindex="' + (network.detailTab === key ? 0 : -1) + '">' + label + "</button>").join("") + "</div>") +
+              '<div class="dbar-tools">' +
+                (needle ? '<span class="match-nav"><span class="match-count" data-match-count></span>' +
+                  '<button class="tb-btn" type="button" data-act="prev-match" aria-label="Previous match" data-tip="Previous match">' + icon("chev-u") + "</button>" +
+                  '<button class="tb-btn" type="button" data-act="next-match" aria-label="Next match" data-tip="Next match">' + icon("chev-d") + "</button></span>" : "") +
+                '<span class="seg" role="group" aria-label="Bodies as"><button type="button" data-act="view-tree" aria-pressed="' + (network.bodyView === "tree") + '">Tree</button><button type="button" data-act="view-raw" aria-pressed="' + (network.bodyView === "raw") + '">Raw</button></span>' +
+                '<button class="pill" type="button" data-act="split" aria-pressed="' + network.split + '" title="Show the request and the response side by side">' + icon("panel", "ic-sm") + "Side by side</button>" +
+              "</div></div>" +
+            '<div class="dbody" role="' + (network.split ? "region" : "tabpanel") + '" aria-label="' + (network.split ? "Request and response" : escapeHTML(network.detailTab)) + '">' + body + "</div>");
+          countMatches();
+        }
+
+        function requestSideHTML(event, needle, field) {
+          const grpc = event.protocol === "grpc";
+          const request = event.request || {};
+          const marks = (name) => !field || field === name ? needle : "";
+          let html = sectionHTML("request.general", "General", null, kvTableHTML(grpc ? [
+            ["Service", request.grpcService], ["Method", request.grpcMethod], ["Authority", request.grpcAuthority || request.host], ["Path", request.path]
+          ] : [
+            ["Method", request.method], ["URL", request.url || request.path], ["Host", request.host]
+          ], marks("url")));
+          const params = grpc ? [] : queryParams(request.url || request.path);
+          if (params.length) html += sectionHTML("request.query", "Query", params.length, kvTableHTML(params, marks("url")));
+          html += sectionHTML("request.body", grpc ? "Message" : "Body", null, bodyHTML(event, "request", request.bodyPreview, grpc ? request.messageByteCount : request.bodyByteCount, headerValue(request.headers, "content-type"), marks("body")));
+          const headers = Object.entries((grpc ? request.metadata : request.headers) || {});
+          html += sectionHTML("request.headers", grpc ? "Metadata" : "Headers", headers.length, headers.length ? kvTableHTML(headers, marks("header")) : '<p class="muted small">None</p>');
+          return html;
+        }
+
+        function responseSideHTML(event, needle, field) {
+          const grpc = event.protocol === "grpc";
+          const response = event.response || null;
+          const status = networkStatus(event);
+          const marks = (name) => !field || field === name ? needle : "";
+          let html = "";
+          if (status.severity === "err" || status.severity === "warn") {
+            const headline = event.error ? "Request failed" : grpc ? "gRPC " + (response && response.grpcStatusCode) + " " + status.text : "HTTP " + status.text + " " + httpStatusText(status.code);
+            const detail = event.error ? event.error.message : grpc ? (response && response.grpcStatusMessage) || "" : "";
+            html += '<div class="callout ' + status.severity + '">' + icon("warn") + "<div><b>" + escapeHTML(headline) + "</b>" + (detail ? "<br>" + markHTML(detail, marks("status")) : "") + "</div></div>";
+          }
+          if (event.mocked) {
+            html += '<div class="callout course">' + icon("mock") + "<div>Answered by mock <b class=\"mono\">" + escapeHTML(event.mockRuleId || "") + "</b>. The app never reached the server.</div></div>";
+          }
+          if (!response) return html + '<p class="muted">No response — the request did not complete.</p>';
+          // Status, duration and size head the pane; the body comes first here.
+          html += sectionHTML("response.body", grpc ? "Message" : "Body", null, bodyHTML(event, "response", response.bodyPreview, networkSize(event), headerValue(response.headers, "content-type"), marks("body")));
+          const headers = Object.entries((grpc ? response.metadata : response.headers) || {});
+          html += sectionHTML("response.headers", grpc ? "Metadata" : "Headers", headers.length, headers.length ? kvTableHTML(headers, marks("header")) : '<p class="muted small">None</p>');
+          return html;
+        }
+
+        function mockSectionHTML(event) {
+          const rule = event.mockRuleId ? network.mockRules[event.mockRuleId] : null;
+          return sectionHTML("mock.rule", "Mock rule", null, rule ? '<pre class="code" translate="no">' + highlightJSON(JSON.stringify(rule)) + "</pre>" : '<p class="muted">The rule ' + escapeHTML(event.mockRuleId || "") + " is no longer active on this server.</p>");
+        }
+
+        function headerValue(headers, name) {
+          const match = Object.entries(headers || {}).find(([key]) => key.toLowerCase() === name);
+          return match ? match[1] : "";
+        }
+
+        // A section that folds; it stays as a person left it, for every call.
+        function sectionHTML(name, title, count, content) {
+          const open = network.sections[name] !== false;
+          return '<details class="dsec" data-sec="' + name + '"' + (open ? " open" : "") + "><summary>" + escapeHTML(title) + (count != null ? ' <span class="count">' + formatCount(count) + "</span>" : "") + "</summary>" + content + "</details>";
+        }
+
+        function kvTableHTML(pairs, needle) {
+          const rows = pairs.filter(([, value]) => value != null && value !== "");
+          if (!rows.length) return '<p class="muted small">None</p>';
+          return '<table class="hdr" translate="no"><tbody>' + rows.map(([key, value]) => "<tr><th>" + markHTML(key, needle) + "</th><td>" + markHTML(value, needle) + "</td></tr>").join("") + "</tbody></table>";
+        }
+
+        // A body as a tree or as text, with what it is and how much of it the logger kept.
+        function bodyHTML(event, side, text, byteCount, contentType, needle) {
+          if (!text) return '<p class="muted small">' + (side === "response" && event.mocked ? "The mock returned no body" : "No body") + (byteCount ? " preview — " + escapeHTML(formatBytes(byteCount)) + " sent" : "") + "</p>";
+          const parsed = parseBodyTree(text);
+          const format = { json: "JSON", proto: "Protobuf text", text: contentType ? contentType.split(";")[0] : "Text" }[parsed.format] || "Text";
+          const cut = !parsed.complete || (parsed.format === "text" && event.protocol !== "grpc" && byteCount != null && byteCount > text.length);
+          const meta = [format, byteCount != null ? formatBytes(byteCount) + (event.protocol === "grpc" ? " on the wire" : "") : "", cut ? "preview — cut off by the app's logger" : ""].filter(Boolean).join(" · ");
+          const tree = parsed.root && network.bodyView === "tree";
+          const place = event.id + "|" + side;
+          let content;
+          if (tree) {
+            const openDepth = treeSize(parsed.root) <= 200 ? Infinity : 2;
+            const root = parsed.root;
+            content = '<div class="jt" translate="no">' + (root.typeName ? '<div class="jt-type">' + markHTML(root.typeName, needle) + "</div>" : "") +
+              (root.kind === "value" ? treeNodeHTML(root, "0", 0, { place, needle, openDepth }) : root.children.map((child, index) => treeNodeHTML(child, String(index), 0, { place, needle, openDepth })).join("")) +
+              (cut ? '<div class="jt-cut">… the preview ends here</div>' : "") + "</div>";
+          } else {
+            content = '<pre class="code" translate="no">' + (needle ? markHTML(prettyBody(parsed, text), needle) : parsed.format === "json" ? highlightJSON(text) : escapeHTML(text)) + "</pre>";
+          }
+          return '<div class="body-bar"><span class="body-meta">' + escapeHTML(meta) + '</span><span class="body-actions">' +
+            (tree ? '<button class="btn btn-sm" type="button" data-act="expand" data-side="' + side + '">Expand all</button><button class="btn btn-sm" type="button" data-act="collapse" data-side="' + side + '">Collapse all</button>' : "") +
+            '<button class="btn btn-sm" type="button" data-act="copy-body" data-side="' + side + '">' + icon("copy", "ic-sm") + "Copy</button></span></div>" +
+            '<div class="body-view" data-side="' + side + '">' + content + "</div>";
+        }
+
+        function prettyBody(parsed, text) {
+          if (parsed.format === "json") { try { return JSON.stringify(JSON.parse(text), null, 2); } catch (_) { return text; } }
+          return text;
+        }
+
+        function treeHasNeedle(node, needle) {
+          if ((node.key && node.key.toLowerCase().includes(needle)) || (node.text && node.text.toLowerCase().includes(needle))) return true;
+          return (node.children || []).some((child) => treeHasNeedle(child, needle));
+        }
+
+        // One node: a value on its row; a message, object or array folding its children,
+        // open as a person left it, else around a search hit, else near the top.
+        function treeNodeHTML(node, path, depth, context) {
+          const key = node.key == null ? "" : '<span class="jt-key">' + markHTML(node.key, context.needle) + '</span><span class="jt-colon">' + (node.kind === "message" ? " " : ": ") + "</span>";
+          if (node.kind === "value") {
+            return '<div class="jt-row">' + key + '<span class="j-' + node.type + '">' + markHTML(node.text, context.needle) + "</span></div>";
+          }
+          const children = node.children || [];
+          const fold = context.place + "|" + path;
+          const remembered = network.folds.get(fold);
+          const open = remembered != null ? remembered : context.needle && treeHasNeedle(node, context.needle) ? true : depth < context.openDepth;
+          const braces = node.kind === "array" ? ["[", "]"] : ["{", "}"];
+          const count = children.length + (node.kind === "array" ? (children.length === 1 ? " item" : " items") : node.kind === "object" ? (children.length === 1 ? " key" : " keys") : (children.length === 1 ? " field" : " fields"));
+          return '<details class="jt-node" data-fold="' + escapeHTML(fold) + '"' + (open ? " open" : "") + '><summary class="jt-row">' + key +
+            '<span class="jt-brace">' + braces[0] + '</span><span class="jt-sum">' + count + " " + braces[1] + "</span></summary>" +
+            '<div class="jt-kids">' + children.map((child, index) => treeNodeHTML(child, path + "." + index, depth + 1, context)).join("") + "</div>" +
+            '<div class="jt-row jt-close"><span class="jt-brace">' + braces[1] + "</span></div></details>";
+        }
+
+        // The search's marks in the pane, and which one ↑ ↓ are at.
+        let networkMatchIndex = -1;
+        function countMatches() {
+          const count = networkView.detail.querySelector("[data-match-count]");
+          if (!count) return;
+          const marks = networkView.detail.querySelectorAll(".dbody mark");
+          networkMatchIndex = Math.min(networkMatchIndex, marks.length - 1);
+          count.textContent = marks.length ? (networkMatchIndex >= 0 ? networkMatchIndex + 1 + " of " : "") + plural(marks.length, "match", "matches") : "No match here";
+        }
+
+        function stepMatch(direction) {
+          const marks = [...networkView.detail.querySelectorAll(".dbody mark")];
+          if (!marks.length) return;
+          networkMatchIndex = (networkMatchIndex + direction + marks.length) % marks.length;
+          marks.forEach((mark, index) => mark.classList.toggle("current", index === networkMatchIndex));
+          const mark = marks[networkMatchIndex];
+          for (let node = mark.parentElement; node && node !== networkView.detail; node = node.parentElement) if (node.tagName === "DETAILS") node.open = true;
+          mark.scrollIntoView({ block: "center" });
+          countMatches();
+        }
+
+        function bodyText(event, side) {
+          const text = side === "request" ? event.request && event.request.bodyPreview : event.response && event.response.bodyPreview;
+          return text ? prettyBody(parseBodyTree(text), text) : "";
         }
 
         networkView.detail.addEventListener("click", (domEvent) => {
@@ -4217,10 +4549,25 @@ enum WebViewerAssets {
           const action = domEvent.target.closest("[data-act]");
           if (!action || !network.selected) return;
           const event = network.selected;
-          if (action.dataset.act === "curl") copyText(event.protocol === "grpc" ? grpcurlCommand(event) : curlCommand(event), "Copied as " + (event.protocol === "grpc" ? "grpcurl" : "cURL"));
-          if (action.dataset.act === "mock") copyText(mockYaml(event), "Mock copied — paste it into a test's mocks:");
-          if (action.dataset.act === "close") { networkList.select(null); networkList.focus(); }
+          const act = action.dataset.act;
+          if (act === "curl") copyText(event.protocol === "grpc" ? grpcurlCommand(event) : curlCommand(event), "Copied as " + (event.protocol === "grpc" ? "grpcurl" : "cURL"));
+          if (act === "mock") copyText(mockYaml(event), "Mock copied — paste it into a test's mocks:");
+          if (act === "close") { networkList.select(null); networkList.focus(); }
+          if (act === "copy-body") copyText(bodyText(event, action.dataset.side), (action.dataset.side === "request" ? "Request" : "Response") + " body copied");
+          if (act === "view-tree" || act === "view-raw") { network.bodyView = act === "view-tree" ? "tree" : "raw"; store("network.bodyView", network.bodyView); renderNetworkDetail(); }
+          if (act === "split") { network.split = !network.split; store("network.split", network.split); renderNetworkDetail(); }
+          if (act === "next-match" || act === "prev-match") stepMatch(act === "next-match" ? 1 : -1);
+          if (act === "expand" || act === "collapse") {
+            const view = networkView.detail.querySelector('.body-view[data-side="' + action.dataset.side + '"]');
+            for (const node of view ? view.querySelectorAll("details.jt-node") : []) { node.open = act === "expand"; network.folds.set(node.dataset.fold, node.open); }
+          }
         });
+        // What a person folds stays folded through every re-render.
+        networkView.detail.addEventListener("toggle", (domEvent) => {
+          const node = domEvent.target;
+          if (node.matches && node.matches("details.jt-node")) network.folds.set(node.dataset.fold, node.open);
+          else if (node.matches && node.matches("details.dsec")) { network.sections[node.dataset.sec] = node.open; store("network.sections", network.sections); }
+        }, true);
         networkView.detail.addEventListener("keydown", (domEvent) => {
           const tab = domEvent.target.closest("[data-dtab]");
           if (!tab || !["ArrowLeft", "ArrowRight"].includes(domEvent.key)) return;
@@ -6414,6 +6761,54 @@ enum WebViewerAssets {
         .st { display: inline-flex; align-items: center; gap: 4px; font: 600 var(--fs-11)/1 var(--font-mono); }
         .st .ic { width: 12px; height: 12px; stroke-width: 1.8; }
         .st-ok { color: var(--ok); } .st-warn { color: var(--warn); } .st-err { color: var(--err); } .st-info, .st-idle { color: var(--ink2); } .st-pending { color: var(--ink3); }
+        .tag-hit { color: var(--ink2); font-weight: 500; box-shadow: inset 0 0 0 1px var(--line-thin); }
+        /* A call's detail: a bar of tabs and tools, sections that fold, headers as a table,
+           bodies as a tree. */
+        .dbar { display: flex; flex: none; align-items: center; gap: var(--sp-2); min-width: 0; padding: 0 var(--sp-2); border-bottom: 1px solid var(--line-hair); }
+        .dbar .dtabs { padding: 0; border-bottom: 0; }
+        .dbar-tools { display: flex; align-items: center; gap: 6px; min-width: 0; margin-left: auto; padding: 4px 0; }
+        .match-nav { display: inline-flex; align-items: center; gap: 2px; color: var(--ink2); font-size: var(--fs-11); white-space: nowrap; }
+        .match-nav .tb-btn { width: 22px; height: 22px; }
+        .dmeta .hits { color: var(--ink2); }
+        .net-split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0 var(--sp-4); }
+        .net-side { min-width: 0; }
+        .net-side + .net-side { padding-left: var(--sp-4); border-left: 1px solid var(--line-hair); }
+        @container insp (max-width: 700px) {
+          .net-split { grid-template-columns: minmax(0, 1fr); }
+          .net-side + .net-side { padding: var(--sp-3) 0 0; border-left: 0; border-top: 1px solid var(--line-hair); }
+          .dbar { flex-wrap: wrap; }
+        }
+        .side-title { margin: 2px 0 var(--sp-1); font-size: var(--fs-12); font-weight: 600; }
+        .dsec { margin: 0 0 var(--sp-2); }
+        .dsec > summary { display: flex; align-items: center; gap: 6px; padding: 4px 0; color: var(--ink2); font-size: var(--fs-11); font-weight: 600; list-style: none; cursor: pointer; }
+        .dsec > summary::-webkit-details-marker { display: none; }
+        .dsec > summary::before { content: ""; border-left: 4px solid currentColor; border-top: 3.5px solid transparent; border-bottom: 3.5px solid transparent; transition: transform var(--dur) var(--ease); }
+        .dsec[open] > summary::before { transform: rotate(90deg); }
+        .dsec > summary:hover { color: var(--ink1); }
+        .hdr { width: 100%; margin: 0 0 var(--sp-1); border-collapse: collapse; font: var(--fs-11)/1.5 var(--font-mono); }
+        .hdr th { width: 1%; min-width: 96px; max-width: 280px; padding: 1px var(--sp-4) 1px 0; color: var(--ink2); font-weight: 400; text-align: left; vertical-align: top; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .hdr td { padding: 1px 0; color: var(--ink1); overflow-wrap: anywhere; }
+        .hdr tr:hover > * { background: var(--g3); }
+        .body-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px var(--sp-2); margin: 0 0 6px; }
+        .body-meta { color: var(--ink2); font-size: var(--fs-11); }
+        .body-actions { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+        .jt { padding: var(--sp-2) var(--sp-3); border: 1px solid var(--line-hair); border-radius: var(--r-2); background: var(--g0); font: var(--fs-11)/1.6 var(--font-mono); overflow-wrap: anywhere; }
+        .jt-type { margin-bottom: 2px; color: var(--ink3); }
+        .jt-row { position: relative; padding-left: 14px; }
+        .jt details > summary { list-style: none; cursor: pointer; }
+        .jt details > summary::-webkit-details-marker { display: none; }
+        .jt summary.jt-row::before { content: "▸"; position: absolute; left: 0; color: var(--ink3); }
+        .jt details[open] > summary.jt-row::before { content: "▾"; }
+        .jt summary.jt-row:hover { background: var(--g3); }
+        .jt-kids { margin-left: 5px; padding-left: 9px; border-left: 1px solid var(--line-hair); }
+        .jt details:not([open]) > .jt-kids, .jt details:not([open]) > .jt-close { display: none; }
+        .jt details[open] > summary .jt-sum { display: none; }
+        .jt-key { color: var(--ink2); }
+        .jt-sum, .jt-brace, .jt-cut { color: var(--ink3); }
+        .jt-sum { margin-left: 4px; }
+        .j-enum, .j-raw { color: var(--ink1); }
+        .j-null { color: var(--json-lit); }
+        mark.current { box-shadow: 0 0 0 1.5px var(--accent); }
         .wf { position: relative; display: block; height: 6px; border-radius: 1px; background: var(--line-hair); }
         .wf i { position: absolute; top: 0; bottom: 0; min-width: 2px; border-radius: 1px; background: var(--ink3); }
         .wf i.ok { background: var(--ok-bar); } .wf i.warn { background: var(--warn); } .wf i.err { background: var(--err); } .wf i.info { background: var(--ink2); }

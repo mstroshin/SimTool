@@ -90,6 +90,23 @@ final class WebViewerPageTests: XCTestCase {
         XCTAssertTrue(page.contains(".tb-rec.recording .rec-dot {"), "a running recording is marked")
     }
 
+    // A call's detail: Request and Response, as tabs or side by side, each in
+    // sections that fold; bodies as trees that stay folded as a person left
+    // them; a search that marks what it found and steps through it.
+    func testTheNetworkDetailShowsRequestAndResponseAndTheSearchMarksWhatItFound() throws {
+        XCTAssertTrue(page.contains(#"const tabs = [["request", "Request"], ["response", "Response"]]"#))
+        XCTAssertTrue(page.contains(#"data-act="split" aria-pressed=""#), "request and response side by side")
+        XCTAssertTrue(page.contains(#"split: stored("network.split", false)"#))
+        XCTAssertTrue(page.contains(#"bodyView: stored("network.bodyView", "tree")"#))
+        XCTAssertTrue(page.contains("const parsed = parseBodyTree(text);"), "bodies are read as trees")
+        XCTAssertTrue(page.contains(#"networkView.detail.addEventListener("toggle", (domEvent) => {"#), "folds survive re-renders")
+        XCTAssertTrue(page.contains("fields: NETWORK_FILTER_FIELDS,"), "url:, header:, body: … scope the search")
+        XCTAssertTrue(page.contains("return matchesFilters(fields.all, chips, query.term, fields, query.field);"), "the search reads headers and bodies")
+        XCTAssertTrue(page.contains(#"'<span class="tag tag-hit" title="'"#), "a call found only in its body says where")
+        XCTAssertTrue(page.contains(#"data-act="next-match""#), "the marks can be stepped through")
+        XCTAssertTrue(page.contains("patchPane(networkView.detail, event.id + \"|\" + (network.split ? \"split\" : network.detailTab),"), "polling keeps the pane's scroll")
+    }
+
     // A person watching can tell what was done to the device, and by whom,
     // without opening anything: marks on the screen, the driver in the
     // toolbar, the last action under the device.

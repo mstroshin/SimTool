@@ -94,6 +94,73 @@ final class WebViewerLogicTests: XCTestCase {
         XCTAssertEqual(value(context, "held.map(e => e.n).join()"), "1,1", "what the page held is not changed under it")
     }
 
+    // MARK: - A call's detail
+
+    func testAJSONBodyIsATreeOfKeysAndItems() throws {
+        let context = try makeContext()
+        context.evaluateScript(#"var tree = parseBodyTree('{"user":{"id":42,"vip":true,"note":null},"tags":["a","b"]}');"#)
+        XCTAssertEqual(value(context, "tree.format + ' ' + tree.complete"), "json true")
+        XCTAssertEqual(value(context, "tree.root.children.map(c => c.key + ':' + c.kind).join(',')"), "user:object,tags:array")
+        XCTAssertEqual(value(context, "tree.root.children[0].children.map(c => c.key + '=' + c.type + ' ' + c.text).join(',')"), "id=num 42,vip=lit true,note=null null")
+        XCTAssertEqual(value(context, "tree.root.children[1].children.map(c => c.key + '=' + c.text).join(',')"), #"0="a",1="b""#)
+        XCTAssertEqual(value(context, "treeSize(tree.root)"), "8")
+    }
+
+    // gRPC loggers print messages in the protobuf text format, cut at the preview's length.
+    func testAProtobufTextMessageIsATreeAndACutOneReadsAsFarAsItGoes() throws {
+        let context = try makeContext()
+        context.evaluateScript(#"""
+        var whole = parseBodyTree('InvestAPI.PBPortfolioResponse:\nportfolio {\n  account_id: "acc \\"1\\""\n  total {\n    currency_code: "USD"\n    units: 5000\n  }\n  kind: KIND_CASH\n  open: true\n}\n');
+        var cut = parseBodyTree('Payments.Response:\nresponse {\n  attributes {\n    key: "account"\n    value {\n      per_o');
+        """#)
+        XCTAssertEqual(value(context, "whole.format + ' ' + whole.complete + ' ' + whole.root.typeName"), "proto true InvestAPI.PBPortfolioResponse")
+        let portfolio = "whole.root.children[0]"
+        XCTAssertEqual(value(context, "\(portfolio).key + ' ' + \(portfolio).kind"), "portfolio message")
+        XCTAssertEqual(value(context, "\(portfolio).children.map(c => c.key + '=' + (c.type || c.kind)).join(',')"), "account_id=str,total=message,kind=enum,open=lit")
+        XCTAssertEqual(value(context, "\(portfolio).children[0].value"), #"acc "1""#)
+        XCTAssertEqual(value(context, "\(portfolio).children[1].children[1].type"), "num")
+        XCTAssertEqual(value(context, "cut.format + ' ' + cut.complete"), "proto false", "a cut preview is still a tree, and says it is cut")
+        XCTAssertEqual(value(context, "cut.root.children[0].children[0].children[0].value"), "account")
+    }
+
+    func testTextThatIsNeitherStaysText() throws {
+        let context = try makeContext()
+        XCTAssertEqual(value(context, "parseBodyTree('hello world, nothing structured').format"), "text")
+        XCTAssertEqual(value(context, "parseBodyTree('{\"cut\": [1, 2').format"), "text", "a cut JSON preview is shown as text")
+        XCTAssertEqual(value(context, "parseBodyTree('').format"), "empty")
+    }
+
+    func testTheQueryIsDecodedAndTheStatusNamed() throws {
+        let context = try makeContext()
+        XCTAssertEqual(value(context, "JSON.stringify(queryParams('https://x.test/a?limit=20&cursor=abc%20def&flag&q=a+b#frag'))"),
+                       #"[["limit","20"],["cursor","abc def"],["flag",""],["q","a b"]]"#)
+        XCTAssertEqual(value(context, "queryParams('/svc.Service/Method').length"), "0")
+        XCTAssertEqual(value(context, "httpStatusText(404) + '|' + httpStatusText(503) + '|' + httpStatusText(299)"), "Not Found|Service Unavailable|")
+    }
+
+    // A search reads headers and bodies too, and says where it found the term.
+    func testASearchFindsATermInHeadersAndBodiesAndSaysWhere() throws {
+        let context = try makeContext()
+        context.evaluateScript(#"""
+        var call = { protocol: 'grpc',
+          request: { grpcService: 'pkg.Svc', grpcMethod: 'GetThing', path: '/pkg.Svc/GetThing', metadata: { 'x-trace': 'T-77' }, bodyPreview: 'Req:\nid: "abc"\n' },
+          response: { grpcStatusCode: '5', metadata: { server: 'envoy' }, bodyPreview: 'Resp:\nowner: "ABC Corp"\n' } };
+        var fields = networkSearchFields(call);
+        """#)
+        XCTAssertEqual(value(context, "networkHits(fields, 'abc').join(',')"), "request body,response body")
+        XCTAssertEqual(value(context, "networkHits(fields, 't-77').join(',')"), "request headers")
+        XCTAssertEqual(value(context, "networkHits(fields, 'not_found').join(',')"), "status", "a gRPC code is found by its name")
+        XCTAssertEqual(value(context, "networkHits(fields, 'abc', 'header').length"), "0", "header: searches the headers alone")
+        XCTAssertEqual(value(context, "networkHits(fields, 'getthing').join(',')"), "url,method")
+        XCTAssertEqual(value(context, "matchesFilters(fields.url + fields.body, [], 'corp', fields, 'body')"), "true")
+    }
+
+    func testMarksAreEscapedAndCaseInsensitive() throws {
+        let context = try makeContext()
+        XCTAssertEqual(value(context, "markHTML('<b>Token</b> token', 'TOKEN')"), "&lt;b&gt;<mark>Token</mark>&lt;/b&gt; <mark>token</mark>")
+        XCTAssertEqual(value(context, "markHTML('a&b', '')"), "a&amp;b")
+    }
+
     // MARK: - Filters
 
     func testChipsExcludeFirstThenIncludeAnyThenTheLiveText() throws {

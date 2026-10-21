@@ -181,13 +181,6 @@ function networkSize(event) {
   return size == null ? null : size;
 }
 
-function networkHaystack(event) {
-  const request = event.request || {};
-  const status = networkStatus(event);
-  return [requestPath(event), request.method, request.host, status.text, status.title, event.protocol,
-    event.mocked ? "mocked " + (event.mockRuleId || "") : ""].filter(Boolean).join(" ").toLowerCase();
-}
-
 function shellQuote(value) {
   return "'" + String(value).replace(/'/g, "'\\''") + "'";
 }
@@ -248,6 +241,171 @@ function mergeNetworkEvents(held, incoming, max) {
 }
 
 // ---- Filters: live text + include/exclude chips ----
+
+// ---- A call's detail: bodies as trees, search hits, what its status says ----
+
+const HTTP_STATUS_TEXT = {
+  100: "Continue", 101: "Switching Protocols", 200: "OK", 201: "Created", 202: "Accepted", 204: "No Content", 206: "Partial Content",
+  301: "Moved Permanently", 302: "Found", 303: "See Other", 304: "Not Modified", 307: "Temporary Redirect", 308: "Permanent Redirect",
+  400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found", 405: "Method Not Allowed", 406: "Not Acceptable",
+  408: "Request Timeout", 409: "Conflict", 410: "Gone", 412: "Precondition Failed", 413: "Content Too Large", 415: "Unsupported Media Type",
+  422: "Unprocessable Content", 429: "Too Many Requests", 500: "Internal Server Error", 501: "Not Implemented", 502: "Bad Gateway",
+  503: "Service Unavailable", 504: "Gateway Timeout"
+};
+
+function httpStatusText(code) {
+  return HTTP_STATUS_TEXT[Number(code)] || "";
+}
+
+// An URL's query as [name, value] pairs, decoded, in order; none for gRPC paths.
+function queryParams(url) {
+  const raw = String(url || "");
+  const start = raw.indexOf("?");
+  if (start < 0) return [];
+  const query = raw.slice(start + 1).split("#")[0];
+  const decode = (part) => { try { return decodeURIComponent(part.replace(/\+/g, " ")); } catch (_) { return part; } };
+  return query.split("&").filter(Boolean).map((pair) => {
+    const equals = pair.indexOf("=");
+    return equals < 0 ? [decode(pair), ""] : [decode(pair.slice(0, equals)), decode(pair.slice(equals + 1))];
+  });
+}
+
+// A body as a tree a person can fold: JSON, or the protobuf text format gRPC
+// loggers print (`Type:\nfield: value\nnested {\n…\n}`). A logger keeps only
+// a preview, so a body cut short still reads as far as it goes: `complete`
+// says whether it ended where it should.
+// A node: { key, kind: "object" | "array" | "message" | "value", type: "str" | "num" | "lit" | "null" | "enum", text, children }.
+function parseBodyTree(text) {
+  const body = String(text == null ? "" : text);
+  if (!body.trim()) return { format: "empty", root: null, complete: true };
+  const trimmed = body.trim();
+  if (trimmed[0] === "{" || trimmed[0] === "[") {
+    try { return { format: "json", root: jsonNode(null, JSON.parse(trimmed)), complete: true }; } catch (_) { /* a cut preview or not JSON */ }
+  }
+  const proto = parseProtoText(body);
+  if (proto) return proto;
+  return { format: "text", root: null, complete: true };
+}
+
+function jsonNode(key, value) {
+  if (Array.isArray(value)) return { key, kind: "array", children: value.map((item, index) => jsonNode(String(index), item)) };
+  if (value && typeof value === "object") return { key, kind: "object", children: Object.keys(value).map((name) => jsonNode(name, value[name])) };
+  if (typeof value === "string") return { key, kind: "value", type: "str", text: JSON.stringify(value), value };
+  if (typeof value === "number") return { key, kind: "value", type: "num", text: String(value), value: String(value) };
+  if (value === null) return { key, kind: "value", type: "null", text: "null", value: "null" };
+  return { key, kind: "value", type: "lit", text: String(value), value: String(value) };
+}
+
+// Protobuf text format, line by line. Null when the text does not read as it.
+function parseProtoText(body) {
+  const lines = body.split("\n");
+  let index = 0;
+  let typeName = null;
+  const first = lines[0].trim();
+  if (/^[A-Za-z_][\w.]*:$/.test(first)) { typeName = first.slice(0, -1); index = 1; }
+  const root = { key: null, kind: "message", typeName, children: [] };
+  const stack = [root];
+  let fields = 0;
+  let complete = true;
+  for (; index < lines.length; index++) {
+    const line = lines[index].trim();
+    if (!line) continue;
+    if (line === "}") {
+      if (stack.length === 1) return null;
+      stack.pop();
+      continue;
+    }
+    let match = /^([A-Za-z_][\w.\[\]/]*)\s*:?\s*\{$/.exec(line);
+    if (match) {
+      const node = { key: match[1], kind: "message", children: [] };
+      stack[stack.length - 1].children.push(node);
+      stack.push(node);
+      fields++;
+      continue;
+    }
+    match = /^([A-Za-z_][\w.\[\]/]*)\s*:\s*(.*)$/.exec(line);
+    if (match) {
+      const raw = match[2];
+      let type = "enum";
+      let value = raw;
+      if (/^".*"$/.test(raw) && raw.length > 1) { type = "str"; value = unquoteProto(raw.slice(1, -1)); }
+      else if (raw[0] === '"') { type = "str"; value = unquoteProto(raw.slice(1)); complete = false; }
+      else if (/^-?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?f?$/.test(raw) || /^-?(inf|nan)$/i.test(raw)) type = "num";
+      else if (raw === "true" || raw === "false") type = "lit";
+      else if (!/^[A-Za-z_][\w]*$/.test(raw)) type = "raw";
+      stack[stack.length - 1].children.push({ key: match[1], kind: "value", type, text: raw, value });
+      fields++;
+      continue;
+    }
+    // The last line of a cut preview may stop anywhere.
+    if (index === lines.length - 1 || lines.slice(index + 1).every((rest) => !rest.trim())) { complete = false; continue; }
+    return null;
+  }
+  if (!fields && !typeName) return null;
+  if (stack.length > 1) complete = false;
+  return { format: "proto", root, complete };
+}
+
+function unquoteProto(text) {
+  return text.replace(/\\(["'\\])/g, "$1").replace(/\\n/g, "\n").replace(/\\t/g, "\t");
+}
+
+// How many nodes a tree holds, itself included.
+function treeSize(node) {
+  if (!node) return 0;
+  return 1 + (node.children || []).reduce((sum, child) => sum + treeSize(child), 0);
+}
+
+// What a search runs over in a call, field by field (lowercased): its URL or
+// method path, method, status, host, both sides' headers or metadata, both bodies.
+function networkSearchFields(event) {
+  const request = event.request || {};
+  const response = event.response || {};
+  const status = networkStatus(event);
+  const headerLines = (entries) => Object.entries(entries || {}).map(([name, value]) => name + ": " + value).join("\n");
+  const fields = {
+    url: requestPath(event),
+    method: event.protocol === "grpc" ? "grpc " + (request.grpcMethod || "") : request.method || "",
+    status: [status.text, status.title, response.statusCode, response.grpcStatusCode, response.grpcStatusMessage, event.error && event.error.message].filter((part) => part != null && part !== "").join(" "),
+    host: request.host || request.grpcAuthority || "",
+    reqheader: headerLines(event.protocol === "grpc" ? request.metadata : request.headers),
+    resheader: headerLines(event.protocol === "grpc" ? response.metadata : response.headers),
+    reqbody: request.bodyPreview || "",
+    resbody: response.bodyPreview || "",
+    mock: event.mocked ? "mocked " + (event.mockRuleId || "") : ""
+  };
+  for (const name of Object.keys(fields)) fields[name] = String(fields[name]).toLowerCase();
+  fields.header = fields.reqheader + "\n" + fields.resheader;
+  fields.body = fields.reqbody + "\n" + fields.resbody;
+  return fields;
+}
+
+const NETWORK_FILTER_FIELDS = ["url", "method", "status", "host", "header", "body"];
+
+// Where a term is found in a call, in the order the detail shows them: the
+// first is where the detail opens. Empty when it is not there.
+function networkHits(fields, term, field) {
+  const needle = String(term || "").toLowerCase();
+  if (!needle) return [];
+  const places = [["url", "url"], ["method", "method"], ["status", "status"], ["host", "host"], ["reqheader", "request headers"],
+    ["reqbody", "request body"], ["resheader", "response headers"], ["resbody", "response body"], ["mock", "mock"]];
+  const scope = field === "header" ? ["reqheader", "resheader"] : field === "body" ? ["reqbody", "resbody"] : field ? [field] : null;
+  return places.filter(([name]) => (!scope || scope.includes(name)) && fields[name].indexOf(needle) >= 0).map(([, label]) => label);
+}
+
+// Text with every case-insensitive occurrence of `needle` marked, escaped for HTML.
+function markHTML(text, needle) {
+  const escape = (value) => String(value).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const source = String(text == null ? "" : text);
+  if (!needle) return escape(source);
+  const lower = source.toLowerCase(), find = String(needle).toLowerCase();
+  let out = "", at = 0, hit;
+  while (find && (hit = lower.indexOf(find, at)) >= 0) {
+    out += escape(source.slice(at, hit)) + "<mark>" + escape(source.slice(hit, hit + find.length)) + "</mark>";
+    at = hit + find.length;
+  }
+  return out + escape(source.slice(at));
+}
 
 // "field:text" scopes a term to one field instead of the whole haystack.
 // Only fields from the allowed list count; anything else (say, an URL's

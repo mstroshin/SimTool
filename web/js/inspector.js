@@ -170,7 +170,7 @@ function showDetail(panel, visible) { panel.classList.toggle("no-detail", !visib
 // ---- The filter field: live text plus include/exclude chips, per tab ----
 
 const FILTER_HELP = {
-  network: '<p><b>Type</b> to filter by name, host, path, status.</p><p><b>Enter</b> keeps the text as an include chip — show only matches; <b>-text Enter</b> makes an exclude chip.</p><p><b>Right-click</b> a request to show or hide its path.</p>',
+  network: '<p><b>Type</b> to search URLs, methods, statuses, headers and bodies; the matches are marked, and a call found only in its headers or body says where. <b>url:</b>, <b>method:</b>, <b>status:</b>, <b>host:</b>, <b>header:</b> or <b>body:</b> searches one of them.</p><p><b>Enter</b> keeps the text as an include chip — show only matches; <b>-text Enter</b> makes an exclude chip.</p><p><b>Right-click</b> a request to show or hide its path.</p>',
   logs: '<p><b>Type</b> to filter messages; <b>subsystem:text</b> (or category, process, level, message) matches one field.</p><p><b>Enter</b> keeps it as an include chip; <b>-text Enter</b> excludes.</p><p><b>Select text</b> in a line and right-click to show or hide it.</p>',
   state: '<p><b>Type</b> to filter models by name and their keys and values.</p>',
   ax: '<p><b>Type</b> to filter by identifier, label, role; matches keep their ancestors visible.</p>',

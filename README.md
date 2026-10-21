@@ -571,11 +571,22 @@ request/response bodies.
 The viewer's **Network** tab is a Proxyman-style inspector beside the live
 stream: requests with sortable columns, quick filters (HTTP or gRPC, problems —
 failed calls in red, 4xx and client-side gRPC codes in amber — and mocked
-calls), pause and clear, and a detail pane under the list with headers or
-metadata, request and response bodies, status (gRPC codes by name) and errors —
-plus **Copy as cURL** / **grpcurl** and **Copy as YAML mock**, a `mocks:` entry
-that answers the call the same way in a test. It updates live from the events
-endpoint.
+calls), pause and clear, and a detail pane under the list. Its head says the
+status (`404 Not Found`, gRPC codes by name), the duration, what was sent and
+received and when; under it **Request** and **Response** — as tabs, or **Side
+by side** — each in sections that fold and stay folded: the request's URL or
+gRPC service and method, its query parameters, then the body, then the headers
+or metadata; the response's errors first, then its body and headers. A body is
+a tree that folds — JSON, or the protobuf text format gRPC loggers print — or
+**Raw** text; a preview the app's logger cut short says so and reads as far as
+it goes. **Copy as cURL** / **grpcurl** and **Copy as YAML mock** (a `mocks:`
+entry that answers the call the same way in a test) sit beside it.
+
+The search field reads URLs, methods, statuses, hosts, headers and bodies —
+`url:`, `method:`, `status:`, `host:`, `header:` or `body:` narrows it to one —
+marks what it found in the list and the detail, tags a call found only in its
+headers or body with where (`response body`), opens the side it is on, and
+steps through the marks with ↑ ↓. It updates live from the events endpoint.
 
 The **Logs** tab is a live log inspector with level toggles, free text and
 field filters (`subsystem:`, `category:`, `process:`), follow mode — scrolling
