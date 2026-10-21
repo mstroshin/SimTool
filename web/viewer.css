@@ -544,8 +544,21 @@ mark.current { box-shadow: 0 0 0 1.5px var(--accent); }
 .wf i.ok { background: var(--ok-bar); } .wf i.warn { background: var(--warn); } .wf i.err { background: var(--err); } .wf i.info { background: var(--ink2); }
 
 /* Logs */
-.log-grid { grid-template-columns: 86px 62px minmax(110px, 20%) minmax(0, 1fr); }
-@container insp (max-width: 640px) { .log-grid { grid-template-columns: 86px 62px minmax(0, 1fr); } .log-grid .c-ss { display: none; } }
+/* The columns are the person's: their order and widths come as a grid template from logs.js. */
+.log-grid { grid-template-columns: var(--log-cols, 86px 62px 160px minmax(120px, 1fr)); }
+@container insp (max-width: 640px) { .log-grid { grid-template-columns: var(--log-cols-narrow, 86px 62px minmax(120px, 1fr)); } .log-grid .c-opt { display: none; } }
+.log-head .col { position: relative; display: flex; align-items: center; height: 100%; overflow: visible; cursor: grab; user-select: none; touch-action: none; }
+.log-head .col-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.log-head .col:hover { color: var(--ink1); }
+.log-head .col:focus-visible { outline-offset: -2px; }
+.log-head .col.dragging { color: var(--ink1); cursor: grabbing; }
+.log-head .col.drop-before::before, .log-head .col.drop-after::after { content: ""; position: absolute; top: 3px; bottom: 3px; width: 2px; border-radius: 1px; background: var(--accent); }
+.log-head .col.drop-before::before { left: -6px; }
+.log-head .col.drop-after::after { right: -6px; }
+.col-resize { position: absolute; top: 0; bottom: 0; right: -9px; z-index: 1; width: 9px; cursor: col-resize; touch-action: none; }
+.col-resize::before { content: ""; position: absolute; top: 5px; bottom: 5px; left: 4px; width: 1px; background: var(--line-thin); }
+.col-resize:hover::before, .col-resize:focus-visible::before, .col-resize.active::before { left: 3px; width: 3px; border-radius: 1px; background: var(--accent); }
+.col-resize:focus-visible { outline: none; }
 .lv { justify-self: start; padding: 2px 5px; border-radius: 3px; background: var(--g3); color: var(--ink2); font: 600 var(--fs-11)/1 var(--font-ui); }
 .lv-error { color: var(--err); background: transparent; box-shadow: inset 0 0 0 1px var(--err-line); }
 .lv-fault { color: var(--g1); background: var(--err); }

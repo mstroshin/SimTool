@@ -161,6 +161,37 @@ final class WebViewerLogicTests: XCTestCase {
         XCTAssertEqual(value(context, "markHTML('a&b', '')"), "a&amp;b")
     }
 
+    // MARK: - Log columns
+
+    func testASavedLogLayoutIsMadeWholeAndKeptInBounds() throws {
+        let context = try makeContext()
+        XCTAssertEqual(value(context, "logColumnLayout(null).map(c => c.key + (c.hidden ? '-' : '') + (c.width ? c.width : '')).join(',')"),
+                       "time86,level62,subsystem160,category-120,process-110,message", "by default category and process are off")
+        // Unknown and repeated columns go, widths are bounded, a missing column comes back where it belongs.
+        let saved = #"[{"key":"message"},{"key":"bogus","width":10},{"key":"time","width":5},{"key":"level","width":9999,"hidden":true},{"key":"time","width":300}]"#
+        XCTAssertEqual(value(context, "logColumnLayout(\(saved)).map(c => c.key + (c.hidden ? '-' : '') + (c.width ? c.width : '')).join(',')"),
+                       "message,time60,level-640,subsystem160,category-120,process-110")
+        XCTAssertEqual(value(context, "logColumnLayout([{ key: 'message', hidden: true }])[0].hidden"), "false", "the message is never hidden")
+        XCTAssertEqual(value(context, "logColumnLayout('not a list').length"), "6")
+    }
+
+    func testAMovedColumnStandsBeforeTheOneItWasDroppedOn() throws {
+        let context = try makeContext()
+        context.evaluateScript("var layout = logColumnLayout(null); var keys = (l) => l.map(c => c.key).join(',');")
+        XCTAssertEqual(value(context, "keys(moveLogColumn(layout, 'message', 1))"), "time,message,level,subsystem,category,process")
+        XCTAssertEqual(value(context, "keys(moveLogColumn(layout, 'time', 3))"), "level,subsystem,time,category,process,message", "moving right counts the gap it leaves")
+        XCTAssertEqual(value(context, "keys(moveLogColumn(layout, 'level', layout.length))"), "time,subsystem,category,process,message,level")
+        XCTAssertEqual(value(context, "keys(moveLogColumn(layout, 'nope', 0))"), "time,level,subsystem,category,process,message")
+    }
+
+    func testTheRowsGridFollowsTheShownColumnsAndANarrowPaneDropsTheOptionalOnes() throws {
+        let context = try makeContext()
+        context.evaluateScript("var layout = moveLogColumn(logColumnLayout([{ key: 'subsystem', width: 200 }, { key: 'process', hidden: false }]), 'message', 0);")
+        XCTAssertEqual(value(context, "logGridTemplate(layout, false)"), "minmax(120px, 1fr) 86px 62px 200px 110px")
+        XCTAssertEqual(value(context, "logGridTemplate(layout, true)"), "minmax(120px, 1fr) 86px 62px")
+        XCTAssertEqual(value(context, "shownLogColumns(layout, true).map(c => c.key).join(',')"), "message,time,level")
+    }
+
     // MARK: - Filters
 
     func testChipsExcludeFirstThenIncludeAnyThenTheLiveText() throws {

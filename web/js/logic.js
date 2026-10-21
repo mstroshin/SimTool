@@ -484,6 +484,60 @@ function logLine(entry) {
   return head + ": " + (entry.message || "");
 }
 
+// ---- Log columns: their order, widths and which are shown, as a person left them ----
+
+const LOG_COLUMN_KEYS = ["time", "level", "subsystem", "category", "process", "message"];
+const LOG_COLUMN_WIDTHS = { time: 86, level: 62, subsystem: 160, category: 120, process: 110 };
+const LOG_COLUMN_MIN = { time: 60, level: 48, subsystem: 60, category: 60, process: 60 };
+const LOG_COLUMNS_OFF = ["category", "process"];       // off until a person shows them
+const LOG_COLUMNS_NARROW_OFF = ["subsystem", "category", "process"];  // a narrow pane keeps time, level, message
+
+function clampLogColumnWidth(key, width) {
+  return Math.round(Math.max(LOG_COLUMN_MIN[key] || 48, Math.min(640, Number(width) || LOG_COLUMN_WIDTHS[key] || 100)));
+}
+
+// A saved layout made whole: every known column once, unknown ones dropped,
+// widths in bounds; a column the saved one lacks goes where it goes by default.
+// The message takes what is left, so it has no width and is never hidden.
+function logColumnLayout(saved) {
+  const list = Array.isArray(saved) ? saved.filter((column) => column && LOG_COLUMN_KEYS.indexOf(column.key) >= 0) : [];
+  const byKey = {};
+  const order = [];
+  for (const column of list) if (!byKey[column.key]) { byKey[column.key] = column; order.push(column.key); }
+  // A missing column goes after the one it follows by default, else first.
+  LOG_COLUMN_KEYS.forEach((key, index) => {
+    if (order.indexOf(key) >= 0) return;
+    const after = LOG_COLUMN_KEYS.slice(0, index).reverse().find((previous) => order.indexOf(previous) >= 0);
+    order.splice(after ? order.indexOf(after) + 1 : 0, 0, key);
+  });
+  return order.map((key) => {
+    const column = byKey[key];
+    if (key === "message") return { key, width: null, hidden: false };
+    return { key, width: clampLogColumnWidth(key, column && column.width), hidden: column ? !!column.hidden : LOG_COLUMNS_OFF.indexOf(key) >= 0 };
+  });
+}
+
+// The layout with `key` moved to stand before the column now at `before`
+// (the length of the layout: last).
+function moveLogColumn(layout, key, before) {
+  const from = layout.findIndex((column) => column.key === key);
+  if (from < 0) return layout;
+  const next = layout.slice();
+  const [column] = next.splice(from, 1);
+  const to = Math.max(0, Math.min(next.length, before > from ? before - 1 : before));
+  next.splice(to, 0, column);
+  return next;
+}
+
+// The columns a row draws, in order — fewer in a narrow pane.
+function shownLogColumns(layout, narrow) {
+  return layout.filter((column) => !column.hidden && !(narrow && LOG_COLUMNS_NARROW_OFF.indexOf(column.key) >= 0));
+}
+
+function logGridTemplate(layout, narrow) {
+  return shownLogColumns(layout, narrow).map((column) => column.key === "message" ? "minmax(120px, 1fr)" : column.width + "px").join(" ");
+}
+
 // The lines after the cursor: a line the page already has is never added twice,
 // whichever way — stream, replay or poll — it arrives again.
 function linesAfter(entries, cursor) {

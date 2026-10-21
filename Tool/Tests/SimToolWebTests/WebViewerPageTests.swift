@@ -107,6 +107,22 @@ final class WebViewerPageTests: XCTestCase {
         XCTAssertTrue(page.contains("patchPane(networkView.detail, event.id + \"|\" + (network.split ? \"split\" : network.detailTab),"), "polling keeps the pane's scroll")
     }
 
+    // Logs' columns move by dragging their names, size by dragging their edges,
+    // show or hide from the header's menu, and stay as a person left them.
+    func testLogColumnsMoveResizeAndAreRemembered() throws {
+        XCTAssertTrue(page.contains(#"let logColumns = logColumnLayout(stored("logs.columns", null));"#), "the layout is read back")
+        XCTAssertTrue(page.contains(#"if (save) store("logs.columns", logColumns);"#), "and kept")
+        XCTAssertTrue(page.contains(#"logsView.list.style.setProperty("--log-cols", logGridTemplate(logColumns, false));"#))
+        XCTAssertTrue(page.contains(".log-grid { grid-template-columns: var(--log-cols,"), "the rows follow the header's widths")
+        XCTAssertTrue(page.contains(#"aria-roledescription="movable column""#))
+        XCTAssertTrue(page.contains(#"role="separator" aria-orientation="vertical" tabindex="0" data-resize=""#), "an edge sizes its column, from the keyboard too")
+        XCTAssertTrue(page.contains("setLogColumns(moveLogColumn(logColumns, drag.key, drag.before));"), "a drop moves the column")
+        XCTAssertTrue(page.contains("if (event.altKey) { moveLogColumnBy(cell.dataset.col, step); return; }"), "⌥←/⌥→ moves it without a mouse")
+        XCTAssertTrue(page.contains(#"row.innerHTML = logColumns.filter((column) => !column.hidden).map((column) => LOG_CELLS[column.key](entry, level, query)).join("");"#), "rows draw the cells in the header's order")
+        let stored = try XCTUnwrap(page.range(of: "function stored(key, fallback) {"))
+        XCTAssertTrue(page[stored.upperBound...].prefix(200).contains("try {"), "storage that throws leaves the default layout")
+    }
+
     // A person watching can tell what was done to the device, and by whom,
     // without opening anything: marks on the screen, the driver in the
     // toolbar, the last action under the device.

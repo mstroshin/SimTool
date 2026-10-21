@@ -225,7 +225,11 @@ client-side problems (4xx, gRPC client codes) an amber one — the colours the r
 ### Lists
 Keyed rows that survive polling, 26 px high, roving focus, ↑/↓/Home/End,
 Enter to open, Esc to clear, Shift-F10 for the row's menu; sticky column
-headers that sort; app launches as collapsible groups.
+headers that sort; app launches as collapsible groups. Logs' columns are the person's:
+dragged into another order by their names, sized by the line at their right
+edge (accent while it is dragged or focused), shown or hidden from the header's
+menu — remembered per browser. A request's body reads as a tree that folds, in
+the code block's ground, with the JSON inks.
 
 ### Redlines (signature)
 Faint outlines on every element a test can name; a dashed outline on the

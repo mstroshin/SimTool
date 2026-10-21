@@ -591,7 +591,11 @@ steps through the marks with ↑ ↓. It updates live from the events endpoint.
 The **Logs** tab is a live log inspector with level toggles, free text and
 field filters (`subsystem:`, `category:`, `process:`), follow mode — scrolling
 up to read turns it off, scrolling back to the end turns it on — and clear; a
-line is red only when its level is Error or Fault. When scoped to an app it
+line is red only when its level is Error or Fault. Its columns are yours: drag a
+column's name to move it and its right edge to size it (double-click the edge
+resets it; ⌥← ⌥→ and ←/→ on the edge do the same from the keyboard), and
+right-click the header to show **Category** and **Process** or reset them —
+the viewer keeps the layout for this browser. When scoped to an app it
 captures both the app's OSLog and its `print`/stdout output (via
 `--console-pty`), polling the capture endpoint incrementally by cursor; no app
 instrumentation is required.
