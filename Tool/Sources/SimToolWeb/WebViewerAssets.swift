@@ -4178,8 +4178,13 @@ enum WebViewerAssets {
           $("deviceName").textContent = deviceInfo.name || "Simulator";
           $("deviceRuntime").textContent = runtimeName(config.runtime);
           document.title = (deviceInfo.name ? deviceInfo.name + " — " : "") + "SimTool";
-          $("appName").textContent = deviceInfo.app || "No app";
-          $("appName").title = deviceInfo.app ? "App under test: " + deviceInfo.app : "No app attached — start the server with --app <bundle-id>";
+          // The app is named once, in the status bar; the toolbar's app buttons say which app they act on.
+          $("sbApp").title = deviceInfo.app ? "App under test" : "Start the server with --app <bundle-id>";
+          for (const [id, verb] of [["terminateButton", "Terminate"], ["relaunchButton", "Relaunch"]]) {
+            const label = verb + " " + (deviceInfo.app || "the app");
+            $(id).dataset.tip = label;
+            $(id).setAttribute("aria-label", label);
+          }
           $("sbDevice").textContent = [deviceInfo.name, runtimeName(config.runtime)].filter(Boolean).join(" · ");
           $("sbUdid").textContent = deviceInfo.udid ? deviceInfo.udid.slice(0, 4) + "…" + deviceInfo.udid.slice(-4) : "";
           $("sbServer").textContent = location.host;
@@ -6592,7 +6597,6 @@ enum WebViewerAssets {
         .app[data-conn="live"] .conn-dot { background: var(--ok); }
         .app[data-conn="reconnecting"] .conn-dot, .app[data-conn="offline"] .conn-dot { background: var(--err); }
         .app[data-mode="replay"] .conn-dot { background: var(--ink2); }
-        .tb-app { padding: 0 4px; color: var(--ink2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 200px; }
 
         .tb-btn {
           display: inline-grid; place-items: center; width: 28px; height: 28px; flex: none; border: 0; border-radius: var(--r-2);
@@ -6656,8 +6660,8 @@ enum WebViewerAssets {
         /* The toolbar sheds words before it sheds actions: every button keeps its icon, label and
            shortcut tip. These come after the base rules so that they win over them. */
         @container bar (max-width: 1060px) { .cmdk-label, .cmdk kbd { display: none; } .cmdk { min-width: 0; } }
-        @container bar (max-width: 940px) { .toggle-label, .driver-label { display: none; } .driver-short { display: inline; } .tb-app { max-width: 120px; } }
-        @container bar (max-width: 820px) { .tb-app, #deviceRuntime, .tb-sep { display: none; } }
+        @container bar (max-width: 940px) { .toggle-label, .driver-label { display: none; } .driver-short { display: inline; } }
+        @container bar (max-width: 820px) { #deviceRuntime, .tb-sep { display: none; } }
         @container bar (max-width: 700px) {
           .brand-name { display: none; }
           .conn-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
@@ -7321,7 +7325,6 @@ enum WebViewerAssets {
                 <button class="tb-btn" type="button" id="shakeButton" aria-label="Shake" data-tip="Shake" data-key="⌃⌘Z" aria-keyshortcuts="Control+Meta+Z"><svg class="ic" aria-hidden="true"><use href="#i-shake"/></svg></button>
                 <button class="tb-btn tb-menu" type="button" id="keyboardButton" aria-haspopup="menu" aria-expanded="false" aria-label="Keyboard" data-tip="Keyboard — the software keyboard and the Mac keyboard"><svg class="ic" aria-hidden="true"><use href="#i-keyboard"/></svg><svg class="ic caret" aria-hidden="true"><use href="#i-chev-d"/></svg></button>
                 <span class="tb-sep" aria-hidden="true"></span>
-                <span class="tb-app" id="appName" title="App under test">No app</span>
                 <button class="tb-btn" type="button" id="terminateButton" aria-label="Terminate app" data-tip="Terminate app"><svg class="ic" aria-hidden="true"><use href="#i-stop"/></svg></button>
                 <button class="tb-btn" type="button" id="relaunchButton" aria-label="Relaunch app" data-tip="Relaunch app"><svg class="ic" aria-hidden="true"><use href="#i-relaunch"/></svg></button>
               </div>

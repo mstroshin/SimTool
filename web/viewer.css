@@ -101,7 +101,6 @@ code { font: var(--fs-11)/1.4 var(--font-mono); }
 .app[data-conn="live"] .conn-dot { background: var(--ok); }
 .app[data-conn="reconnecting"] .conn-dot, .app[data-conn="offline"] .conn-dot { background: var(--err); }
 .app[data-mode="replay"] .conn-dot { background: var(--ink2); }
-.tb-app { padding: 0 4px; color: var(--ink2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 200px; }
 
 .tb-btn {
   display: inline-grid; place-items: center; width: 28px; height: 28px; flex: none; border: 0; border-radius: var(--r-2);
@@ -165,8 +164,8 @@ code { font: var(--fs-11)/1.4 var(--font-mono); }
 /* The toolbar sheds words before it sheds actions: every button keeps its icon, label and
    shortcut tip. These come after the base rules so that they win over them. */
 @container bar (max-width: 1060px) { .cmdk-label, .cmdk kbd { display: none; } .cmdk { min-width: 0; } }
-@container bar (max-width: 940px) { .toggle-label, .driver-label { display: none; } .driver-short { display: inline; } .tb-app { max-width: 120px; } }
-@container bar (max-width: 820px) { .tb-app, #deviceRuntime, .tb-sep { display: none; } }
+@container bar (max-width: 940px) { .toggle-label, .driver-label { display: none; } .driver-short { display: inline; } }
+@container bar (max-width: 820px) { #deviceRuntime, .tb-sep { display: none; } }
 @container bar (max-width: 700px) {
   .brand-name { display: none; }
   .conn-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
