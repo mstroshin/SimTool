@@ -119,7 +119,13 @@ code { font: var(--fs-11)/1.4 var(--font-mono); }
 .toggle:hover { background: var(--g3); color: var(--ink1); }
 .toggle[aria-pressed="true"] { color: var(--accent); border-color: var(--accent-line); background: var(--accent-bg); }
 .toggle-sm { height: 26px; padding: 0 8px; }
-#keyboardToggle[aria-pressed="true"] { color: var(--course); border-color: var(--course); background: var(--course-bg); }
+/* A toolbar button with a menu: its icon and a caret. The keyboard's turns course ink while
+   the Mac keyboard types into the device. */
+.tb-menu { width: auto; grid-auto-flow: column; gap: 1px; padding: 0 3px 0 6px; }
+.tb-menu .caret { width: 10px; height: 10px; stroke-width: 2; color: var(--ink3); }
+.tb-menu[aria-expanded="true"] { background: var(--g3); color: var(--ink1); }
+.tb-menu.on { color: var(--course); background: var(--course-bg); box-shadow: inset 0 0 0 1px var(--course-line); }
+.tb-menu.on .caret { color: var(--course); }
 
 .cmdk {
   display: inline-flex; align-items: center; gap: 8px; min-width: 180px; height: 28px; padding: 0 6px 0 8px;
@@ -623,6 +629,15 @@ mark { border-radius: 2px; background: var(--mark-bg); color: inherit; }
 .menu button .ic { color: var(--ink2); }
 .menu button kbd { margin-left: auto; }
 .menu hr { margin: 4px 2px; border: 0; border-top: 1px solid var(--line-thin); }
+.menu .m-caption { padding: 6px 8px 2px; color: var(--ink3); font-size: var(--fs-11); font-weight: 500; }
+/* A switch says whether an item is on; a choice of several is ticked when chosen. */
+.menu .m-switch { position: relative; flex: none; width: 24px; height: 14px; margin-left: auto; border-radius: 7px; background: var(--line-thick); }
+.menu .m-switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 10px; height: 10px; border-radius: 50%; background: var(--g2); transition: transform var(--dur) var(--ease); }
+.menu [aria-checked="true"] .m-switch { background: var(--course); }
+.menu [aria-checked="true"] .m-switch::after { transform: translateX(10px); }
+.menu .m-switch + kbd { margin-left: 0; }
+.menu .m-radio[aria-checked="false"] .ic { visibility: hidden; }
+.menu .m-radio[aria-checked="true"] .ic { color: var(--accent); }
 .menu .m-course, .menu .m-course .ic { color: var(--course); }
 .menu .m-danger, .menu .m-danger .ic { color: var(--err); }
 /* A destructive item lights up in its own ink: red on the blue tint falls under 4.5:1 in graphite. */

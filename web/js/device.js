@@ -508,10 +508,24 @@ function popupOpen() {
   return modalOpen() || !$("popover").hidden;
 }
 
+// One toolbar button for both keyboards: its menu shows or hides the software
+// keyboard and connects the Mac keyboard, with a switch that says whether it is
+// connected; the button itself turns course ink while it is.
+function keyboardMenuItems() {
+  const usable = screenState.connection === "live" && app.dataset.mode !== "replay";
+  return [
+    { icon: "keyboard", label: "Show or hide the software keyboard", kbd: keyboardBridge.enabled ? "⌘K" : "", disabled: !usable, run: toggleSoftwareKeyboard },
+    { icon: "laptop", label: "Connect the Mac keyboard", kbd: "⇧⌘K", checked: keyboardBridge.enabled, run: () => setKeyboardMode(!keyboardBridge.enabled) }
+  ];
+}
+
 function updateKeyboardIndicator() {
   const on = keyboardBridge.enabled;
   const live = on && document.hasFocus() && !isEditableTarget(document.activeElement);
-  $("keyboardToggle").setAttribute("aria-pressed", String(on));
+  const button = $("keyboardButton");
+  button.classList.toggle("on", on);
+  button.setAttribute("aria-label", on ? "Keyboard — the Mac keyboard is connected" : "Keyboard");
+  button.dataset.tip = on ? "The Mac keyboard types into the simulator — ⇧⌘K releases it" : "Keyboard — the software keyboard and the Mac keyboard";
   app.classList.toggle("keys-on", on);
   app.classList.toggle("keys-paused", on && !live);
   $("sbKeys").textContent = !on ? "Keys → page" : live ? "Keys → device · ⇧⌘K releases" : "Keys paused · click the screen";
@@ -573,16 +587,15 @@ for (const button of $("foldGroup").querySelectorAll("[data-pose]")) button.addE
 $("view3dButton").addEventListener("click", () => setView3D(!screenState.view3d));
 $("screenshotButton").addEventListener("click", saveScreenshot);
 $("shakeButton").addEventListener("click", pressShake);
-$("softKeyboardButton").addEventListener("click", toggleSoftwareKeyboard);
+wireMenuButton($("keyboardButton"), keyboardMenuItems);
 $("terminateButton").addEventListener("click", terminateApp);
 $("relaunchButton").addEventListener("click", relaunchApp);
-$("keyboardToggle").addEventListener("click", () => setKeyboardMode(!keyboardBridge.enabled));
 $("sbUdid").addEventListener("click", () => { if (deviceInfo.udid) copyText(deviceInfo.udid, "UDID copied"); });
 
 // Device actions act on the live device: off while it is unreachable or a recording plays.
 function updateDeviceButtons() {
   const usable = screenState.connection === "live" && app.dataset.mode !== "replay";
-  for (const id of ["homeButton", "screenshotButton", "shakeButton", "softKeyboardButton", "terminateButton", "relaunchButton"]) $(id).disabled = !usable;
+  for (const id of ["homeButton", "screenshotButton", "shakeButton", "terminateButton", "relaunchButton"]) $(id).disabled = !usable;
   renderFold();
 }
 

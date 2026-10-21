@@ -925,14 +925,25 @@ enum WebViewerAssets {
         // ---- Menus (APG menu: arrows move, Enter runs, Esc returns focus) ----
 
         let menuOpener = null;
-        // items: [{ icon, label, kbd, run, tone: "course"|"danger", disabled }] or "-" for a rule.
+        // items: [{ icon, label, kbd, run, tone: "course"|"danger", disabled }], "-" for a rule, or
+        // { caption } naming the items under it. An item with `checked` is a switch that says
+        // whether it is on; with `radio` too, it is one choice of several, ticked when chosen.
         function openMenu(x, y, items, opener) {
           const menu = $("menu");
+          if (!menu.hidden) setMenuExpanded(false);
           menu.innerHTML = "";
           for (const item of items) {
             if (item === "-") { menu.append(el("hr", { role: "separator" })); continue; }
-            const button = el("button", { type: "button", role: "menuitem", tabindex: "-1", class: item.tone ? "m-" + item.tone : null, disabled: item.disabled },
-              el("span", { html: icon(item.icon || "chev-r") }), el("span", { text: item.label }), item.kbd ? el("kbd", { text: item.kbd }) : null);
+            if (item.caption) { menu.append(el("div", { class: "m-caption", role: "presentation", text: item.caption })); continue; }
+            const choice = item.checked != null;
+            const button = el("button", {
+              type: "button", role: choice ? (item.radio ? "menuitemradio" : "menuitemcheckbox") : "menuitem", tabindex: "-1",
+              class: [item.tone ? "m-" + item.tone : "", item.radio ? "m-radio" : ""].join(" ").trim() || null,
+              disabled: item.disabled, "aria-checked": choice ? String(!!item.checked) : null
+            },
+              el("span", { html: icon(item.radio ? "check" : item.icon || "chev-r") }), el("span", { text: item.label }),
+              choice && !item.radio ? el("span", { class: "m-switch", "aria-hidden": "true" }) : null,
+              item.kbd ? el("kbd", { text: item.kbd }) : null);
             button.addEventListener("click", () => { closeMenu(); item.run(); });
             menu.append(button);
           }
@@ -941,17 +952,40 @@ enum WebViewerAssets {
           menu.style.left = Math.max(6, Math.min(x, innerWidth - rect.width - 6)) + "px";
           menu.style.top = Math.max(6, Math.min(y, innerHeight - rect.height - 6)) + "px";
           menuOpener = opener || document.activeElement;
+          setMenuExpanded(true);
           const first = menu.querySelector("button:not([disabled])");
           if (first) first.focus();
+        }
+
+        // A button that opens a menu says whether it is open.
+        function setMenuExpanded(open) {
+          if (menuOpener && menuOpener.getAttribute && menuOpener.getAttribute("aria-haspopup") === "menu") menuOpener.setAttribute("aria-expanded", String(open));
         }
 
         function closeMenu(restoreFocus) {
           const menu = $("menu");
           if (menu.hidden) return false;
           menu.hidden = true;
+          setMenuExpanded(false);
           if (restoreFocus && menuOpener && menuOpener.focus) menuOpener.focus();
           menuOpener = null;
           return true;
+        }
+
+        // A toolbar button whose menu drops under it: a click, Enter, Space or ↓ opens
+        // it, and a click on the open menu's button closes it. `items()` is read at
+        // every opening, so the menu shows the state of the moment.
+        function wireMenuButton(button, items) {
+          button.addEventListener("click", () => {
+            if (!$("menu").hidden && menuOpener === button) { closeMenu(); return; }
+            const rect = button.getBoundingClientRect();
+            openMenu(rect.left, rect.bottom + 4, items(), button);
+          });
+          button.addEventListener("keydown", (event) => {
+            if (event.key !== "ArrowDown") return;
+            event.preventDefault();
+            if ($("menu").hidden || menuOpener !== button) button.click();
+          });
         }
 
         $("menu").addEventListener("keydown", (event) => {
@@ -1697,10 +1731,24 @@ enum WebViewerAssets {
           return modalOpen() || !$("popover").hidden;
         }
 
+        // One toolbar button for both keyboards: its menu shows or hides the software
+        // keyboard and connects the Mac keyboard, with a switch that says whether it is
+        // connected; the button itself turns course ink while it is.
+        function keyboardMenuItems() {
+          const usable = screenState.connection === "live" && app.dataset.mode !== "replay";
+          return [
+            { icon: "keyboard", label: "Show or hide the software keyboard", kbd: keyboardBridge.enabled ? "⌘K" : "", disabled: !usable, run: toggleSoftwareKeyboard },
+            { icon: "laptop", label: "Connect the Mac keyboard", kbd: "⇧⌘K", checked: keyboardBridge.enabled, run: () => setKeyboardMode(!keyboardBridge.enabled) }
+          ];
+        }
+
         function updateKeyboardIndicator() {
           const on = keyboardBridge.enabled;
           const live = on && document.hasFocus() && !isEditableTarget(document.activeElement);
-          $("keyboardToggle").setAttribute("aria-pressed", String(on));
+          const button = $("keyboardButton");
+          button.classList.toggle("on", on);
+          button.setAttribute("aria-label", on ? "Keyboard — the Mac keyboard is connected" : "Keyboard");
+          button.dataset.tip = on ? "The Mac keyboard types into the simulator — ⇧⌘K releases it" : "Keyboard — the software keyboard and the Mac keyboard";
           app.classList.toggle("keys-on", on);
           app.classList.toggle("keys-paused", on && !live);
           $("sbKeys").textContent = !on ? "Keys → page" : live ? "Keys → device · ⇧⌘K releases" : "Keys paused · click the screen";
@@ -1762,16 +1810,15 @@ enum WebViewerAssets {
         $("view3dButton").addEventListener("click", () => setView3D(!screenState.view3d));
         $("screenshotButton").addEventListener("click", saveScreenshot);
         $("shakeButton").addEventListener("click", pressShake);
-        $("softKeyboardButton").addEventListener("click", toggleSoftwareKeyboard);
+        wireMenuButton($("keyboardButton"), keyboardMenuItems);
         $("terminateButton").addEventListener("click", terminateApp);
         $("relaunchButton").addEventListener("click", relaunchApp);
-        $("keyboardToggle").addEventListener("click", () => setKeyboardMode(!keyboardBridge.enabled));
         $("sbUdid").addEventListener("click", () => { if (deviceInfo.udid) copyText(deviceInfo.udid, "UDID copied"); });
 
         // Device actions act on the live device: off while it is unreachable or a recording plays.
         function updateDeviceButtons() {
           const usable = screenState.connection === "live" && app.dataset.mode !== "replay";
-          for (const id of ["homeButton", "screenshotButton", "shakeButton", "softKeyboardButton", "terminateButton", "relaunchButton"]) $(id).disabled = !usable;
+          for (const id of ["homeButton", "screenshotButton", "shakeButton", "terminateButton", "relaunchButton"]) $(id).disabled = !usable;
           renderFold();
         }
 
@@ -4117,7 +4164,7 @@ enum WebViewerAssets {
             ["Device", "copy", "Copy screenshot", "", copyScreenshot],
             ["Device", "shake", "Shake", "⌃⌘Z", pressShake],
             ["Device", "keyboard", "Show or hide the software keyboard", keyboardBridge.enabled ? "⌘K" : "", toggleSoftwareKeyboard],
-            ["Device", "keyboard", keyboardBridge.enabled ? "Stop typing with the Mac keyboard" : "Type with the Mac keyboard", "⇧⌘K", () => setKeyboardMode(!keyboardBridge.enabled)],
+            ["Device", "laptop", keyboardBridge.enabled ? "Disconnect the Mac keyboard" : "Connect the Mac keyboard — type into the simulator", "⇧⌘K", () => setKeyboardMode(!keyboardBridge.enabled)],
             ["Device", "paste", "Paste the Mac clipboard", "⌘V", pasteFromClipboard],
             ["Device", "photo", "Add files to Photos…", "", () => $("photosFile").click()]
           ];
@@ -4257,7 +4304,7 @@ enum WebViewerAssets {
           openPopover($("paletteButton"),
             "<p><b>⇧⌘P</b> commands · <b>⌥1–5</b> inspector tabs · <b>⌥⌘0</b> show or hide the inspector · <b>/</b> filter</p>" +
             "<p><b>↑ ↓</b> move in a list · <b>Enter</b> open · <b>Esc</b> close · <b>⇧F10</b> the row's menu</p>" +
-            "<p><b>⇧⌘H</b> Home · <b>⌘S</b> screenshot · <b>⌃⌘Z</b> shake · <b>⇧⌘K</b> type with the Mac keyboard (⇧⌘K again releases it) · <b>⌘K</b> software keyboard while typing</p>" +
+            "<p><b>⇧⌘H</b> Home · <b>⌘S</b> screenshot · <b>⌃⌘Z</b> shake · <b>⇧⌘K</b> connect the Mac keyboard (⇧⌘K again releases it) · <b>⌘K</b> software keyboard while typing</p>" +
             "<p><b>⌥-drag</b> pinch or rotate · <b>⌥⇧-drag</b> two-finger pan · the wheel scrolls · <b>P</b> picks elements in Accessibility · <b>⌘↩</b> runs the selected test</p>");
         }
 
@@ -4296,9 +4343,10 @@ enum WebViewerAssets {
           if (event.key === " " && app.dataset.mode === "replay" && event.target === document.body) { event.preventDefault(); $("playPause").click(); }
         });
 
-        // A click outside closes menus and popovers.
+        // A click outside closes menus and popovers; the button of an open menu closes it itself.
         document.addEventListener("mousedown", (event) => {
-          if (!$("menu").hidden && !$("menu").contains(event.target)) closeMenu();
+          const onMenuButton = menuOpener && menuOpener.contains && menuOpener.contains(event.target) && menuOpener.getAttribute("aria-haspopup") === "menu";
+          if (!$("menu").hidden && !$("menu").contains(event.target) && !onMenuButton) closeMenu();
           if (!$("popover").hidden && !$("popover").contains(event.target) && !event.target.closest("[aria-haspopup=dialog]")) closePopover();
         });
         window.addEventListener("resize", () => { closeMenu(); closePopover(); });
@@ -5852,7 +5900,13 @@ enum WebViewerAssets {
         .toggle:hover { background: var(--g3); color: var(--ink1); }
         .toggle[aria-pressed="true"] { color: var(--accent); border-color: var(--accent-line); background: var(--accent-bg); }
         .toggle-sm { height: 26px; padding: 0 8px; }
-        #keyboardToggle[aria-pressed="true"] { color: var(--course); border-color: var(--course); background: var(--course-bg); }
+        /* A toolbar button with a menu: its icon and a caret. The keyboard's turns course ink while
+           the Mac keyboard types into the device. */
+        .tb-menu { width: auto; grid-auto-flow: column; gap: 1px; padding: 0 3px 0 6px; }
+        .tb-menu .caret { width: 10px; height: 10px; stroke-width: 2; color: var(--ink3); }
+        .tb-menu[aria-expanded="true"] { background: var(--g3); color: var(--ink1); }
+        .tb-menu.on { color: var(--course); background: var(--course-bg); box-shadow: inset 0 0 0 1px var(--course-line); }
+        .tb-menu.on .caret { color: var(--course); }
 
         .cmdk {
           display: inline-flex; align-items: center; gap: 8px; min-width: 180px; height: 28px; padding: 0 6px 0 8px;
@@ -6356,6 +6410,15 @@ enum WebViewerAssets {
         .menu button .ic { color: var(--ink2); }
         .menu button kbd { margin-left: auto; }
         .menu hr { margin: 4px 2px; border: 0; border-top: 1px solid var(--line-thin); }
+        .menu .m-caption { padding: 6px 8px 2px; color: var(--ink3); font-size: var(--fs-11); font-weight: 500; }
+        /* A switch says whether an item is on; a choice of several is ticked when chosen. */
+        .menu .m-switch { position: relative; flex: none; width: 24px; height: 14px; margin-left: auto; border-radius: 7px; background: var(--line-thick); }
+        .menu .m-switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 10px; height: 10px; border-radius: 50%; background: var(--g2); transition: transform var(--dur) var(--ease); }
+        .menu [aria-checked="true"] .m-switch { background: var(--course); }
+        .menu [aria-checked="true"] .m-switch::after { transform: translateX(10px); }
+        .menu .m-switch + kbd { margin-left: 0; }
+        .menu .m-radio[aria-checked="false"] .ic { visibility: hidden; }
+        .menu .m-radio[aria-checked="true"] .ic { color: var(--accent); }
         .menu .m-course, .menu .m-course .ic { color: var(--course); }
         .menu .m-danger, .menu .m-danger .ic { color: var(--err); }
         /* A destructive item lights up in its own ink: red on the blue tint falls under 4.5:1 in graphite. */
@@ -6414,6 +6477,7 @@ enum WebViewerAssets {
               <symbol id="i-shake" viewBox="0 0 16 16"><rect x="5" y="2" width="6" height="12" rx="1.2"/><path d="M2.5 5.5v5M13.5 5.5v5M1 7v2M15 7v2"/></symbol>
               <symbol id="i-stop" viewBox="0 0 16 16"><rect x="3.5" y="3.5" width="9" height="9" rx="1.5"/></symbol>
               <symbol id="i-relaunch" viewBox="0 0 16 16"><path d="M13 8a5 5 0 1 1-1.6-3.7"/><path d="M13 2.5v3h-3"/></symbol>
+              <symbol id="i-laptop" viewBox="0 0 16 16"><path d="M3 11V4.2a.7.7 0 0 1 .7-.7h8.6a.7.7 0 0 1 .7.7V11M1.5 11h13l-.6 1.1a.8.8 0 0 1-.7.4H2.8a.8.8 0 0 1-.7-.4Z"/></symbol>
               <symbol id="i-keyboard" viewBox="0 0 16 16"><rect x="1.5" y="4" width="13" height="8" rx="1.2"/><path d="M4 6.5h.01M6.5 6.5h.01M9 6.5h.01M11.5 6.5h.01M4 9h.01M11.5 9h.01M6 9.5h4"/></symbol>
               <symbol id="i-pick" viewBox="0 0 16 16"><circle cx="8" cy="8" r="4.5"/><path d="M8 1v3M8 12v3M1 8h3M12 8h3"/></symbol>
               <symbol id="i-search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3.5 3.5"/></symbol>
@@ -6461,7 +6525,7 @@ enum WebViewerAssets {
                 <button class="tb-btn" type="button" id="homeButton" aria-label="Home" data-tip="Home" data-key="⇧⌘H" aria-keyshortcuts="Shift+Meta+H"><svg class="ic" aria-hidden="true"><use href="#i-home"/></svg></button>
                 <button class="tb-btn" type="button" id="screenshotButton" aria-label="Save screenshot" data-tip="Save screenshot" data-key="⌘S" aria-keyshortcuts="Meta+S"><svg class="ic" aria-hidden="true"><use href="#i-camera"/></svg></button>
                 <button class="tb-btn" type="button" id="shakeButton" aria-label="Shake" data-tip="Shake" data-key="⌃⌘Z" aria-keyshortcuts="Control+Meta+Z"><svg class="ic" aria-hidden="true"><use href="#i-shake"/></svg></button>
-                <button class="tb-btn" type="button" id="softKeyboardButton" aria-label="Show or hide the software keyboard" data-tip="Software keyboard — ⌘K while typing into the device"><svg class="ic" aria-hidden="true"><use href="#i-keyboard"/></svg></button>
+                <button class="tb-btn tb-menu" type="button" id="keyboardButton" aria-haspopup="menu" aria-expanded="false" aria-label="Keyboard" data-tip="Keyboard — the software keyboard and the Mac keyboard"><svg class="ic" aria-hidden="true"><use href="#i-keyboard"/></svg><svg class="ic caret" aria-hidden="true"><use href="#i-chev-d"/></svg></button>
                 <span class="tb-sep" aria-hidden="true"></span>
                 <span class="tb-app" id="appName" title="App under test">No app</span>
                 <button class="tb-btn" type="button" id="terminateButton" aria-label="Terminate app" data-tip="Terminate app"><svg class="ic" aria-hidden="true"><use href="#i-stop"/></svg></button>
@@ -6470,9 +6534,6 @@ enum WebViewerAssets {
 
               <div class="tb-group tb-right">
                 <span class="driver-status" role="status" aria-live="polite"><button class="driver" type="button" id="driverChip" hidden data-tip=""><span class="driver-dot" aria-hidden="true"></span><span class="driver-label" id="driverLabel"></span><span class="driver-short" id="driverShort" aria-hidden="true"></span></button></span>
-                <button class="toggle" type="button" id="keyboardToggle" aria-pressed="false" data-tip="Type into the simulator with the Mac keyboard" data-key="⇧⌘K" aria-keyshortcuts="Shift+Meta+K">
-                  <svg class="ic" aria-hidden="true"><use href="#i-keyboard"/></svg><span class="toggle-label">Mac keyboard</span>
-                </button>
                 <button class="cmdk" type="button" id="paletteButton" aria-haspopup="dialog" aria-label="Commands" aria-keyshortcuts="Shift+Meta+P">
                   <svg class="ic" aria-hidden="true"><use href="#i-search"/></svg><span class="cmdk-label">Commands</span><kbd>⇧⌘P</kbd>
                 </button>

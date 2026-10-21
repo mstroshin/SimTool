@@ -112,11 +112,13 @@ The wheel or trackpad scrolls by dragging a finger too. Hold Option to add a
 second finger mirrored through the screen center — spreading or circling the
 pointer pinches or rotates — and Option-Shift to move both fingers together.
 
-The keyboard works as in Simulator.app. The software keyboard button toggles the
-software keyboard (Toggle Software Keyboard). The **Mac keyboard** toggle, or
-⇧⌘K, types into the simulator with the Mac keyboard and connects its hardware
-keyboard (Connect Hardware Keyboard), so iOS keeps the software keyboard out of
-the way until the button or ⌘K brings it back. Keys travel as physical keys — the simulator's own layout
+The keyboard works as in Simulator.app, from one keyboard button in the toolbar.
+Its menu shows or hides the software keyboard (Toggle Software Keyboard) and
+connects the Mac keyboard — a switch beside it says whether it is connected.
+Connected, or with ⇧⌘K, the Mac keyboard types into the simulator and its
+hardware keyboard is connected (Connect Hardware Keyboard), so iOS keeps the
+software keyboard out of the way until the menu or ⌘K brings it back; the
+button turns course ink while it lasts. Keys travel as physical keys — the simulator's own layout
 decides the character — with modifiers, arrows, ⌫, ⏎, Tab and Esc, which iOS
 uses; ⇧⌘K leaves the mode, and ⌘V pastes the Mac clipboard as text. A ring
 around the screen shows the keys go to the device, and the status bar says so;

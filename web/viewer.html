@@ -16,6 +16,7 @@
       <symbol id="i-shake" viewBox="0 0 16 16"><rect x="5" y="2" width="6" height="12" rx="1.2"/><path d="M2.5 5.5v5M13.5 5.5v5M1 7v2M15 7v2"/></symbol>
       <symbol id="i-stop" viewBox="0 0 16 16"><rect x="3.5" y="3.5" width="9" height="9" rx="1.5"/></symbol>
       <symbol id="i-relaunch" viewBox="0 0 16 16"><path d="M13 8a5 5 0 1 1-1.6-3.7"/><path d="M13 2.5v3h-3"/></symbol>
+      <symbol id="i-laptop" viewBox="0 0 16 16"><path d="M3 11V4.2a.7.7 0 0 1 .7-.7h8.6a.7.7 0 0 1 .7.7V11M1.5 11h13l-.6 1.1a.8.8 0 0 1-.7.4H2.8a.8.8 0 0 1-.7-.4Z"/></symbol>
       <symbol id="i-keyboard" viewBox="0 0 16 16"><rect x="1.5" y="4" width="13" height="8" rx="1.2"/><path d="M4 6.5h.01M6.5 6.5h.01M9 6.5h.01M11.5 6.5h.01M4 9h.01M11.5 9h.01M6 9.5h4"/></symbol>
       <symbol id="i-pick" viewBox="0 0 16 16"><circle cx="8" cy="8" r="4.5"/><path d="M8 1v3M8 12v3M1 8h3M12 8h3"/></symbol>
       <symbol id="i-search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3.5 3.5"/></symbol>
@@ -63,7 +64,7 @@
         <button class="tb-btn" type="button" id="homeButton" aria-label="Home" data-tip="Home" data-key="⇧⌘H" aria-keyshortcuts="Shift+Meta+H"><svg class="ic" aria-hidden="true"><use href="#i-home"/></svg></button>
         <button class="tb-btn" type="button" id="screenshotButton" aria-label="Save screenshot" data-tip="Save screenshot" data-key="⌘S" aria-keyshortcuts="Meta+S"><svg class="ic" aria-hidden="true"><use href="#i-camera"/></svg></button>
         <button class="tb-btn" type="button" id="shakeButton" aria-label="Shake" data-tip="Shake" data-key="⌃⌘Z" aria-keyshortcuts="Control+Meta+Z"><svg class="ic" aria-hidden="true"><use href="#i-shake"/></svg></button>
-        <button class="tb-btn" type="button" id="softKeyboardButton" aria-label="Show or hide the software keyboard" data-tip="Software keyboard — ⌘K while typing into the device"><svg class="ic" aria-hidden="true"><use href="#i-keyboard"/></svg></button>
+        <button class="tb-btn tb-menu" type="button" id="keyboardButton" aria-haspopup="menu" aria-expanded="false" aria-label="Keyboard" data-tip="Keyboard — the software keyboard and the Mac keyboard"><svg class="ic" aria-hidden="true"><use href="#i-keyboard"/></svg><svg class="ic caret" aria-hidden="true"><use href="#i-chev-d"/></svg></button>
         <span class="tb-sep" aria-hidden="true"></span>
         <span class="tb-app" id="appName" title="App under test">No app</span>
         <button class="tb-btn" type="button" id="terminateButton" aria-label="Terminate app" data-tip="Terminate app"><svg class="ic" aria-hidden="true"><use href="#i-stop"/></svg></button>
@@ -72,9 +73,6 @@
 
       <div class="tb-group tb-right">
         <span class="driver-status" role="status" aria-live="polite"><button class="driver" type="button" id="driverChip" hidden data-tip=""><span class="driver-dot" aria-hidden="true"></span><span class="driver-label" id="driverLabel"></span><span class="driver-short" id="driverShort" aria-hidden="true"></span></button></span>
-        <button class="toggle" type="button" id="keyboardToggle" aria-pressed="false" data-tip="Type into the simulator with the Mac keyboard" data-key="⇧⌘K" aria-keyshortcuts="Shift+Meta+K">
-          <svg class="ic" aria-hidden="true"><use href="#i-keyboard"/></svg><span class="toggle-label">Mac keyboard</span>
-        </button>
         <button class="cmdk" type="button" id="paletteButton" aria-haspopup="dialog" aria-label="Commands" aria-keyshortcuts="Shift+Meta+P">
           <svg class="ic" aria-hidden="true"><use href="#i-search"/></svg><span class="cmdk-label">Commands</span><kbd>⇧⌘P</kbd>
         </button>
