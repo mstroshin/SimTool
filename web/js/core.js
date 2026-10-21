@@ -223,6 +223,65 @@ function closePopover() {
   return true;
 }
 
+// ---- Tooltips: the action and its shortcut, on hover and keyboard focus ----
+// One floating tip for every [data-tip]: under its control, above it where the
+// window has no room below, and moved along so it never leaves the window — a
+// button at an edge keeps its words. A tip that changes while it shows (a
+// toggled button) is drawn again.
+
+const tip = { node: $("tip"), target: null, watch: null };
+const TIP_GAP = 6, TIP_MARGIN = 6;
+
+function showTip(target) {
+  if (tip.target !== target) {
+    hideTip();
+    tip.target = target;
+    tip.watch = new MutationObserver(drawTip);
+    tip.watch.observe(target, { attributes: true, attributeFilter: ["data-tip", "data-key", "hidden"] });
+  }
+  drawTip();
+}
+
+function drawTip() {
+  const target = tip.target;
+  if (!target || !target.dataset.tip || !target.isConnected || !target.getClientRects().length) { hideTip(); return; }
+  const node = tip.node;
+  node.replaceChildren(el("span", { text: target.dataset.tip }), target.dataset.key ? el("span", { text: target.dataset.key }) : "");
+  node.hidden = false;
+  const anchor = target.getBoundingClientRect(), box = node.getBoundingClientRect();
+  const left = Math.max(TIP_MARGIN, Math.min(anchor.left + anchor.width / 2 - box.width / 2, innerWidth - box.width - TIP_MARGIN));
+  const below = anchor.bottom + TIP_GAP;
+  const top = below + box.height <= innerHeight - TIP_MARGIN ? below : Math.max(TIP_MARGIN, anchor.top - TIP_GAP - box.height);
+  node.style.transform = "translate(" + Math.round(left) + "px, " + Math.round(top) + "px)";
+}
+
+function hideTip() {
+  if (tip.watch) tip.watch.disconnect();
+  tip.watch = null;
+  tip.target = null;
+  tip.node.hidden = true;
+}
+
+const tipTarget = (node) => (node && node.closest ? node.closest("[data-tip]") : null);
+document.addEventListener("pointerover", (event) => {
+  if (event.pointerType === "touch") return;
+  const target = tipTarget(event.target);
+  if (target) showTip(target);
+  else if (tip.target && !tip.target.matches(":focus-visible")) hideTip();
+});
+document.addEventListener("pointerout", (event) => {
+  if (tip.target && !tipTarget(event.relatedTarget) && !tip.target.matches(":focus-visible")) hideTip();
+});
+document.addEventListener("focusin", (event) => {
+  const target = tipTarget(event.target);
+  if (target === event.target && target.matches(":focus-visible")) showTip(target);
+});
+document.addEventListener("focusout", (event) => { if (event.target === tip.target) hideTip(); });
+// A press, a key or a scroll takes the tip away; it comes back on the next
+// hover. A new window size moves it along with its control.
+for (const type of ["pointerdown", "keydown", "wheel", "scroll"]) document.addEventListener(type, hideTip, true);
+window.addEventListener("resize", () => { if (tip.target) drawTip(); });
+
 // ---- Confirmation for what cannot be undone ----
 
 let dialogResolve = null;

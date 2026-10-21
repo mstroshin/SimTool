@@ -51,6 +51,17 @@
       <symbol id="i-fold-closed" viewBox="0 0 16 16"><rect x="4.5" y="2.5" width="7" height="11" rx="1.2"/><path d="M6.2 2.5v11"/></symbol>
       <symbol id="i-fold-book" viewBox="0 0 16 16"><path d="M8 4v9.5M8 4 2.5 2.5v9.5L8 13.5M8 4l5.5-1.5v9.5L8 13.5"/></symbol>
       <symbol id="i-cube" viewBox="0 0 16 16"><path d="M8 1.8 13.5 5v6L8 14.2 2.5 11V5Z"/><path d="M2.5 5 8 8.2 13.5 5M8 8.2v6"/></symbol>
+      <symbol id="i-rotate" viewBox="0 0 16 16"><rect x="6.5" y="5" width="7" height="9.5" rx="1.2"/><path d="M2.5 8.5V6.5a4 4 0 0 1 4-4h2.5M9 2.5 7.3.8M9 2.5 7.3 4.2"/></symbol>
+      <symbol id="i-key" viewBox="0 0 16 16"><circle cx="5.5" cy="10.5" r="3"/><path d="m7.6 8.4 6-6M11.5 4.5l1.8 1.8M10 6l1.5 1.5"/></symbol>
+      <symbol id="i-bell" viewBox="0 0 16 16"><path d="M4 11V7.5a4 4 0 0 1 8 0V11l1.2 1.5H2.8Z"/><path d="M6.8 14.2h2.4"/></symbol>
+      <symbol id="i-pin" viewBox="0 0 16 16"><path d="M8 14.2s4.5-4.2 4.5-7.7a4.5 4.5 0 0 0-9 0c0 3.5 4.5 7.7 4.5 7.7Z"/><circle cx="8" cy="6.5" r="1.6"/></symbol>
+      <symbol id="i-face" viewBox="0 0 16 16"><path d="M2.5 5V3.5a1 1 0 0 1 1-1H5M11 2.5h1.5a1 1 0 0 1 1 1V5M13.5 11v1.5a1 1 0 0 1-1 1H11M5 13.5H3.5a1 1 0 0 1-1-1V11"/><path d="M6 6.2v1.2M10 6.2v1.2M8 6.2v2.7h-.7M6.2 10.7c1 .8 2.6.8 3.6 0"/></symbol>
+      <symbol id="i-text" viewBox="0 0 16 16"><path d="m1.8 12.5 3.5-9 3.5 9M3 9.5h4.6M10.3 12.5l2-5 2 5M10.9 11h2.8"/></symbol>
+      <symbol id="i-contrast" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5"/><path d="M8 2.5v11a5.5 5.5 0 0 0 0-11Z" fill="currentColor"/></symbol>
+      <symbol id="i-layers" viewBox="0 0 16 16"><path d="M8 2.5 14 5.5 8 8.5 2 5.5Z"/><path d="m2 8.5 6 3 6-3M2 11l6 3 6-3"/></symbol>
+      <symbol id="i-memory" viewBox="0 0 16 16"><rect x="3.5" y="3.5" width="9" height="9" rx="1"/><path d="M6 1.5v2M10 1.5v2M6 12.5v2M10 12.5v2M1.5 6h2M1.5 10h2M12.5 6h2M12.5 10h2"/></symbol>
+      <symbol id="i-battery" viewBox="0 0 16 16"><rect x="1.5" y="5" width="11.5" height="6" rx="1.2"/><path d="M14.5 7v2M3.5 7v2h5.5V7Z"/></symbol>
+      <symbol id="i-slow" viewBox="0 0 16 16"><path d="M4 2h8M4 14h8M5 2c0 3.6 6 3.4 6 6s-6 2.4-6 6M11 2c0 3.6-6 3.4-6 6s6 2.4 6 6"/></symbol>
       <symbol id="i-fold-open" viewBox="0 0 16 16"><rect x="1.5" y="3.5" width="13" height="9" rx="1.2"/><path d="M8 3.5v9" stroke-dasharray="1.2 1.8"/></symbol>
     </defs>
   </svg>
@@ -69,6 +80,7 @@
         <button class="tb-btn tb-rec" type="button" id="recordButton" aria-label="Record video" data-tip="Record video" data-key="⌘R" aria-keyshortcuts="Meta+R"><svg class="ic" aria-hidden="true"><use href="#i-record"/></svg><span class="rec-dot" aria-hidden="true"></span><span class="rec-time" id="recordTime"></span></button>
         <button class="tb-btn tb-menu tb-caret" type="button" id="captureMenuButton" aria-haspopup="menu" aria-expanded="false" aria-label="Screenshot and video options" data-tip="Screenshot and video options — the frame, copy, download"><svg class="ic frame-mark" aria-hidden="true"><use href="#i-bezel"/></svg><svg class="ic caret" aria-hidden="true"><use href="#i-chev-d"/></svg></button>
         <button class="tb-btn" type="button" id="shakeButton" aria-label="Shake" data-tip="Shake" data-key="⌃⌘Z" aria-keyshortcuts="Control+Meta+Z"><svg class="ic" aria-hidden="true"><use href="#i-shake"/></svg></button>
+        <button class="tb-btn" type="button" id="rotateButton" aria-label="Rotate left" aria-description="⌘→ rotates right" data-tip="Rotate left · ⌘→ right" data-key="⌘←" aria-keyshortcuts="Meta+ArrowLeft Meta+ArrowRight"><svg class="ic" aria-hidden="true"><use href="#i-rotate"/></svg></button>
         <button class="tb-btn tb-menu" type="button" id="keyboardButton" aria-haspopup="menu" aria-expanded="false" aria-label="Keyboard" data-tip="Keyboard — the software keyboard and the Mac keyboard"><svg class="ic" aria-hidden="true"><use href="#i-keyboard"/></svg><svg class="ic caret" aria-hidden="true"><use href="#i-chev-d"/></svg></button>
         <span class="tb-sep" aria-hidden="true"></span>
         <button class="tb-btn" type="button" id="terminateButton" aria-label="Terminate app" data-tip="Terminate app"><svg class="ic" aria-hidden="true"><use href="#i-stop"/></svg></button>
@@ -97,7 +109,7 @@
             <div class="ruler ruler-x" id="rulerX" aria-hidden="true"></div>
             <div class="ruler ruler-y" id="rulerY" aria-hidden="true"></div>
             <div class="screen" id="screen">
-              <canvas id="screenCanvas" aria-label="Simulator screen. Press and drag to touch; right-click for paste and photos."></canvas>
+              <canvas id="screenCanvas" aria-label="Simulator screen. Press and drag to touch; right-click for paste and photos; drop images, videos or an app on it."></canvas>
               <svg class="redlines" id="redlines" aria-hidden="true"></svg>
               <div class="redline-labels" id="redlineLabels" aria-hidden="true"></div>
               <div class="touch-layer" id="touchLayer" aria-hidden="true"></div>
@@ -151,6 +163,7 @@
           <button role="tab" class="tab" type="button" id="tab-logs" data-tab="logs" aria-controls="panel-logs" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+2">Logs <span class="count" id="count-logs"></span><span class="count-err" id="err-logs" hidden></span></button>
           <button role="tab" class="tab" type="button" id="tab-state" data-tab="state" aria-controls="panel-state" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+3">State <span class="count" id="count-state"></span></button>
           <button role="tab" class="tab" type="button" id="tab-ax" data-tab="ax" aria-controls="panel-ax" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+4">Accessibility</button>
+          <button role="tab" class="tab" type="button" id="tab-device" data-tab="device" aria-controls="panel-device" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+7">Device</button>
           <button role="tab" class="tab" type="button" id="tab-tests" data-tab="tests" aria-controls="panel-tests" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+5">Tests <span class="count" id="count-tests"></span><span class="count-err" id="err-tests" hidden></span></button>
           <button role="tab" class="tab" type="button" id="tab-activity" data-tab="activity" aria-controls="panel-activity" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+6">Activity <span class="count" id="count-activity"></span><span class="count-err" id="err-activity" hidden></span></button>
         </div>
@@ -158,6 +171,7 @@
         <div class="panel" role="tabpanel" id="panel-logs" aria-labelledby="tab-logs" hidden></div>
         <div class="panel" role="tabpanel" id="panel-state" aria-labelledby="tab-state" hidden></div>
         <div class="panel" role="tabpanel" id="panel-ax" aria-labelledby="tab-ax" hidden></div>
+        <div class="panel" role="tabpanel" id="panel-device" aria-labelledby="tab-device" hidden></div>
         <div class="panel" role="tabpanel" id="panel-tests" aria-labelledby="tab-tests" hidden></div>
         <div class="panel" role="tabpanel" id="panel-activity" aria-labelledby="tab-activity" hidden></div>
       </section>
@@ -177,6 +191,7 @@
 
   <div class="menu" id="menu" role="menu" hidden></div>
   <div class="popover" id="popover" role="dialog" hidden></div>
+  <div class="tip" id="tip" aria-hidden="true" hidden></div>
   <div class="scrim" id="paletteScrim" hidden>
     <div class="palette" role="dialog" aria-modal="true" aria-label="Commands">
       <div class="palette-input"><svg class="ic" aria-hidden="true"><use href="#i-search"/></svg><input id="paletteInput" type="text" role="combobox" aria-expanded="true" aria-controls="paletteList" aria-label="Command" placeholder="Type a command or a test name…" autocomplete="off" spellcheck="false"></div>
@@ -209,6 +224,7 @@
 {{js/tests.js}}
 {{js/review.js}}
 {{js/activity.js}}
+{{js/settings.js}}
 {{js/palette.js}}
 {{js/events.js}}
 {{js/main.js}}

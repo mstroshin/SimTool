@@ -26,6 +26,21 @@ model from the user's Xcode at run time; no Apple asset, material table or
 private lighting is copied or used.
 Facts learned from serve-sim — the panels' sizes and names — are used as facts.
 
+The simulator's debug and accessibility controls (`SimulatorSettings.swift`,
+`SimulatorAccessibility.swift`, `SimulatorPermissions.swift`, and the `cadebug`,
+`memwarn` and `orient` commands of the HID helper) are SimTool's own code. Facts
+pointed to by serve-sim and checked on the iOS 26.4 runtime are used as facts:
+the libAccessibility setter names, UIKit's Liquid Glass
+preference and its notification, BiometricKit's simulator notifications, and
+where SpringBoard keeps notification permission. The layout of the
+device-orientation GraphicsServices event is the one facebook/idb (MIT)
+documents.
+
+The simulated camera (`SimulatorCamera.swift`, the library it builds and loads
+into an app, and `MacCameraFeed.swift`) is SimTool's own code. The approach —
+a library inserted at launch that answers AVFoundation's camera with a picture
+the host provides — is the one serve-sim takes; no serve-sim code is used.
+
 `serve-sim` is licensed under the Apache License, Version 2.0. Copyright
 belongs to the original contributors. Modified portions are used under the
 terms of Apache-2.0.

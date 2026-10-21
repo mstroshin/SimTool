@@ -19,6 +19,7 @@ enum WebViewerAssets {
         "js/network.js": jsNetworkJs,
         "js/palette.js": jsPaletteJs,
         "js/review.js": jsReviewJs,
+        "js/settings.js": jsSettingsJs,
         "js/state.js": jsStateJs,
         "js/stream.js": jsStreamJs,
         "js/tests.js": jsTestsJs,
@@ -360,6 +361,7 @@ enum WebViewerAssets {
           for (const entry of fresh) { if (history) activity.drawn.add(entry.id); else markFresh(entry); }
           renderDriver();
           if (fresh.length || history) renderSoon(renderActivity);
+          if (!history) deviceActivitySeen(entries);
         }
 
         async function pollActivity() {
@@ -1034,6 +1036,65 @@ enum WebViewerAssets {
           return true;
         }
 
+        // ---- Tooltips: the action and its shortcut, on hover and keyboard focus ----
+        // One floating tip for every [data-tip]: under its control, above it where the
+        // window has no room below, and moved along so it never leaves the window — a
+        // button at an edge keeps its words. A tip that changes while it shows (a
+        // toggled button) is drawn again.
+
+        const tip = { node: $("tip"), target: null, watch: null };
+        const TIP_GAP = 6, TIP_MARGIN = 6;
+
+        function showTip(target) {
+          if (tip.target !== target) {
+            hideTip();
+            tip.target = target;
+            tip.watch = new MutationObserver(drawTip);
+            tip.watch.observe(target, { attributes: true, attributeFilter: ["data-tip", "data-key", "hidden"] });
+          }
+          drawTip();
+        }
+
+        function drawTip() {
+          const target = tip.target;
+          if (!target || !target.dataset.tip || !target.isConnected || !target.getClientRects().length) { hideTip(); return; }
+          const node = tip.node;
+          node.replaceChildren(el("span", { text: target.dataset.tip }), target.dataset.key ? el("span", { text: target.dataset.key }) : "");
+          node.hidden = false;
+          const anchor = target.getBoundingClientRect(), box = node.getBoundingClientRect();
+          const left = Math.max(TIP_MARGIN, Math.min(anchor.left + anchor.width / 2 - box.width / 2, innerWidth - box.width - TIP_MARGIN));
+          const below = anchor.bottom + TIP_GAP;
+          const top = below + box.height <= innerHeight - TIP_MARGIN ? below : Math.max(TIP_MARGIN, anchor.top - TIP_GAP - box.height);
+          node.style.transform = "translate(" + Math.round(left) + "px, " + Math.round(top) + "px)";
+        }
+
+        function hideTip() {
+          if (tip.watch) tip.watch.disconnect();
+          tip.watch = null;
+          tip.target = null;
+          tip.node.hidden = true;
+        }
+
+        const tipTarget = (node) => (node && node.closest ? node.closest("[data-tip]") : null);
+        document.addEventListener("pointerover", (event) => {
+          if (event.pointerType === "touch") return;
+          const target = tipTarget(event.target);
+          if (target) showTip(target);
+          else if (tip.target && !tip.target.matches(":focus-visible")) hideTip();
+        });
+        document.addEventListener("pointerout", (event) => {
+          if (tip.target && !tipTarget(event.relatedTarget) && !tip.target.matches(":focus-visible")) hideTip();
+        });
+        document.addEventListener("focusin", (event) => {
+          const target = tipTarget(event.target);
+          if (target === event.target && target.matches(":focus-visible")) showTip(target);
+        });
+        document.addEventListener("focusout", (event) => { if (event.target === tip.target) hideTip(); });
+        // A press, a key or a scroll takes the tip away; it comes back on the next
+        // hover. A new window size moves it along with its control.
+        for (const type of ["pointerdown", "keydown", "wheel", "scroll"]) document.addEventListener(type, hideTip, true);
+        window.addEventListener("resize", () => { if (tip.target) drawTip(); });
+
         // ---- Confirmation for what cannot be undone ----
 
         let dialogResolve = null;
@@ -1590,6 +1651,76 @@ enum WebViewerAssets {
           addToPhotos(files);
         });
 
+        // ---- Files dropped on the screen: media to Photos, an .app or an .ipa installed ----
+        // A browser hands a dropped folder over as files: an .app is read entry by
+        // entry and sent as a tar the server unpacks.
+
+        async function droppedEntries(entry, prefix, out) {
+          if (entry.isFile) {
+            const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
+            out.push({ path: prefix + entry.name, bytes: new Uint8Array(await file.arrayBuffer()) });
+            return;
+          }
+          out.push({ path: prefix + entry.name, bytes: null });
+          const reader = entry.createReader();
+          for (;;) {
+            const batch = await new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+            if (!batch.length) break;
+            for (const child of batch) await droppedEntries(child, prefix + entry.name + "/", out);
+          }
+        }
+
+        async function installBuild(blob, name) {
+          setMessage("Installing " + name + "…", "sticky");
+          try {
+            const installed = await postFile("/api/v1/app/install", blob);
+            toast("Installed " + installed.name + " (" + installed.bundleId + ")");
+            setMessage("");
+            if (typeof loadAppCard === "function") loadAppCard();
+          } catch (error) {
+            setMessage("");
+            fail("Installing " + name + " failed", error);
+          }
+        }
+
+        // `dropped` is read from the drop event at once: its items are gone after the first await.
+        async function dropOnScreen(dropped) {
+          const media = [];
+          let refused = 0;
+          for (const { entry, file } of dropped) {
+            const kind = dropKind(entry ? entry.name : file && file.name, file && file.type, entry ? entry.isDirectory : false);
+            if (kind === "media" && file) media.push(file);
+            else if (kind === "ipa" && file) await installBuild(file, file.name);
+            else if (kind === "app" && entry) {
+              setMessage("Reading " + entry.name + "…", "sticky");
+              const entries = [];
+              try { await droppedEntries(entry, "", entries); } catch (error) { setMessage(""); fail("Reading " + entry.name + " failed", error); continue; }
+              const tar = new File([tarArchive(entries, Date.now() / 1000)], entry.name + ".tar", { type: "application/x-tar" });
+              await installBuild(tar, entry.name);
+            } else refused += 1;
+          }
+          if (media.length) addToPhotos(media);
+          if (refused) toast("Drop images or videos for Photos, or an .app or .ipa to install", { error: true });
+        }
+
+        const stageArea = $("deviceArea");
+        stageArea.addEventListener("dragover", (event) => {
+          if (!Array.from(event.dataTransfer.types || []).includes("Files") || app.dataset.mode === "replay") return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "copy";
+          app.classList.add("dropping");
+        });
+        stageArea.addEventListener("dragleave", (event) => { if (!stageArea.contains(event.relatedTarget)) app.classList.remove("dropping"); });
+        stageArea.addEventListener("drop", (event) => {
+          app.classList.remove("dropping");
+          if (!Array.from(event.dataTransfer.types || []).includes("Files")) return;
+          event.preventDefault();
+          const dropped = Array.from(event.dataTransfer.items || []).filter((item) => item.kind === "file")
+            .map((item) => ({ entry: item.webkitGetAsEntry ? item.webkitGetAsEntry() : null, file: item.getAsFile() }));
+          // Someone else driving: the person takes over first, then drops again.
+          if (manualInputAllowed(() => toast("Drop the files again"))) dropOnScreen(dropped);
+        });
+
         function deviceMenuItems() {
           return [
             { icon: "paste", label: "Paste", kbd: "⌘V", run: pasteFromClipboard },
@@ -1962,6 +2093,7 @@ enum WebViewerAssets {
         $("recordButton").addEventListener("click", toggleRecording);
         wireMenuButton($("captureMenuButton"), captureMenuItems);
         $("shakeButton").addEventListener("click", pressShake);
+        $("rotateButton").addEventListener("click", () => rotateDevice("left"));
         wireMenuButton($("keyboardButton"), keyboardMenuItems);
         $("terminateButton").addEventListener("click", terminateApp);
         $("relaunchButton").addEventListener("click", relaunchApp);
@@ -1971,6 +2103,8 @@ enum WebViewerAssets {
         function updateDeviceButtons() {
           const usable = screenState.connection === "live" && app.dataset.mode !== "replay";
           for (const id of ["homeButton", "screenshotButton", "shakeButton", "terminateButton", "relaunchButton"]) $(id).disabled = !usable;
+          // A foldable turns its picture as it folds.
+          $("rotateButton").disabled = !usable || !!screenState.foldable;
           // A recording in progress can always be stopped; one being saved cannot.
           $("recordButton").disabled = capture.recording ? capture.recording.state !== "recording" : !usable;
           renderFold();
@@ -2077,7 +2211,9 @@ enum WebViewerAssets {
         // inspector, the filter field every tab shares, app launches, and the
         // split detail under each list.
 
-        const TABS = ["network", "logs", "state", "ax", "tests", "activity"];
+        const TABS = ["network", "logs", "state", "ax", "device", "tests", "activity"];
+        // ⌥1–7, each tab's own: a tab added in between does not move the others' keys.
+        const TAB_KEYS = ["network", "logs", "state", "ax", "tests", "activity", "device"];
         const inspector = { tab: stored("tab", "network"), open: stored("inspectorOpen", true), attachedApp: "", configKnown: false };
         const tabHandlers = {};   // tab → { show(), hide() }
 
@@ -3898,6 +4034,77 @@ enum WebViewerAssets {
           }
           return { latest, changes, lastChange };
         }
+
+        // ---- An .app dropped on the screen ----
+
+        // A tar of entries { path, bytes } (bytes null for a folder) — how the viewer
+        // uploads an .app bundle, which a browser hands over as files, not as a
+        // folder. ustar, with a pax record for a path longer than its 100 bytes; every
+        // file is executable, since the browser does not say which ones were.
+        function tarArchive(entries, mtime) {
+          const blocks = [];
+          let size = 0;
+          const push = (bytes) => { blocks.push(bytes); size += bytes.length; };
+          const pad = (length) => { if (length % 512) push(new Uint8Array(512 - (length % 512))); };
+          const header = (name, length, type, mode) => {
+            const block = new Uint8Array(512);
+            const ascii = (offset, text) => block.set(utf8Bytes(text), offset);
+            block.set(name.subarray(0, 100), 0);
+            ascii(100, mode.toString(8).padStart(7, "0"));
+            ascii(108, "0000000");
+            ascii(116, "0000000");
+            ascii(124, length.toString(8).padStart(11, "0"));
+            ascii(136, Math.floor(mtime || 0).toString(8).padStart(11, "0"));
+            block[156] = type.charCodeAt(0);
+            ascii(257, "ustar");
+            ascii(263, "00");
+            block.fill(32, 148, 156);
+            let sum = 0;
+            for (const byte of block) sum += byte;
+            ascii(148, sum.toString(8).padStart(6, "0"));
+            block[154] = 0;
+            return block;
+          };
+          for (const entry of entries) {
+            const folder = !entry.bytes;
+            const path = entry.path + (folder && !entry.path.endsWith("/") ? "/" : "");
+            const name = utf8Bytes(path);
+            if (name.length > 100) {
+              // "<length> path=<path>\n", the length counting its own digits.
+              const rest = " path=" + path + "\n";
+              let length = utf8Bytes(rest).length;
+              while (String(length).length + utf8Bytes(rest).length !== length) length = String(length).length + utf8Bytes(rest).length;
+              const record = utf8Bytes(length + rest);
+              push(header(utf8Bytes("PaxHeader"), record.length, "x", 0o644));
+              push(record);
+              pad(record.length);
+            }
+            const data = entry.bytes || new Uint8Array(0);
+            push(header(name, data.length, folder ? "5" : "0", 0o755));
+            if (data.length) { push(data); pad(data.length); }
+          }
+          push(new Uint8Array(1024));
+          const out = new Uint8Array(size);
+          let at = 0;
+          for (const block of blocks) { out.set(block, at); at += block.length; }
+          return out;
+        }
+
+        function utf8Bytes(text) {
+          const raw = unescape(encodeURIComponent(text));
+          const bytes = new Uint8Array(raw.length);
+          for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+          return bytes;
+        }
+
+        // What a file dropped on the screen is for: Photos, an install, or nothing SimTool takes.
+        function dropKind(name, type, folder) {
+          const lower = String(name || "").toLowerCase();
+          if (folder) return lower.endsWith(".app") ? "app" : "none";
+          if (lower.endsWith(".ipa")) return "ipa";
+          if (/^(image|video)\//.test(type || "") || /\.(png|jpe?g|heic|heif|gif|webp|tiff?|mov|mp4|m4v)$/.test(lower)) return "media";
+          return "none";
+        }
         """#
 
     static let jsLogsJs = #"""
@@ -4261,6 +4468,8 @@ enum WebViewerAssets {
           applyView3D(config.view3d);
           // A viewer that left a foldable in 3D finds it in 3D again.
           if (screenState.foldable && !screenState.view3d && stored("view3d", "0") === "1") setView3D(true);
+          // A Device tab open before the config came drew no app: it reads it now.
+          if (activeTab("device")) loadDeviceSettings();
         }
 
         // A new server: everything numbered by the old one is stale.
@@ -4937,7 +5146,7 @@ enum WebViewerAssets {
 
     static let jsPaletteJs = #"""
         // The command palette (⇧⌘P) and the page's keyboard shortcuts. Shortcuts
-        // follow Simulator.app and Xcode where they exist; tabs use ⌥1–6 because
+        // follow Simulator.app and Xcode where they exist; tabs use ⌥1–7 because
         // browsers keep ⌘1–9 for themselves.
 
         function paletteCommands() {
@@ -4949,6 +5158,7 @@ enum WebViewerAssets {
             capture.recording ? ["Device", "stop", "Stop recording and save the video", "⌘R", stopRecording] : ["Device", "record", "Record video", "⌘R", startRecording],
             ["Device", "bezel", capture.bezel ? "Screenshots and videos: the screen only" : "Screenshots and videos: with the device bezel", "", () => setCaptureBezel(!capture.bezel)],
             ["Device", "shake", "Shake", "⌃⌘Z", pressShake],
+            ...(screenState.foldable ? [] : [["Device", "rotate", "Rotate left", "⌘←", () => rotateDevice("left")], ["Device", "rotate", "Rotate right", "⌘→", () => rotateDevice("right")]]),
             ["Device", "keyboard", "Show or hide the software keyboard", keyboardBridge.enabled ? "⌘K" : "", toggleSoftwareKeyboard],
             ["Device", "laptop", keyboardBridge.enabled ? "Disconnect the Mac keyboard" : "Connect the Mac keyboard — type into the simulator", "⇧⌘K", () => setKeyboardMode(!keyboardBridge.enabled)],
             ["Device", "paste", "Paste the Mac clipboard", "⌘V", pasteFromClipboard],
@@ -4965,12 +5175,14 @@ enum WebViewerAssets {
           if (deviceInfo.app) {
             commands.push(["App", "stop", "Terminate " + deviceInfo.app, "", terminateApp], ["App", "relaunch", "Relaunch " + deviceInfo.app, "", relaunchApp]);
           }
+          commands.push(...deviceSettingCommands());
           commands.push(
             ["Inspector", "panel", inspector.open ? "Hide the inspector" : "Show the inspector", "⌥⌘0", () => setInspectorOpen(!inspector.open)],
             ["Inspector", "panel", "Network", "⌥1", () => openTab("network")],
             ["Inspector", "panel", "Logs", "⌥2", () => openTab("logs")],
             ["Inspector", "panel", "State", "⌥3", () => openTab("state")],
             ["Inspector", "pick", "Accessibility", "⌥4", () => openTab("ax")],
+            ["Inspector", "panel", "Device — the simulator's settings and debug switches", "⌥7", () => openTab("device")],
             ["Inspector", "panel", "Tests", "⌥5", () => openTab("tests")],
             ["Inspector", "pick", "Activity — what was done to the device", "⌥6", () => openTab("activity")],
             ["Inspector", "search", "Filter the current list", "/", focusFilter],
@@ -4992,6 +5204,56 @@ enum WebViewerAssets {
           return commands.map(([group, glyph, label, kbd, run]) => ({ group, glyph, label, kbd, run }));
         }
 
+        // The settings the Device tab changes, worded as the device has them now:
+        // "Turn on" what is off. The palette reads them when it opens.
+        function deviceSettingCommands() {
+          const data = deviceSettings.data || {};
+          const debug = data.debug || {};
+          const bio = data.biometrics || {};
+          const otherAppearance = data.appearance === "dark" ? "light" : "dark";
+          const commands = [
+            ["Settings", otherAppearance === "dark" ? "moon" : "sun", "Switch the device to the " + otherAppearance + " appearance", "", () => setAppearance(otherAppearance)],
+            ["Settings", "text", "Larger text on the device (Dynamic Type)", "", () => setTextSize("increment")],
+            ["Settings", "text", "Smaller text on the device (Dynamic Type)", "", () => setTextSize("decrement")],
+            ["Settings", "contrast", (data.increaseContrast ? "Turn off" : "Turn on") + " Increase Contrast", "", () => setContrast(!data.increaseContrast)],
+            ["Settings", "battery", "Status bar: 9:41 for screenshots", "", () => statusBarPreset("clean")],
+            ["Settings", "battery", "Status bar: clear the overrides", "", () => statusBarPreset("clear")],
+            ["Settings", "pin", "Clear the simulated location", "", clearLocation],
+            ["Settings", "bell", "Send a push notification…", "", () => { openTab("device"); openDeviceSection("push"); pushPayload.focus(); }],
+            ["Settings", "camera", "Camera: show an image or a video…", "", () => cameraFile.click()],
+            ["Settings", "camera", "Camera: the Mac's camera", "", () => useMacCamera("")],
+            ...(camera.data && camera.data.source !== "none" ? [["Settings", "camera", "Camera: turn off", "", cameraOff]] : []),
+            ["Settings", "key", "Keychain: add a root certificate…", "", () => certificateFile.click()],
+            ["Settings", "trash", "Keychain: reset", "", resetKeychain]
+          ];
+          const ax = data.accessibility || {};
+          for (const [option, key, title] of AX_SWITCHES) {
+            commands.push(["Accessibility", "pick", (ax[key] ? "Turn off " : "Turn on ") + title, "", () => setAccessibility(option, ax[key] ? "off" : "on", title + (ax[key] ? " off" : " on"))]);
+          }
+          commands.push(["Accessibility", "filter", "Color filters…", "", () => { openTab("device"); openDeviceSection("accessibility"); colorFilterSelect.focus(); }]);
+          if (ax.liquidGlass) {
+            const other = ax.liquidGlass === "tinted" ? "clear" : "tinted";
+            commands.push(["Accessibility", "layers", "Liquid Glass: " + other, "", () => setAccessibility("liquid-glass", other, "Liquid Glass " + other)]);
+          }
+          if (deviceInfo.app) {
+            commands.push(
+              ["App", "panel", "Show " + deviceInfo.app + " in the Finder", "", () => revealApp("bundle")],
+              ["App", "panel", "Show " + deviceInfo.app + "'s data container in the Finder", "", () => revealApp("data")],
+              ["App", "check", "Permissions of " + deviceInfo.app + "…", "", () => { openTab("device"); openDeviceSection("permissions").scrollIntoView({ block: "start" }); }]
+            );
+          }
+          for (const [option, title] of DEBUG_OPTIONS) {
+            commands.push(["Debug", option === "slow-animations" ? "slow" : "layers", (debug[option] ? "Turn off " : "Turn on ") + title, "", () => setDebugOption(option, !debug[option])]);
+          }
+          commands.push(
+            ["Debug", "memory", "Simulate a memory warning", "", simulateMemoryWarning],
+            ["Debug", "face", biometryName() + ": " + (bio.enrolled ? "unenroll" : "enroll"), "", () => biometrics(bio.enrolled ? "unenroll" : "enroll")],
+            ["Debug", "face", biometryName() + ": a matching " + biometryThing(), "", () => biometrics("match")],
+            ["Debug", "face", biometryName() + ": a non-matching " + biometryThing(), "", () => biometrics("nomatch")]
+          );
+          return commands;
+        }
+
         // Switching tabs from the keyboard lands in the new tab's list, where ↑/↓ work
         // at once — unless focus was somewhere a person is still using, like the screen.
         function openTab(tab) {
@@ -5006,12 +5268,13 @@ enum WebViewerAssets {
           const lists = { network: networkList, logs: logsList, ax: axList, tests: tests.view === "history" ? historyList : definitionList, activity: activityList };
           if (lists[tab]) lists[tab].focus();
           else if (tab === "state") (stateModels.querySelector('[tabindex="0"]') || stateModels).focus();
+          else if (tab === "device") { const first = devicePanel.querySelector("button:not([disabled]), select, input"); if (first) first.focus(); }
         }
 
         function focusFilter() {
           if (!inspector.open) setInspectorOpen(true);
           const filters = { network: networkFilter, logs: logsFilter, state: stateFilter, ax: axFilter, tests: testsFilter, activity: activityFilter };
-          filters[inspector.tab].focus();
+          if (filters[inspector.tab]) filters[inspector.tab].focus();
         }
 
         let paletteItems = [];
@@ -5046,6 +5309,8 @@ enum WebViewerAssets {
           $("paletteInput").value = "";
           paletteIndex = 0;
           renderPalette();
+          // Settings commands say "turn on" or "turn off" as the device has them now.
+          loadDeviceSettings().then(() => { if (!$("paletteScrim").hidden) renderPalette(); });
           $("paletteInput").focus();
         }
 
@@ -5088,9 +5353,9 @@ enum WebViewerAssets {
 
         function showShortcuts() {
           openPopover($("paletteButton"),
-            "<p><b>⇧⌘P</b> commands · <b>⌥1–5</b> inspector tabs · <b>⌥⌘0</b> show or hide the inspector · <b>/</b> filter</p>" +
+            "<p><b>⇧⌘P</b> commands · <b>⌥1–7</b> inspector tabs · <b>⌥⌘0</b> show or hide the inspector · <b>/</b> filter</p>" +
             "<p><b>↑ ↓</b> move in a list · <b>Enter</b> open · <b>Esc</b> close · <b>⇧F10</b> the row's menu</p>" +
-            "<p><b>⇧⌘H</b> Home · <b>⌃⇧⌘H</b> or a double-click on Home: the app switcher · <b>⌘S</b> screenshot · <b>⌘R</b> record video, again to save it · <b>⌃⌘Z</b> shake · <b>⇧⌘K</b> connect the Mac keyboard (⇧⌘K again releases it) · <b>⌘K</b> software keyboard while typing</p>" +
+            "<p><b>⇧⌘H</b> Home · <b>⌃⇧⌘H</b> or a double-click on Home: the app switcher · <b>⌘S</b> screenshot · <b>⌘R</b> record video, again to save it · <b>⌃⌘Z</b> shake · <b>⌘←</b> <b>⌘→</b> rotate · <b>⇧⌘K</b> connect the Mac keyboard (⇧⌘K again releases it) · <b>⌘K</b> software keyboard while typing</p>" +
             "<p><b>⌥-drag</b> pinch or rotate · <b>⌥⇧-drag</b> two-finger pan · the wheel scrolls · <b>P</b> picks elements in Accessibility · <b>⌘↩</b> runs the selected test</p>");
         }
 
@@ -5122,9 +5387,11 @@ enum WebViewerAssets {
           if (event.metaKey && !event.shiftKey && !event.altKey && !event.ctrlKey && event.code === "KeyR") { event.preventDefault(); if (!event.repeat) toggleRecording(); return; }
           if (event.metaKey && event.ctrlKey && event.code === "KeyZ") { event.preventDefault(); pressShake(); return; }
           if (event.metaKey && event.altKey && event.code === "Digit0") { event.preventDefault(); setInspectorOpen(!inspector.open); return; }
-          if (event.altKey && !meta && /^Digit[1-6]$/.test(event.code)) { event.preventDefault(); openTab(TABS[Number(event.code.slice(5)) - 1]); return; }
+          if (event.altKey && !meta && /^Digit[1-7]$/.test(event.code)) { event.preventDefault(); openTab(TAB_KEYS[Number(event.code.slice(5)) - 1]); return; }
           if (meta && event.key === "Enter" && inspector.tab === "tests" && tests.view === "tests" && tests.selectedFile) { event.preventDefault(); runTest(tests.selectedFile); return; }
           if (editing || keyboardBridge.enabled) return;
+          // Simulator.app's Rotate Left and Right; with the Mac keyboard connected ⌘← and ⌘→ edit text in the device.
+          if (event.metaKey && !event.shiftKey && !event.altKey && !event.ctrlKey && (event.key === "ArrowLeft" || event.key === "ArrowRight")) { event.preventDefault(); if (!event.repeat) rotateDevice(event.key === "ArrowLeft" ? "left" : "right"); return; }
           if (meta && event.code === "KeyF" && inspector.open) { event.preventDefault(); focusFilter(); return; }
           if (event.key === "/" && !meta && !event.altKey) { event.preventDefault(); focusFilter(); return; }
           if (event.code === "KeyP" && !meta && !event.altKey && !event.shiftKey && inspector.tab === "ax" && inspector.open) { event.preventDefault(); setAxPick(!ax.pick); return; }
@@ -5313,6 +5580,561 @@ enum WebViewerAssets {
           openTab(tab);
           refreshReview();
         }
+        """#
+
+    static let jsSettingsJs = #"""
+        // The Device tab: the simulator's settings and debug switches as the device
+        // reports them — appearance, text size, accessibility, orientation, the render
+        // server's debug colours, slow animations, Face ID or Touch ID, the status
+        // bar, the location — with the controls that change them, the actions
+        // Simulator.app kept in its menus (a memory warning, a push), the camera
+        // SimTool gives the apps it launches, and the app under test: its card, its
+        // permissions, the keychain. A change goes to POST /api/v1/device (a turn to
+        // /api/v1/input, the camera to /api/v1/camera) and lands in Activity like any
+        // other action; the tab reads the device again after it, while it is open,
+        // and when Activity says something else changed a setting.
+
+        const deviceSettings = { data: null, error: "", loaded: false, loading: null };
+        // Activity kinds that change what this tab shows.
+        const DEVICE_SETTING_KINDS = new Set(["appearance", "text-size", "contrast", "debug", "biometrics", "status-bar", "location", "accessibility", "rotate", "permission", "install", "keychain", "camera"]);
+        // The camera: its source, the apps that have it, the Mac's cameras.
+        const camera = { data: null, error: "" };
+        const AX_SWITCHES = [
+          ["reduce-motion", "reduceMotion", "Reduce Motion", "Apps replace zooms and slides with fades"],
+          ["reduce-transparency", "reduceTransparency", "Reduce Transparency", "Blurs and translucent materials turn opaque"],
+          ["button-shapes", "buttonShapes", "Button Shapes", "Text buttons are underlined"],
+          ["voiceover", "voiceOver", "VoiceOver", "The screen reader: a tap selects, a double-tap activates — the first time, iOS shows its gestures sheet"]
+        ];
+        const COLOR_FILTERS = [["none", "None"], ["grayscale", "Grayscale"], ["protanopia", "Red/Green — protanopia"], ["deuteranopia", "Green/Red — deuteranopia"], ["tritanopia", "Blue/Yellow — tritanopia"]];
+        const ORIENTATIONS = [["portrait", "Portrait"], ["landscape-left", "Landscape left"], ["landscape-right", "Landscape right"], ["upside-down", "Upside down"]];
+        const PERMISSIONS = [
+          ["notifications", "Notifications"], ["location", "Location"], ["camera", "Camera"], ["microphone", "Microphone"], ["photos", "Photos"],
+          ["photos-add", "Add to Photos"], ["contacts", "Contacts"], ["calendar", "Calendars"], ["reminders", "Reminders"], ["motion", "Motion & Fitness"],
+          ["media-library", "Media & Apple Music"], ["siri", "Siri"], ["speech", "Speech Recognition"], ["faceid", "Face ID"],
+          ["user-tracking", "Tracking (ATT)"], ["pasteboard", "Paste from Other Apps"]
+        ];
+        const appCard = { data: null, error: "", shown: "" };
+        // The sections a person unfolded, by name; every section starts folded.
+        const deviceSections = stored("device.sections", {});
+        const DEBUG_OPTIONS = [
+          ["slow-animations", "Slow Animations", "Every app's animations run ten times slower"],
+          ["color-blended", "Color Blended Layers", "Green where layers are opaque, red where they blend"],
+          ["color-copies", "Color Copied Images", "Cyan where Core Animation copies an image it cannot use as is"],
+          ["color-misaligned", "Color Misaligned Images", "Magenta on images off the pixel grid, yellow on scaled ones"],
+          ["color-offscreen", "Color Off-screen Rendered", "Yellow where a layer is rendered off-screen first"]
+        ];
+        const TEXT_SIZES = [
+          ["extra-small", "XS"], ["small", "S"], ["medium", "M"], ["large", "L — default"], ["extra-large", "XL"],
+          ["extra-extra-large", "XXL"], ["extra-extra-extra-large", "XXXL"], ["accessibility-medium", "AX1"],
+          ["accessibility-large", "AX2"], ["accessibility-extra-large", "AX3"], ["accessibility-extra-extra-large", "AX4"],
+          ["accessibility-extra-extra-extra-large", "AX5"]
+        ];
+
+        async function loadDeviceSettings() {
+          loadAppCard();
+          loadCamera();
+          if (deviceSettings.loading) return deviceSettings.loading;
+          deviceSettings.loading = (async () => {
+            try {
+              deviceSettings.data = await apiJSON("/api/v1/device");
+              deviceSettings.error = "";
+            } catch (error) {
+              deviceSettings.error = error.message || String(error);
+            } finally {
+              deviceSettings.loaded = true;
+              deviceSettings.loading = null;
+              syncDeviceSettings();
+            }
+          })();
+          return deviceSettings.loading;
+        }
+
+        // Changes the device; a person's change during someone else's run asks first.
+        async function postDevice(payload, label) {
+          if (!manualInputAllowed(() => postDevice(payload, label))) return false;
+          try {
+            await api("/api/v1/device", { method: "POST", body: JSON.stringify(payload), headers: { "X-SimTool-Source": "viewer" } });
+            toast(label);
+            return true;
+          } catch (error) {
+            fail(label + " failed", error);
+            return false;
+          } finally {
+            loadDeviceSettings();
+          }
+        }
+
+        // What Activity brings: a setting changed by an agent, a test or another viewer.
+        function deviceActivitySeen(entries) {
+          if (!activeTab("device")) return;
+          const done = entries.filter((entry) => entry.status !== "running");
+          if (done.some((entry) => DEVICE_SETTING_KINDS.has(entry.kind))) loadDeviceSettings();
+          // An app that starts or ends takes the camera with it.
+          else if (done.some((entry) => entry.kind === "launch" || entry.kind === "terminate")) loadCamera();
+        }
+
+        function setDebugOption(option, enabled) {
+          const title = (DEBUG_OPTIONS.find(([name]) => name === option) || [option, option])[1];
+          return postDevice({ action: "debug", option, enabled }, title + (enabled ? " on" : " off"));
+        }
+
+        function setAppearance(value) { return postDevice({ action: "appearance", value }, (value === "dark" ? "Dark" : "Light") + " appearance"); }
+        function setTextSize(value) { return postDevice({ action: "content-size", value }, value === "increment" ? "Larger text" : value === "decrement" ? "Smaller text" : "Text size " + textSizeName(value)); }
+        function setContrast(enabled) { return postDevice({ action: "increase-contrast", enabled }, "Increase Contrast " + (enabled ? "on" : "off")); }
+        function simulateMemoryWarning() { return postDevice({ action: "memory-warning" }, "Memory warning sent"); }
+        function biometrics(value) {
+          const sensor = biometryName();
+          const words = { enroll: sensor + " enrolled", unenroll: sensor + " unenrolled", match: "Matching " + biometryThing(), nomatch: "Non-matching " + biometryThing() };
+          return postDevice({ action: "biometrics", value }, words[value]);
+        }
+        function statusBarPreset(value) {
+          return value === "clear" ? postDevice({ action: "status-bar", value: "clear" }, "Status bar overrides cleared")
+            : postDevice({ action: "status-bar", statusBar: { time: "9:41", dataNetwork: "wifi", wifiMode: "active", wifiBars: 3, batteryState: "charged", batteryLevel: 100 } }, "Status bar set to 9:41");
+        }
+        function clearLocation() { return postDevice({ action: "location", value: "clear" }, "Location cleared"); }
+
+        function setAccessibility(option, value, label) { return postDevice({ action: "accessibility", option, value }, label); }
+
+        function rotateDevice(name) {
+          if (screenState.foldable) { toast("A foldable turns its picture as it folds — pick a pose instead", { error: true }); return; }
+          const label = name === "left" || name === "right" ? "Rotate " + name : "Rotate to " + ((ORIENTATIONS.find(([value]) => value === name) || [name, name])[1]).toLowerCase();
+          deviceAction(label, { action: "rotate", name }, label).then(() => loadDeviceSettings());
+        }
+
+        // A permission's choice as the select offers it: what the app reads.
+        function setPermission(permission, choice) {
+          const app = deviceInfo.app;
+          if (!app) { toast("No app attached — start the server with --app <bundle-id>", { error: true }); return; }
+          const value = { granted: "grant", denied: "deny", always: "always", "not-determined": "reset" }[choice];
+          const title = (PERMISSIONS.find(([name]) => name === permission) || [permission, permission])[1];
+          const run = () => postDevice({ action: "permission", option: permission, value, bundleId: app }, title + ": " + choice.replace("-", " ")).then(() => loadAppCard());
+          if (permission !== "notifications") { run(); return; }
+          // SpringBoard reads notification permission only as it starts.
+          confirmDestructive("Respring the simulator?", "SpringBoard reads notification permission only as it starts, so the simulator resprings — the screen goes dark for a few seconds and running apps end.", "Respring").then((yes) => { if (yes) run(); else syncAppCard(true); });
+        }
+
+        async function loadAppCard() {
+          if (!deviceInfo.app) { appCard.data = null; appCard.error = ""; syncAppCard(); return; }
+          try {
+            appCard.data = await apiJSON("/api/v1/app?bundleId=" + encodeURIComponent(deviceInfo.app));
+            appCard.error = "";
+          } catch (error) {
+            appCard.error = error.message || String(error);
+          }
+          syncAppCard();
+        }
+
+        async function revealApp(what) {
+          try {
+            const result = await apiJSON("/api/v1/app/reveal", { method: "POST", body: JSON.stringify({ bundleId: deviceInfo.app, what }) });
+            toast("Shown in the Finder: " + result.stdout.split("/").slice(-2).join("/"));
+          } catch (error) {
+            fail("Reveal in Finder failed", error);
+          }
+        }
+
+        function addRootCertificate(file) {
+          if (!file) return;
+          const reader = new FileReader();
+          reader.onload = () => {
+            const base64 = String(reader.result).split(",")[1] || "";
+            postDevice({ action: "keychain", value: "add-root-cert", certificate: base64 }, file.name + " trusted as a root");
+          };
+          reader.readAsDataURL(file);
+        }
+
+        function resetKeychain() {
+          confirmDestructive("Reset the keychain?", "Every password, key and certificate on this simulator is deleted, for every app.", "Reset").then((yes) => {
+            if (yes) postDevice({ action: "keychain", value: "reset" }, "Keychain reset");
+          });
+        }
+
+        async function loadCamera() {
+          try {
+            camera.data = await apiJSON("/api/v1/camera");
+            camera.error = "";
+          } catch (error) {
+            camera.error = error.message || String(error);
+          }
+          syncCamera();
+        }
+
+        // Sets the camera's picture: a file, the Mac's camera, or nothing.
+        async function changeCamera(label, path, options) {
+          if (!manualInputAllowed(() => changeCamera(label, path, options))) return;
+          try {
+            const headers = { "X-SimTool-Source": "viewer", ...(options.headers || {}) };
+            camera.data = await apiJSON(path, { ...options, headers });
+            camera.error = "";
+            toast(label + (camera.data.source !== "none" && !camera.data.apps.length && deviceInfo.app ? " — relaunch " + deviceInfo.app + " to give it the camera" : ""));
+          } catch (error) {
+            fail(label + " failed", error);
+          }
+          syncCamera();
+        }
+
+        function setCameraFile(file) {
+          if (!file) return;
+          changeCamera("Camera: " + file.name, "/api/v1/camera", { method: "POST", body: file, headers: { "Content-Type": file.type || "application/octet-stream", "X-SimTool-Filename": encodeURIComponent(file.name) } });
+        }
+
+        function useMacCamera(id) {
+          toast("Starting the Mac's camera — macOS may ask to allow it");
+          changeCamera("Camera: the Mac's camera", "/api/v1/camera/webcam", { method: "POST", body: JSON.stringify(id ? { camera: id } : {}) });
+        }
+
+        function cameraOff() { changeCamera("Camera off", "/api/v1/camera", { method: "DELETE" }); }
+
+        function cameraSummary(data) {
+          if (!data || data.source === "none") return "Off";
+          if (data.source === "webcam") return "Shows the Mac's " + (data.name || "camera");
+          return "Shows " + (data.name || "a file") + (data.source === "video" ? ", in a loop" : "");
+        }
+
+        function textSizeName(value) { const size = TEXT_SIZES.find(([name]) => name === value); return size ? size[1].split(" ")[0] : value; }
+        function biometryName() { const kind = deviceSettings.data && deviceSettings.data.biometrics && deviceSettings.data.biometrics.kind; return kind === "touch" ? "Touch ID" : "Face ID"; }
+        function biometryThing() { return biometryName() === "Touch ID" ? "finger" : "face"; }
+
+        // ---- The panel: built once, synced with each reading ----
+
+        function switchButton(label, description, onToggle) {
+          const button = el("button", { class: "sw", type: "button", role: "switch", "aria-checked": "false", "aria-label": label, title: description || label });
+          button.addEventListener("click", () => onToggle(button.getAttribute("aria-checked") !== "true"));
+          return button;
+        }
+
+        function settingRow(name, control, note) {
+          return el("div", { class: "dev-row" }, el("span", { class: "dev-name", text: name }), note || null, control);
+        }
+
+        function field(label, control) {
+          return el("label", { class: "field" }, el("span", { text: label }), control);
+        }
+
+        function select(options, label) {
+          const node = el("select", { class: "input", "aria-label": label });
+          for (const [value, text] of options) node.append(el("option", { value, text }));
+          return node;
+        }
+
+        // A section that folds; it starts folded and stays as a person leaves it.
+        // `title` is its heading's words, or the heading itself when they change.
+        function devSection(name, title, ...children) {
+          const heading = typeof title === "string" ? el("h3", { text: title }) : title;
+          return el("details", { class: "dev-sec", "data-sec": name, open: deviceSections[name] === true }, el("summary", {}, heading), ...children);
+        }
+
+        // Unfolds a section, for a command that leads into it.
+        function openDeviceSection(name) {
+          const section = deviceBody.querySelector('details.dev-sec[data-sec="' + name + '"]');
+          if (section) section.open = true;
+          return section;
+        }
+
+        const devicePanel = $("panel-device");
+        const deviceRead = el("span", { class: "muted" });
+        const deviceRefresh = el("button", { class: "tb-btn", type: "button", "aria-label": "Read the settings from the device again", "data-tip": "Read the settings from the device again", html: icon("relaunch") });
+        deviceRefresh.addEventListener("click", () => loadDeviceSettings());
+        const deviceProblem = el("div", { class: "callout warn", hidden: true });
+
+        const appearanceSeg = segmented("Appearance", [["light", "Light"], ["dark", "Dark"]], () => deviceSettings.data && deviceSettings.data.appearance, setAppearance);
+        const textSizeSelect = select(TEXT_SIZES, "Text size");
+        textSizeSelect.addEventListener("change", () => setTextSize(textSizeSelect.value));
+        const textSmaller = el("button", { class: "btn btn-sm", type: "button", "aria-label": "Smaller text", "data-tip": "Smaller text", text: "A−" });
+        const textLarger = el("button", { class: "btn btn-sm", type: "button", "aria-label": "Larger text", "data-tip": "Larger text", text: "A+" });
+        textSmaller.addEventListener("click", () => setTextSize("decrement"));
+        textLarger.addEventListener("click", () => setTextSize("increment"));
+        const contrastSwitch = switchButton("Increase Contrast", "Increase Contrast", setContrast);
+
+        const axSwitches = {};
+        for (const [option, key, title, description] of AX_SWITCHES) axSwitches[key] = switchButton(title, description, (on) => setAccessibility(option, on ? "on" : "off", title + (on ? " on" : " off")));
+        const colorFilterSelect = select(COLOR_FILTERS, "Color filter");
+        colorFilterSelect.addEventListener("change", () => setAccessibility("color-filter", colorFilterSelect.value, "Color filter: " + colorFilterSelect.selectedOptions[0].textContent));
+        const glassSeg = segmented("Liquid Glass", [["clear", "Clear"], ["tinted", "Tinted"]], () => deviceSettings.data && deviceSettings.data.accessibility && deviceSettings.data.accessibility.liquidGlass, (value) => setAccessibility("liquid-glass", value, "Liquid Glass " + value));
+        const glassRow = settingRow("Liquid Glass", glassSeg);
+        const orientationSeg = segmented("Orientation", ORIENTATIONS, () => deviceSettings.data && deviceSettings.data.orientation, rotateDevice);
+
+        const appBody = el("div", { class: "dev-app" });
+        const permissionRows = el("div", { class: "dev-perms", role: "group", "aria-label": "Permissions" });
+        const certificateFile = el("input", { type: "file", accept: ".pem,.cer,.crt,.der", hidden: true });
+        certificateFile.addEventListener("change", () => { const file = certificateFile.files && certificateFile.files[0]; certificateFile.value = ""; addRootCertificate(file); });
+        const certificateAdd = el("button", { class: "btn btn-sm", type: "button", text: "Add a root certificate…", title: "Trust a proxy's CA (Proxyman, Charles, mitmproxy) for TLS" });
+        certificateAdd.addEventListener("click", () => certificateFile.click());
+        const keychainReset = el("button", { class: "btn btn-sm btn-danger", type: "button", text: "Reset the keychain" });
+        keychainReset.addEventListener("click", resetKeychain);
+
+        const cameraNow = el("div", { class: "dev-row" });
+        const cameraApps = el("div", { class: "dev-now" });
+        const cameraFile = el("input", { type: "file", accept: "image/*,video/mp4,video/quicktime,.mov,.mp4,.m4v,.heic", hidden: true });
+        cameraFile.addEventListener("change", () => { const file = cameraFile.files && cameraFile.files[0]; cameraFile.value = ""; setCameraFile(file); });
+        const cameraPick = el("button", { class: "btn btn-sm", type: "button", text: "Image or video…", title: "The camera shows an image, or a video in a loop — a QR code, a document, a face" });
+        cameraPick.addEventListener("click", () => cameraFile.click());
+        const cameraMac = select([], "Mac camera");
+        const cameraWebcam = el("button", { class: "btn btn-sm", type: "button", text: "Use the Mac's camera", title: "The server captures the Mac's camera; macOS asks once" });
+        cameraWebcam.addEventListener("click", () => useMacCamera(cameraMac.value));
+        const cameraOffButton = el("button", { class: "btn btn-sm", type: "button", text: "Turn off" });
+        cameraOffButton.addEventListener("click", cameraOff);
+        const cameraRelaunch = el("button", { class: "btn btn-sm btn-primary", type: "button", text: "Relaunch the app" });
+        cameraRelaunch.addEventListener("click", () => relaunchApp());
+
+        const debugSwitches = {};
+        for (const [option, title, description] of DEBUG_OPTIONS) debugSwitches[option] = switchButton(title, description, (on) => setDebugOption(option, on));
+        const memoryButton = el("button", { class: "btn btn-sm", type: "button", text: "Simulate memory warning", title: "Every app gets didReceiveMemoryWarning, as on a device short of memory" });
+        memoryButton.addEventListener("click", simulateMemoryWarning);
+
+        const biometryTitle = el("h3", { text: "Face ID" });
+        const enrolledSwitch = switchButton("Enrolled", "Whether a face or a finger is enrolled — what canEvaluatePolicy reads", (on) => biometrics(on ? "enroll" : "unenroll"));
+        const matchButton = el("button", { class: "btn btn-sm", type: "button", text: "Matching face" });
+        const noMatchButton = el("button", { class: "btn btn-sm", type: "button", text: "Non-matching face" });
+        matchButton.addEventListener("click", () => biometrics("match"));
+        noMatchButton.addEventListener("click", () => biometrics("nomatch"));
+
+        const statusNow = el("span", { class: "dev-now" });
+        const statusTime = el("input", { class: "input", type: "text", placeholder: "9:41", "aria-label": "Time" });
+        const statusBattery = el("input", { class: "input", type: "number", min: "0", max: "100", placeholder: "100", "aria-label": "Battery level" });
+        const statusBatteryState = select([["", "—"], ["charging", "Charging"], ["charged", "Charged"], ["discharging", "Discharging"]], "Battery state");
+        const statusNetwork = select([["", "—"], ["wifi", "Wi-Fi"], ["hide", "Hidden"], ["3g", "3G"], ["4g", "4G"], ["lte", "LTE"], ["lte-a", "LTE-A"], ["lte+", "LTE+"], ["5g", "5G"], ["5g+", "5G+"], ["5g-uwb", "5G UWB"], ["5g-uc", "5G UC"]], "Data network");
+        const statusWifi = select([["", "—"], ["0", "0"], ["1", "1"], ["2", "2"], ["3", "3"]], "Wi-Fi bars");
+        const statusCell = select([["", "—"], ["0", "0"], ["1", "1"], ["2", "2"], ["3", "3"], ["4", "4"]], "Cellular bars");
+        const statusOperator = el("input", { class: "input", type: "text", placeholder: "Carrier", "aria-label": "Operator name" });
+        const statusApply = el("button", { class: "btn btn-sm btn-primary", type: "button", text: "Override" });
+        const statusClean = el("button", { class: "btn btn-sm", type: "button", text: "9:41 for screenshots", title: "9:41, full Wi-Fi, a charged battery" });
+        const statusClear = el("button", { class: "btn btn-sm", type: "button", text: "Clear overrides" });
+        statusApply.addEventListener("click", () => {
+          const bar = {};
+          if (statusTime.value.trim()) bar.time = statusTime.value.trim();
+          if (statusBattery.value !== "") bar.batteryLevel = Number(statusBattery.value);
+          if (statusBatteryState.value) bar.batteryState = statusBatteryState.value;
+          if (statusNetwork.value) bar.dataNetwork = statusNetwork.value;
+          if (statusWifi.value) bar.wifiBars = Number(statusWifi.value);
+          if (statusCell.value) bar.cellularBars = Number(statusCell.value);
+          if (statusOperator.value) bar.operatorName = statusOperator.value;
+          if (!Object.keys(bar).length) { toast("Fill in a field to override", { error: true }); return; }
+          postDevice({ action: "status-bar", statusBar: bar }, "Status bar overridden");
+        });
+        statusClean.addEventListener("click", () => statusBarPreset("clean"));
+        statusClear.addEventListener("click", () => statusBarPreset("clear"));
+
+        const locationNow = el("span", { class: "dev-now" });
+        const locationPoint = el("input", { class: "input", type: "text", placeholder: "37.3349, -122.0090", "aria-label": "Latitude, longitude" });
+        const locationSet = el("button", { class: "btn btn-sm btn-primary", type: "button", text: "Set" });
+        const locationRoute = el("textarea", { class: "input", rows: "3", placeholder: "One latitude, longitude per line — two or more", "aria-label": "Route" });
+        const locationSpeed = el("input", { class: "input", type: "number", min: "0.1", step: "any", placeholder: "20", "aria-label": "Speed, metres per second" });
+        const locationStart = el("button", { class: "btn btn-sm", type: "button", text: "Start the route" });
+        const locationClear = el("button", { class: "btn btn-sm", type: "button", text: "Clear" });
+        locationSet.addEventListener("click", () => {
+          const point = parseCoordinate(locationPoint.value);
+          if (!point) { toast("A location is latitude, longitude — like 37.3349, -122.0090", { error: true }); return; }
+          postDevice({ action: "location", location: { waypoints: [point] } }, "Location set");
+        });
+        locationStart.addEventListener("click", () => {
+          const points = locationRoute.value.split("\n").map((line) => line.trim()).filter(Boolean).map(parseCoordinate);
+          if (points.length < 2 || points.some((point) => !point)) { toast("A route is two or more lines of latitude, longitude", { error: true }); return; }
+          const location = { waypoints: points };
+          if (locationSpeed.value) location.speed = Number(locationSpeed.value);
+          postDevice({ action: "location", location }, "Route started");
+        });
+        locationClear.addEventListener("click", clearLocation);
+
+        const pushApp = el("input", { class: "input", type: "text", "aria-label": "App bundle identifier" });
+        const pushPayload = el("textarea", { class: "input", rows: "5", spellcheck: "false", "aria-label": "Payload JSON" });
+        pushPayload.value = JSON.stringify({ aps: { alert: { title: "SimTool", body: "A push from the viewer" }, sound: "default" } }, null, 2);
+        const pushSend = el("button", { class: "btn btn-sm btn-primary", type: "button", text: "Send" });
+        pushSend.addEventListener("click", () => {
+          let payload;
+          try { payload = JSON.parse(pushPayload.value); } catch (error) { toast("The payload is not JSON: " + error.message, { error: true }); return; }
+          const bundleId = pushApp.value.trim() || deviceInfo.app;
+          if (!bundleId) { toast("Name the app to push to", { error: true }); return; }
+          postDevice({ action: "push", bundleId, payload }, "Push sent to " + bundleId);
+        });
+
+        const deviceBody = el("div", { class: "dev-body" },
+          deviceProblem,
+          devSection("appearance", "Appearance and text",
+            settingRow("Appearance", appearanceSeg),
+            settingRow("Text size", el("span", { class: "dev-inline" }, textSmaller, textSizeSelect, textLarger)),
+            settingRow("Increase Contrast", contrastSwitch)),
+          devSection("accessibility", "Accessibility",
+            ...AX_SWITCHES.map(([, key, title]) => settingRow(title, axSwitches[key])),
+            settingRow("Color filter", colorFilterSelect),
+            el("div", { class: "dev-now", text: "Apps read the filter; the simulator's screen shows none." }),
+            glassRow),
+          devSection("orientation", "Orientation",
+            el("div", { class: "dev-row" }, orientationSeg)),
+          devSection("rendering", "Rendering",
+            ...DEBUG_OPTIONS.map(([option, title]) => settingRow(title, debugSwitches[option])),
+            el("div", { class: "dev-actions" }, memoryButton)),
+          devSection("biometrics", biometryTitle,
+            settingRow("Enrolled", enrolledSwitch),
+            el("div", { class: "dev-actions" }, matchButton, noMatchButton)),
+          devSection("status-bar", "Status bar",
+            el("div", { class: "dev-row" }, statusNow),
+            el("div", { class: "dev-grid" },
+              field("Time", statusTime), field("Battery %", statusBattery), field("Battery", statusBatteryState),
+              field("Data network", statusNetwork), field("Wi-Fi bars", statusWifi), field("Cellular bars", statusCell), field("Operator", statusOperator)),
+            el("div", { class: "dev-actions" }, statusApply, statusClean, statusClear)),
+          devSection("location", "Location",
+            el("div", { class: "dev-row" }, locationNow),
+            el("div", { class: "dev-inline" }, locationPoint, locationSet),
+            field("Route", locationRoute),
+            el("div", { class: "dev-actions" }, field("Speed, m/s", locationSpeed), locationStart, locationClear)),
+          devSection("camera", "Camera",
+            cameraNow,
+            cameraApps,
+            el("div", { class: "dev-actions" }, cameraPick, cameraOffButton, cameraRelaunch, cameraFile),
+            el("div", { class: "dev-inline" }, cameraMac, cameraWebcam)),
+          devSection("push", "Push notification",
+            field("App", pushApp),
+            field("Payload", pushPayload),
+            el("div", { class: "dev-actions" }, pushSend)),
+          devSection("app", "App", appBody),
+          devSection("permissions", "Permissions", permissionRows),
+          devSection("keychain", "Keychain",
+            el("div", { class: "dev-actions" }, certificateAdd, keychainReset, certificateFile))
+        );
+        devicePanel.append(el("div", { class: "ptool" }, deviceRead, el("span", { class: "ptool-spacer" }), deviceRefresh), deviceBody);
+        deviceBody.addEventListener("toggle", (event) => {
+          const section = event.target;
+          if (!section.matches || !section.matches("details.dev-sec")) return;
+          deviceSections[section.dataset.sec] = section.open;
+          store("device.sections", deviceSections);
+        }, true);
+
+        function parseCoordinate(text) {
+          const parts = String(text).split(",").map((part) => Number(part.trim()));
+          if (parts.length !== 2 || parts.some((part) => !isFinite(part)) || Math.abs(parts[0]) > 90 || Math.abs(parts[1]) > 180) return null;
+          return { latitude: parts[0], longitude: parts[1] };
+        }
+
+        function setSwitch(button, on) {
+          button.setAttribute("aria-checked", String(!!on));
+          button.disabled = on == null;
+        }
+
+        // Each control shows the device's answer; what it would not tell stays blank
+        // and the callout says why.
+        function syncDeviceSettings() {
+          const data = deviceSettings.data || {};
+          deviceRead.textContent = deviceSettings.error ? "Could not read the device" : deviceSettings.loaded ? "As the device reports it" : "Reading the device…";
+          const problems = Object.entries(data.unavailable || {}).map(([name, reason]) => name + ": " + reason);
+          if (deviceSettings.error) problems.unshift(deviceSettings.error);
+          deviceProblem.hidden = !problems.length;
+          deviceProblem.innerHTML = icon("warn") + "<span>" + problems.map(escapeHTML).join("<br>") + "</span>";
+          appearanceSeg.sync();
+          const ax = data.accessibility || {};
+          for (const [, key] of AX_SWITCHES) setSwitch(axSwitches[key], data.accessibility ? ax[key] : null);
+          colorFilterSelect.disabled = !ax.colorFilter;
+          if (ax.colorFilter) colorFilterSelect.value = ax.colorFilter;
+          glassRow.hidden = !ax.liquidGlass;
+          glassSeg.sync();
+          orientationSeg.sync();
+          for (const button of orientationSeg.children) button.disabled = !!screenState.foldable;
+          if (data.contentSize && TEXT_SIZES.some(([name]) => name === data.contentSize)) textSizeSelect.value = data.contentSize;
+          setSwitch(contrastSwitch, data.increaseContrast);
+          for (const [option] of DEBUG_OPTIONS) setSwitch(debugSwitches[option], data.debug ? data.debug[option] : null);
+          const bio = data.biometrics;
+          biometryTitle.textContent = bio && !bio.kind ? "Biometrics — this device has no sensor" : biometryName();
+          setSwitch(enrolledSwitch, bio ? bio.enrolled : null);
+          matchButton.textContent = "Matching " + biometryThing();
+          noMatchButton.textContent = "Non-matching " + biometryThing();
+          matchButton.title = noMatchButton.title = "Answers the " + biometryName() + " prompt the app has up";
+          statusNow.textContent = data.statusBar ? "Now: " + statusBarSummary(data.statusBar) : "";
+          locationNow.textContent = data.location ? "Set by SimTool " + formatAgo(data.location.setAt) + ": " + locationSummary(data.location) : "No location set by SimTool — simctl cannot read one back";
+          pushApp.placeholder = deviceInfo.app || "com.example.app";
+        }
+
+        // The app card and its permissions, redrawn only when what the server says changed.
+        function syncAppCard(force) {
+          const shown = JSON.stringify([deviceInfo.app, appCard.data, appCard.error]);
+          if (!force && shown === appCard.shown) return;
+          appCard.shown = shown;
+          appBody.innerHTML = "";
+          permissionRows.innerHTML = "";
+          const info = appCard.data;
+          if (!deviceInfo.app) {
+            appBody.append(el("div", { class: "dev-now", text: "No app attached — start the server with --app <bundle-id>. Drop an .app or an .ipa on the screen to install one." }));
+            permissionRows.append(el("div", { class: "dev-now", text: "Permissions belong to an app: attach one." }));
+            return;
+          }
+          if (appCard.error) appBody.append(el("div", { class: "callout warn", html: icon("warn") + "<span>" + escapeHTML(appCard.error) + "</span>" }));
+          if (!info) return;
+          if (!info.installed) {
+            appBody.append(el("div", { class: "dev-now", text: deviceInfo.app + " is not installed on this simulator. Drop its .app or .ipa on the screen to install it." }));
+            return;
+          }
+          const path = (value, what) => value ? el("span", { class: "dev-path" }, el("span", { class: "mono", title: value, text: value }),
+            el("button", { class: "btn btn-sm", type: "button", text: "Reveal", title: "Show it in the Finder", onclick: () => revealApp(what) }),
+            el("button", { class: "btn btn-sm", type: "button", text: "Copy", onclick: () => copyText(value, "Path copied") })) : el("span", { text: "—" });
+          const rows = [
+            ["App", (info.name ? info.name + " — " : "") + info.bundleId],
+            ["Version", [info.version, info.build ? "(" + info.build + ")" : ""].filter(Boolean).join(" ") || "—"],
+            ["Minimum iOS", info.minimumOS || "—"],
+            ["Process", info.pid ? "pid " + info.pid : "not running"]
+          ];
+          const list = el("dl", { class: "kv" });
+          for (const [name, value] of rows) list.append(el("dt", { text: name }), el("dd", { text: value }));
+          list.append(el("dt", { text: "Bundle" }), el("dd", {}, path(info.bundlePath, "bundle")), el("dt", { text: "Data" }), el("dd", {}, path(info.dataContainer, "data")));
+          appBody.append(list, el("div", { class: "dev-now", text: "Drop an .app or an .ipa on the screen to install a build; images and videos go to Photos." }));
+          const states = info.permissions || {};
+          for (const [name, title] of PERMISSIONS) {
+            const state = states[name] || "not-determined";
+            const options = [["not-determined", "Not asked"], ["granted", name === "location" ? "While using" : "Granted"], ["denied", "Denied"]];
+            if (name === "location") options.push(["always", "Always"]);
+            if (!options.some(([value]) => value === state)) options.push([state, state.replace("-", " ")]);
+            const choice = select(options, title);
+            choice.value = state;
+            choice.addEventListener("change", () => setPermission(name, choice.value));
+            permissionRows.append(settingRow(title, choice));
+          }
+        }
+
+        // The camera SimTool gives the apps it launches: what it shows, who has it.
+        function syncCamera() {
+          const data = camera.data;
+          cameraNow.textContent = camera.error ? "Could not read the camera: " + camera.error : cameraSummary(data);
+          const on = !!data && data.source !== "none";
+          const apps = (data && data.apps) || [];
+          const holders = apps.map((client) => client.bundleId + (client.running ? " (capturing)" : "")).join(", ");
+          cameraApps.textContent = !on
+            ? apps.length
+              ? holders + (apps.length === 1 ? " sees" : " see") + " black until the camera shows something again."
+              : "The apps SimTool launches get a back and a front camera showing an image, a video or the Mac's camera — previews, photos, code scanning."
+            : apps.length
+              ? holders + (apps.length === 1 ? " has it." : " have it.")
+              : "No app has it yet: an app gets the camera when SimTool launches it.";
+          cameraRelaunch.hidden = !on || !deviceInfo.app || apps.some((client) => client.bundleId === deviceInfo.app);
+          cameraOffButton.disabled = !on;
+          const cameras = (data && data.macCameras) || [];
+          const shown = JSON.stringify(cameras);
+          if (cameraMac.dataset.shown !== shown) {
+            cameraMac.dataset.shown = shown;
+            cameraMac.innerHTML = "";
+            for (const mac of cameras) cameraMac.append(el("option", { value: mac.id, text: mac.name }));
+            if (!cameras.length) cameraMac.append(el("option", { value: "", text: "This Mac has no camera" }));
+          }
+          cameraMac.disabled = cameraWebcam.disabled = !cameras.length;
+        }
+
+        function statusBarSummary(bar) {
+          const parts = [];
+          if (bar.time) parts.push(bar.time);
+          if (bar.dataNetwork) parts.push(bar.dataNetwork);
+          if (bar.wifiBars != null) parts.push("Wi-Fi " + bar.wifiBars + "/3");
+          if (bar.cellularBars != null) parts.push("cell " + bar.cellularBars + "/4");
+          if (bar.operatorName) parts.push(bar.operatorName);
+          if (bar.batteryLevel != null) parts.push(bar.batteryLevel + "%" + (bar.batteryState ? " " + bar.batteryState : ""));
+          return parts.length ? parts.join(" · ") : "no overrides";
+        }
+
+        function locationSummary(location) {
+          const points = location.waypoints || [];
+          if (points.length === 1) return points[0].latitude + ", " + points[0].longitude;
+          return "a route of " + points.length + " points" + (location.speed ? " at " + location.speed + " m/s" : "");
+        }
+
+        tabHandlers.device = { show() { syncDeviceSettings(); syncCamera(); loadDeviceSettings(); } };
+        syncDeviceSettings();
+        syncCamera();
         """#
 
     static let jsStateJs = #"""
@@ -6742,16 +7564,14 @@ enum WebViewerAssets {
         }
         @container bar (max-width: 560px) { .device-id, .brand { display: none; } }
 
-        /* Tooltips: the action and its shortcut, on hover and keyboard focus. */
-        [data-tip] { position: relative; }
-        [data-tip]:hover::after, [data-tip]:focus-visible::after {
-          content: attr(data-tip); position: absolute; top: calc(100% + 6px); left: 50%; transform: translateX(-50%); z-index: 40;
+        /* Tooltips: the action and its shortcut, on hover and keyboard focus — one floating tip
+           (js/core.js) under the control, above it where the window ends, always inside the window. */
+        .tip {
+          position: fixed; left: 0; top: 0; z-index: 80; display: flex; align-items: baseline; gap: 10px; max-width: min(420px, calc(100vw - 12px));
           padding: 4px 8px; border-radius: var(--r-1); background: var(--ink1); color: var(--g1);
-          font: 500 var(--fs-11)/1.3 var(--font-ui); white-space: nowrap; pointer-events: none;
+          font: 500 var(--fs-11)/1.3 var(--font-ui); pointer-events: none;
         }
-        [data-tip][data-key]:hover::after, [data-tip][data-key]:focus-visible::after { content: attr(data-tip) "   " attr(data-key); }
-        .tb-right [data-tip]:hover::after, .tb-right [data-tip]:focus-visible::after { left: auto; right: 0; transform: none; }
-        .statusbar [data-tip]:hover::after, .statusbar [data-tip]:focus-visible::after { top: auto; bottom: calc(100% + 6px); }
+        .tip[hidden] { display: none; }
 
         /* ── Workspace: stage | splitter | inspector ── */
         .workspace { display: grid; grid-template-columns: minmax(300px, var(--stage-w, 1fr)) 1px minmax(380px, 1fr); min-height: 0; min-width: 0; }
@@ -7081,8 +7901,8 @@ enum WebViewerAssets {
         .dsec { margin: 0 0 var(--sp-2); }
         .dsec > summary { display: flex; align-items: center; gap: 6px; padding: 4px 0; color: var(--ink2); font-size: var(--fs-11); font-weight: 600; list-style: none; cursor: pointer; }
         .dsec > summary::-webkit-details-marker { display: none; }
-        .dsec > summary::before { content: ""; border-left: 4px solid currentColor; border-top: 3.5px solid transparent; border-bottom: 3.5px solid transparent; transition: transform var(--dur) var(--ease); }
-        .dsec[open] > summary::before { transform: rotate(90deg); }
+        .dsec > summary::before, .dev-sec > summary::before { content: ""; border-left: 4px solid currentColor; border-top: 3.5px solid transparent; border-bottom: 3.5px solid transparent; transition: transform var(--dur) var(--ease); }
+        .dsec[open] > summary::before, .dev-sec[open] > summary::before { transform: rotate(90deg); }
         .dsec > summary:hover { color: var(--ink1); }
         .hdr { width: 100%; margin: 0 0 var(--sp-1); border-collapse: collapse; font: var(--fs-11)/1.5 var(--font-mono); }
         .hdr th { width: 1%; min-width: 96px; max-width: 280px; padding: 1px var(--sp-4) 1px 0; color: var(--ink2); font-weight: 400; text-align: left; vertical-align: top; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -7254,6 +8074,45 @@ enum WebViewerAssets {
         .who-agent, .who-test { color: var(--course); background: var(--course-bg); }
         .who-viewer { color: var(--ink2); background: var(--g3); }
 
+        /* Device: the simulator's settings and debug switches, a section per subject */
+        .dev-body { flex: 1; overflow: auto; overscroll-behavior: contain; padding: 0 var(--sp-3) var(--sp-5); }
+        .dev-body > .callout { margin-top: var(--sp-2); }
+        .dev-sec { border-bottom: 1px solid var(--line-hair); }
+        .dev-sec:last-child { border-bottom: 0; }
+        .dev-sec[open] { padding-bottom: var(--sp-3); }
+        .dev-sec > summary { display: flex; align-items: center; gap: 6px; padding: var(--sp-2) 0; color: var(--ink2); list-style: none; cursor: pointer; }
+        .dev-sec > summary::-webkit-details-marker { display: none; }
+        .dev-sec > summary:hover { color: var(--ink1); }
+        .dev-sec h3 { margin: 0; color: inherit; font-size: var(--fs-11); font-weight: 600; }
+        .dev-row { display: flex; align-items: center; gap: var(--sp-2); min-height: 30px; }
+        .dev-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .dev-now { color: var(--ink3); font: var(--fs-11)/1.5 var(--font-mono); overflow-wrap: anywhere; }
+        .dev-inline { display: flex; align-items: center; gap: 6px; }
+        .dev-inline .input[type="text"] { flex: 1; min-width: 0; }
+        .dev-actions { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 6px; margin-top: var(--sp-2); }
+        .dev-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: 6px var(--sp-2); margin-top: var(--sp-1); }
+        .field { display: flex; flex-direction: column; gap: 3px; margin-top: 6px; color: var(--ink2); font-size: var(--fs-11); }
+        .dev-grid .field { margin-top: 0; }
+        .input { height: 26px; min-width: 0; padding: 0 6px; border: 1px solid var(--line-thick); border-radius: var(--r-2); background: var(--g0); color: var(--ink1); font: var(--fs-12) var(--font-ui); }
+        .input:focus { outline: 0; border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+        .input::placeholder { color: var(--ink3); }
+        textarea.input { height: auto; padding: 6px; font: var(--fs-11)/1.5 var(--font-mono); resize: vertical; }
+        select.input { padding-right: 2px; }
+        /* A setting that is on or off: the menus' switch, as a control of its own. */
+        .sw { position: relative; flex: none; width: 30px; height: 18px; padding: 0; border: 0; border-radius: 9px; background: var(--line-thick); cursor: pointer; }
+        .sw::after { content: ""; position: absolute; top: 3px; left: 3px; width: 12px; height: 12px; border-radius: 50%; background: var(--g2); transition: transform var(--dur) var(--ease); }
+        .sw[aria-checked="true"] { background: var(--course); }
+        .sw[aria-checked="true"]::after { transform: translateX(12px); }
+        .sw:disabled { opacity: .4; cursor: default; }
+        .sw:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+        .dev-path { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; min-width: 0; }
+        .dev-path .mono { flex: 1 1 100%; min-width: 0; overflow-wrap: anywhere; }
+        .dev-perms .dev-row { min-height: 28px; }
+        .dev-perms select.input { width: 140px; }
+        /* Files over the screen: it takes them. */
+        .app.dropping .screen { outline: 2px dashed var(--accent); outline-offset: 6px; }
+
         /* No app attached */
         .noapp { flex: 1; overflow: auto; padding: var(--sp-6) var(--sp-5); }
         .noapp h2 { margin: 0 0 var(--sp-2); font-size: var(--fs-15); font-weight: 600; }
@@ -7383,6 +8242,17 @@ enum WebViewerAssets {
               <symbol id="i-fold-closed" viewBox="0 0 16 16"><rect x="4.5" y="2.5" width="7" height="11" rx="1.2"/><path d="M6.2 2.5v11"/></symbol>
               <symbol id="i-fold-book" viewBox="0 0 16 16"><path d="M8 4v9.5M8 4 2.5 2.5v9.5L8 13.5M8 4l5.5-1.5v9.5L8 13.5"/></symbol>
               <symbol id="i-cube" viewBox="0 0 16 16"><path d="M8 1.8 13.5 5v6L8 14.2 2.5 11V5Z"/><path d="M2.5 5 8 8.2 13.5 5M8 8.2v6"/></symbol>
+              <symbol id="i-rotate" viewBox="0 0 16 16"><rect x="6.5" y="5" width="7" height="9.5" rx="1.2"/><path d="M2.5 8.5V6.5a4 4 0 0 1 4-4h2.5M9 2.5 7.3.8M9 2.5 7.3 4.2"/></symbol>
+              <symbol id="i-key" viewBox="0 0 16 16"><circle cx="5.5" cy="10.5" r="3"/><path d="m7.6 8.4 6-6M11.5 4.5l1.8 1.8M10 6l1.5 1.5"/></symbol>
+              <symbol id="i-bell" viewBox="0 0 16 16"><path d="M4 11V7.5a4 4 0 0 1 8 0V11l1.2 1.5H2.8Z"/><path d="M6.8 14.2h2.4"/></symbol>
+              <symbol id="i-pin" viewBox="0 0 16 16"><path d="M8 14.2s4.5-4.2 4.5-7.7a4.5 4.5 0 0 0-9 0c0 3.5 4.5 7.7 4.5 7.7Z"/><circle cx="8" cy="6.5" r="1.6"/></symbol>
+              <symbol id="i-face" viewBox="0 0 16 16"><path d="M2.5 5V3.5a1 1 0 0 1 1-1H5M11 2.5h1.5a1 1 0 0 1 1 1V5M13.5 11v1.5a1 1 0 0 1-1 1H11M5 13.5H3.5a1 1 0 0 1-1-1V11"/><path d="M6 6.2v1.2M10 6.2v1.2M8 6.2v2.7h-.7M6.2 10.7c1 .8 2.6.8 3.6 0"/></symbol>
+              <symbol id="i-text" viewBox="0 0 16 16"><path d="m1.8 12.5 3.5-9 3.5 9M3 9.5h4.6M10.3 12.5l2-5 2 5M10.9 11h2.8"/></symbol>
+              <symbol id="i-contrast" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5"/><path d="M8 2.5v11a5.5 5.5 0 0 0 0-11Z" fill="currentColor"/></symbol>
+              <symbol id="i-layers" viewBox="0 0 16 16"><path d="M8 2.5 14 5.5 8 8.5 2 5.5Z"/><path d="m2 8.5 6 3 6-3M2 11l6 3 6-3"/></symbol>
+              <symbol id="i-memory" viewBox="0 0 16 16"><rect x="3.5" y="3.5" width="9" height="9" rx="1"/><path d="M6 1.5v2M10 1.5v2M6 12.5v2M10 12.5v2M1.5 6h2M1.5 10h2M12.5 6h2M12.5 10h2"/></symbol>
+              <symbol id="i-battery" viewBox="0 0 16 16"><rect x="1.5" y="5" width="11.5" height="6" rx="1.2"/><path d="M14.5 7v2M3.5 7v2h5.5V7Z"/></symbol>
+              <symbol id="i-slow" viewBox="0 0 16 16"><path d="M4 2h8M4 14h8M5 2c0 3.6 6 3.4 6 6s-6 2.4-6 6M11 2c0 3.6-6 3.4-6 6s6 2.4 6 6"/></symbol>
               <symbol id="i-fold-open" viewBox="0 0 16 16"><rect x="1.5" y="3.5" width="13" height="9" rx="1.2"/><path d="M8 3.5v9" stroke-dasharray="1.2 1.8"/></symbol>
             </defs>
           </svg>
@@ -7401,6 +8271,7 @@ enum WebViewerAssets {
                 <button class="tb-btn tb-rec" type="button" id="recordButton" aria-label="Record video" data-tip="Record video" data-key="⌘R" aria-keyshortcuts="Meta+R"><svg class="ic" aria-hidden="true"><use href="#i-record"/></svg><span class="rec-dot" aria-hidden="true"></span><span class="rec-time" id="recordTime"></span></button>
                 <button class="tb-btn tb-menu tb-caret" type="button" id="captureMenuButton" aria-haspopup="menu" aria-expanded="false" aria-label="Screenshot and video options" data-tip="Screenshot and video options — the frame, copy, download"><svg class="ic frame-mark" aria-hidden="true"><use href="#i-bezel"/></svg><svg class="ic caret" aria-hidden="true"><use href="#i-chev-d"/></svg></button>
                 <button class="tb-btn" type="button" id="shakeButton" aria-label="Shake" data-tip="Shake" data-key="⌃⌘Z" aria-keyshortcuts="Control+Meta+Z"><svg class="ic" aria-hidden="true"><use href="#i-shake"/></svg></button>
+                <button class="tb-btn" type="button" id="rotateButton" aria-label="Rotate left" aria-description="⌘→ rotates right" data-tip="Rotate left · ⌘→ right" data-key="⌘←" aria-keyshortcuts="Meta+ArrowLeft Meta+ArrowRight"><svg class="ic" aria-hidden="true"><use href="#i-rotate"/></svg></button>
                 <button class="tb-btn tb-menu" type="button" id="keyboardButton" aria-haspopup="menu" aria-expanded="false" aria-label="Keyboard" data-tip="Keyboard — the software keyboard and the Mac keyboard"><svg class="ic" aria-hidden="true"><use href="#i-keyboard"/></svg><svg class="ic caret" aria-hidden="true"><use href="#i-chev-d"/></svg></button>
                 <span class="tb-sep" aria-hidden="true"></span>
                 <button class="tb-btn" type="button" id="terminateButton" aria-label="Terminate app" data-tip="Terminate app"><svg class="ic" aria-hidden="true"><use href="#i-stop"/></svg></button>
@@ -7429,7 +8300,7 @@ enum WebViewerAssets {
                     <div class="ruler ruler-x" id="rulerX" aria-hidden="true"></div>
                     <div class="ruler ruler-y" id="rulerY" aria-hidden="true"></div>
                     <div class="screen" id="screen">
-                      <canvas id="screenCanvas" aria-label="Simulator screen. Press and drag to touch; right-click for paste and photos."></canvas>
+                      <canvas id="screenCanvas" aria-label="Simulator screen. Press and drag to touch; right-click for paste and photos; drop images, videos or an app on it."></canvas>
                       <svg class="redlines" id="redlines" aria-hidden="true"></svg>
                       <div class="redline-labels" id="redlineLabels" aria-hidden="true"></div>
                       <div class="touch-layer" id="touchLayer" aria-hidden="true"></div>
@@ -7483,6 +8354,7 @@ enum WebViewerAssets {
                   <button role="tab" class="tab" type="button" id="tab-logs" data-tab="logs" aria-controls="panel-logs" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+2">Logs <span class="count" id="count-logs"></span><span class="count-err" id="err-logs" hidden></span></button>
                   <button role="tab" class="tab" type="button" id="tab-state" data-tab="state" aria-controls="panel-state" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+3">State <span class="count" id="count-state"></span></button>
                   <button role="tab" class="tab" type="button" id="tab-ax" data-tab="ax" aria-controls="panel-ax" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+4">Accessibility</button>
+                  <button role="tab" class="tab" type="button" id="tab-device" data-tab="device" aria-controls="panel-device" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+7">Device</button>
                   <button role="tab" class="tab" type="button" id="tab-tests" data-tab="tests" aria-controls="panel-tests" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+5">Tests <span class="count" id="count-tests"></span><span class="count-err" id="err-tests" hidden></span></button>
                   <button role="tab" class="tab" type="button" id="tab-activity" data-tab="activity" aria-controls="panel-activity" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+6">Activity <span class="count" id="count-activity"></span><span class="count-err" id="err-activity" hidden></span></button>
                 </div>
@@ -7490,6 +8362,7 @@ enum WebViewerAssets {
                 <div class="panel" role="tabpanel" id="panel-logs" aria-labelledby="tab-logs" hidden></div>
                 <div class="panel" role="tabpanel" id="panel-state" aria-labelledby="tab-state" hidden></div>
                 <div class="panel" role="tabpanel" id="panel-ax" aria-labelledby="tab-ax" hidden></div>
+                <div class="panel" role="tabpanel" id="panel-device" aria-labelledby="tab-device" hidden></div>
                 <div class="panel" role="tabpanel" id="panel-tests" aria-labelledby="tab-tests" hidden></div>
                 <div class="panel" role="tabpanel" id="panel-activity" aria-labelledby="tab-activity" hidden></div>
               </section>
@@ -7509,6 +8382,7 @@ enum WebViewerAssets {
 
           <div class="menu" id="menu" role="menu" hidden></div>
           <div class="popover" id="popover" role="dialog" hidden></div>
+          <div class="tip" id="tip" aria-hidden="true" hidden></div>
           <div class="scrim" id="paletteScrim" hidden>
             <div class="palette" role="dialog" aria-modal="true" aria-label="Commands">
               <div class="palette-input"><svg class="ic" aria-hidden="true"><use href="#i-search"/></svg><input id="paletteInput" type="text" role="combobox" aria-expanded="true" aria-controls="paletteList" aria-label="Command" placeholder="Type a command or a test name…" autocomplete="off" spellcheck="false"></div>
@@ -7541,6 +8415,7 @@ enum WebViewerAssets {
         {{js/tests.js}}
         {{js/review.js}}
         {{js/activity.js}}
+        {{js/settings.js}}
         {{js/palette.js}}
         {{js/events.js}}
         {{js/main.js}}

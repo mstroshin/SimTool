@@ -218,7 +218,7 @@ The filter field is the only text input on most screens: 26 px, thick outline,
 accent ring on focus, `/` to reach it.
 
 ### Navigation
-Inspector tabs follow the WAI-ARIA tab pattern (arrows, Home/End, ⌥1–5) with a
+Inspector tabs follow the WAI-ARIA tab pattern (arrows, Home/End, ⌥1–7) with a
 2 px accent underline and counts in mono; failures get a red dot, and with none,
 client-side problems (4xx, gRPC client codes) an amber one — the colours the rows use.
 

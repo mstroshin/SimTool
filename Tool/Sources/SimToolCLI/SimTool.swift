@@ -30,6 +30,16 @@ struct SimTool: AsyncParsableCommand {
             Logs.self,
             Network.self,
             Mock.self,
+            UI.self,
+            Debug.self,
+            Biometrics.self,
+            Push.self,
+            StatusBar.self,
+            Location.self,
+            Settings.self,
+            Permissions.self,
+            Keychain.self,
+            Camera.self,
             AppCommand.self,
             TestCommand.self,
             Run.self,
@@ -221,7 +231,7 @@ struct Input: AsyncParsableCommand {
         Every touch is played by SimTool's own HID helper as a timed path, in \
         screen points (the space `simtool ax tree` reports frames in).
         """,
-        subcommands: [Tap.self, LongPress.self, TypeText.self, Paste.self, Swipe.self, Scroll.self, Fling.self, Drag.self, Button.self, Keyboard.self, Pose.self]
+        subcommands: [Tap.self, LongPress.self, TypeText.self, Paste.self, Swipe.self, Scroll.self, Fling.self, Drag.self, Button.self, Keyboard.self, Pose.self, Rotate.self]
     )
 }
 
@@ -998,7 +1008,7 @@ struct AppCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "app",
         abstract: "Build, install, and launch simulator apps.",
-        subcommands: [Build.self, Launch.self, Test.self]
+        subcommands: [Build.self, Launch.self, Test.self, Info.self, Install.self]
     )
 }
 
@@ -1557,7 +1567,7 @@ struct TestCommand: AsyncParsableCommand {
               reset:                          # optional; simulator state, before launch
                 defaults: true                #   clear the app's UserDefaults
                 container: false              #   wipe the app's data container
-                permissions: { att: deny, location: grant }
+                permissions: { att: deny, location: grant, notifications: grant }
                 locale: es_ES                 #   as -AppleLocale / -AppleLanguages
                 language: es
               mocks:                          # optional; backend answers, before launch
@@ -1567,6 +1577,8 @@ struct TestCommand: AsyncParsableCommand {
               setup:                          # optional; shell commands run before launch,
                 - xcrun simctl spawn {udid} … #   {udid}/{app}/{server} substituted, exits recorded
               timeout: 10                     # default per-step wait, seconds
+              camera: fixtures/code.png       # optional; what the camera shows from launch,
+                                              #   an image or a video, relative to the file
               steps:
                 - waitFor: { id: settingsButton, timeout: 20 }
                 - tap: { id: settingsButton }
@@ -1577,6 +1589,14 @@ struct TestCommand: AsyncParsableCommand {
                 - fling: { direction: up, speed: fast }
                 - drag: { from: { label: "Milk" }, to: { label: "Eggs" } }
                 - keyboard: hide              # or show — the software keyboard
+                - appearance: dark            # the device's settings: textSize, contrast too
+                - biometrics: match           # enroll | unenroll | match | nomatch
+                - push: { aps: { alert: "Hi" } }   # to the test's app
+                - location: "37.3349,-122.0090"    # or { route: [...], speed: 20 } or clear
+                - statusBar: clean            # or { time: "9:41", batteryLevel: 20 } or clear
+                - permission: { camera: deny }     # grant | deny | reset; relaunches an app it ended
+                - rotate: landscape-left      # or right / left: a quarter turn
+                - camera: fixtures/card.mov   # a new picture from here on, or off
                 - assertVisible: { text: "Welcome", criterion: AC-1 }
                 - assertHidden: { label: "Loading" }
                 - wait: 2

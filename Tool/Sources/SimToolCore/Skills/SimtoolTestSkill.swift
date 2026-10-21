@@ -198,6 +198,7 @@ extension AgentSkill {
         setup:                         # escape hatch: shell before launch
           - xcrun simctl spawn {udid} defaults delete …  # {udid} {app} {server} substituted; exits recorded, never fatal
         timeout: 10                    # default per-step wait, seconds
+        camera: fixtures/code.png      # the simulator's camera shows this from launch: an image or a video (looped), relative to this file
         steps:
           - waitFor: { id: settingsButton, timeout: 20 }
           - tap: { id: settingsButton }
@@ -209,6 +210,16 @@ extension AgentSkill {
           - drag: { from: { label: "Milk" }, to: { label: "Eggs" } }   # or by: { x: 0, y: 120 }
           - keyboard: hide             # or show — the software keyboard, confirmed on screen
           - pose: book                 # iPhone Duo: closed | book | open | an angle 0–180, confirmed by the device
+          - appearance: dark           # the device's settings, as the scenario needs them
+          - textSize: ax2              # simctl's size names, xs…xxxl, ax1…ax5, default, bigger, smaller
+          - contrast: on               # Increase Contrast
+          - biometrics: match          # enroll | unenroll | match | nomatch — answers a Face ID / Touch ID prompt on screen
+          - push: { aps: { alert: "Shipped" } }   # to the test's app; { app: …, payload: { aps: … } } for another
+          - location: "37.3349,-122.0090"         # or { route: ["lat,lon", …], speed: 20 } or clear
+          - statusBar: clean           # 9:41, full Wi-Fi, charged — or { time: "9:41", batteryLevel: 20 } or clear
+          - permission: { camera: deny }          # one permission of the test's app: grant | deny | reset (location: always)
+          - rotate: landscape-left     # portrait | landscape-left | landscape-right | upside-down | left | right
+          - camera: fixtures/card.mov  # what the camera shows from here on, or off
           - assertVisible: { text: "Welcome", criterion: AC-1 }   # alias of waitFor
           - assertHidden: { label: "Loading" }
           - wait: 2                    # escape hatch; prefer waitFor / assertHidden
@@ -235,6 +246,25 @@ extension AgentSkill {
         dropping — list reordering, moving items, sliders (`press:`, `speed:`, `hold:`
         tune it). Dropping a list row onto the middle of another row can mean "nest it"
         in apps that support that; aim for the row's edge to reorder.
+
+        **Device settings are steps, not staging.** `appearance`, `textSize`,
+        `contrast`, `biometrics`, `push`, `location`, `statusBar`, `permission` and
+        `rotate` change the
+        simulator mid-run, where the scenario needs it — a dark-mode screen, a Face ID
+        prompt answered after the tap that raised it, a push the app reacts to. They
+        stay changed after the run: a test that sets one puts it back in its last steps
+        (`appearance: light`, `statusBar: clear`, `location: clear`), or the next test
+        starts in its state.
+
+        **The camera is a file.** The simulator has no camera; SimTool gives the app
+        one — previews, video frames, photos, QR and barcode scanning, the image
+        picker's camera — that shows an image or a video in a loop. `camera:` at the
+        top shows a file from launch; a `camera:` step changes the picture mid-run (the
+        next code to scan), or turns it `off`. Keep the files next to the test
+        (`fixtures/`), so the test carries them. The app must be launched by the run
+        for the camera to reach it — it is, whenever the test uses `camera:` — and a
+        camera that was off before the run is off after it. The Mac's webcam is
+        refused: no two runs would see the same picture.
 
         **Only assertions may carry `criterion:`** (`assertVisible`, `waitFor`,
         `assertHidden`). On a `tap:` it is a parse error. Two more the parser refuses,
@@ -286,10 +316,11 @@ extension AgentSkill {
         **`reset:` replaces hand-written state-clearing shell** and travels with the
         test. `permissions:` pre-answers the system alerts that would otherwise block
         the drive: `simtool input` cannot reach a system alert, and while one is up the
-        accessibility tree is unreadable — which reads exactly like a broken app. Note
-        that the notification prompt has no `simctl` backdoor; answer it by hand once
-        and it stays answered for that install. A `reset:` that cannot be applied makes
-        the run `infra`, never a failing claim.
+        accessibility tree is unreadable — which reads exactly like a broken app.
+        `notifications`, `camera`, `faceid`, `speech`, `user-tracking` and `pasteboard`
+        are pre-answered too; `notifications` resprings the simulator (SpringBoard reads
+        it only as it starts), so put it in `reset:` rather than mid-run. A `reset:` that
+        cannot be applied makes the run `infra`, never a failing claim.
 
         **`setup:` is the escape hatch for what `reset:` cannot express.** Non-zero
         exits are recorded in the session and never fail the test, because these commands

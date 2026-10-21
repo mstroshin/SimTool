@@ -246,3 +246,60 @@ final class FoldMonitor: @unchecked Sendable {
         }
     }
 }
+
+/// Hears a phone turn: CoreSimulatorBridge logs every orientation update
+/// FrontBoard gives it, whoever turned the device. Each one asks for the
+/// picture's rotation again — as the turn starts and once it has settled — from
+/// a `log stream` kept running (restarted if it ends), which costs nothing
+/// while the device sits still.
+final class OrientationMonitor: @unchecked Sendable {
+    static let logPredicate = #"process == "CoreSimulatorBridge" AND eventMessage CONTAINS "Received orientation update""#
+
+    private let deviceUDID: String
+    private let onTurn: @Sendable () async -> Void
+    private let lock = NSLock()
+    private var process: Process?
+    private var stopped = false
+
+    init(deviceUDID: String, onTurn: @escaping @Sendable () async -> Void) {
+        self.deviceUDID = deviceUDID
+        self.onTurn = onTurn
+    }
+
+    func start() {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        process.arguments = ["simctl", "spawn", deviceUDID, "log", "stream", "--style", "compact", "--predicate", Self.logPredicate]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        output.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty else { handle.readabilityHandler = nil; return }
+            // The stream's first line quotes the predicate; one read too many costs nothing.
+            guard let self, String(decoding: data, as: UTF8.self).contains("Received orientation update") else { return }
+            let onTurn = self.onTurn
+            Task {
+                try? await Task.sleep(for: .milliseconds(400))
+                await onTurn()
+                try? await Task.sleep(for: .milliseconds(800))
+                await onTurn()
+            }
+        }
+        process.terminationHandler = { [weak self] _ in
+            guard let self, !self.lock.withLock({ self.stopped }) else { return }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 1) { [weak self] in self?.start() }
+        }
+        lock.withLock { self.process = process }
+        do { try process.run() } catch { DebugLog.write("displays", "cannot stream the guest's orientation updates: \(error.localizedDescription)") }
+    }
+
+    func stop() {
+        let running = lock.withLock {
+            stopped = true
+            defer { process = nil }
+            return process
+        }
+        running?.terminate()
+    }
+}

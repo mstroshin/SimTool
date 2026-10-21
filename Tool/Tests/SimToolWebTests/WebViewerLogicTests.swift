@@ -21,6 +21,43 @@ final class WebViewerLogicTests: XCTestCase {
 
     // MARK: - Network status
 
+    // A dropped .app goes up as a tar the server's tar unpacks: ustar headers
+    // with octal fields and a checksum, a pax record for a long path,
+    // executable files, and two empty blocks at the end.
+    func testADroppedAppIsATarTheServerCanUnpack() throws {
+        let context = try makeContext()
+        context.evaluateScript("""
+        var tar = tarArchive([{ path: "My.app", bytes: null }, { path: "My.app/Info.plist", bytes: new Uint8Array([60, 63]) },
+                              { path: "My.app/" + "d/".repeat(60) + "f", bytes: new Uint8Array([1]) }], 0);
+        function text(at, length) { var s = ""; for (var i = at; i < at + length && tar[i]; i++) s += String.fromCharCode(tar[i]); return s; }
+        function sum(at) { var total = 0; for (var i = at; i < at + 512; i++) total += (i >= at + 148 && i < at + 156) ? 32 : tar[i]; return total; }
+        """)
+        XCTAssertEqual(value(context, "tar.length % 512"), "0")
+        XCTAssertEqual(value(context, "text(0, 100)"), "My.app/")
+        XCTAssertEqual(value(context, "String.fromCharCode(tar[156])"), "5")
+        XCTAssertEqual(value(context, "text(257, 5)"), "ustar")
+        XCTAssertEqual(value(context, "parseInt(text(148, 6), 8) === sum(0)"), "true")
+        XCTAssertEqual(value(context, "text(512, 100)"), "My.app/Info.plist")
+        XCTAssertEqual(value(context, "text(512 + 100, 7)"), "0000755")
+        XCTAssertEqual(value(context, "parseInt(text(512 + 124, 11), 8)"), "2")
+        XCTAssertEqual(value(context, "text(1024, 2)"), "<?")
+        // The long path: a pax header ("x") whose record names it in full.
+        XCTAssertEqual(value(context, "String.fromCharCode(tar[1536 + 156])"), "x")
+        XCTAssertEqual(value(context, #"/^\d+ path=My\.app\/(d\/){60}f\n$/.test(text(2048, 512))"#), "true")
+        XCTAssertEqual(value(context, "parseInt(text(2048, 4), 10) === text(2048, 512).length"), "true")
+        XCTAssertEqual(value(context, "Array.prototype.slice.call(tar, tar.length - 1024).every(function (b) { return b === 0; })"), "true")
+    }
+
+    func testADropIsMediaABuildOrNothing() throws {
+        let context = try makeContext()
+        XCTAssertEqual(value(context, "dropKind('Shot.PNG', '', false)"), "media")
+        XCTAssertEqual(value(context, "dropKind('clip.mov', 'video/quicktime', false)"), "media")
+        XCTAssertEqual(value(context, "dropKind('Build.ipa', '', false)"), "ipa")
+        XCTAssertEqual(value(context, "dropKind('My.app', '', true)"), "app")
+        XCTAssertEqual(value(context, "dropKind('Folder', '', true)"), "none")
+        XCTAssertEqual(value(context, "dropKind('notes.txt', 'text/plain', false)"), "none")
+    }
+
     func testHTTPStatusSeverityFollowsTheStatusClass() throws {
         let context = try makeContext()
         func severity(_ code: Int) -> String {

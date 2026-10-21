@@ -13,17 +13,38 @@ public struct TestRunner {
     public let client: SimToolClient
     public let udid: String
     public let defaultTimeout: Double
+    /// The app under test: where a `push:` or `permission:` step without its
+    /// own `app:` goes.
+    public let app: String?
+    /// Launches the app under test as the run did — after a permission step
+    /// that ended it.
+    public let relaunch: (@Sendable () async throws -> Void)?
+    /// Where the test file is: a `camera:` step's file is relative to it.
+    public let baseDirectory: URL?
 
     private static let pollInterval: Duration = .milliseconds(500)
 
     public init(
         client: SimToolClient,
         udid: String,
-        defaultTimeout: Double
+        defaultTimeout: Double,
+        app: String? = nil,
+        relaunch: (@Sendable () async throws -> Void)? = nil,
+        baseDirectory: URL? = nil
     ) {
         self.client = client
         self.udid = udid
         self.defaultTimeout = defaultTimeout
+        self.app = app
+        self.relaunch = relaunch
+        self.baseDirectory = baseDirectory
+    }
+
+    /// A `camera:` file as the test names it: relative to the test file, or absolute.
+    public static func cameraFile(_ path: String, relativeTo directory: URL?) -> URL {
+        let expanded = (path as NSString).expandingTildeInPath
+        if expanded.hasPrefix("/") { return URL(fileURLWithPath: expanded) }
+        return URL(fileURLWithPath: expanded, relativeTo: directory ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)).standardizedFileURL
     }
 
     /// Flat "type id label" lines of what is currently on screen, for failure
@@ -118,6 +139,20 @@ public struct TestRunner {
             try check(await client.softwareKeyboard(visible: visible), action: visible ? "show keyboard" : "hide keyboard")
         case .pose(let pose):
             try check(await client.pose(pose), action: "fold to \(pose)")
+        case .device(var control):
+            if ["push", "permission"].contains(control.action), control.bundleId == nil { control.bundleId = app }
+            let ending = control.action == "permission" && control.bundleId == app
+            let wasRunning = ending ? await SimulatorAppInfoClient.isRunning(bundleId: app ?? "", deviceUDID: udid) : false
+            try check(await client.device(control), action: DeviceActivityWording.describe(control: control).title.lowercased())
+            if wasRunning, !(await SimulatorAppInfoClient.isRunning(bundleId: app ?? "", deviceUDID: udid)) { try await relaunch?() }
+        case .rotate(let orientation):
+            try check(await client.input(SimulatorInputPayload(action: "rotate", name: orientation)), action: "rotate \(orientation)")
+        case .camera(let source):
+            if source == "off" {
+                try await client.cameraOff()
+            } else {
+                try await client.setCamera(file: Self.cameraFile(source, relativeTo: baseDirectory))
+            }
         case .pause(let seconds):
             try await Task.sleep(for: .milliseconds(Int(seconds * 1000)))
         }

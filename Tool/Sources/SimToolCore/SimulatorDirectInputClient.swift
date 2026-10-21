@@ -25,7 +25,7 @@ import Foundation
 public actor SimulatorDirectInputClient {
     public static let shared = SimulatorDirectInputClient()
 
-    private static let helperVersion = "6"
+    private static let helperVersion = "7"
     /// Part of the cached binary's name, so any change to the helper's source
     /// compiles a fresh one instead of reusing a stale build of the same version.
     private static let helperFingerprint = SHA256.hash(data: Data(SimulatorDirectInputHelperSource.source.utf8))
@@ -51,6 +51,8 @@ public actor SimulatorDirectInputClient {
     /// A foldable's lit panel: pushed by a server watching it, which keeps it
     /// current, or read for a command and trusted for half a second.
     private var displayStates: [String: (state: SimulatorDisplayState, at: Date, pushed: Bool)] = [:]
+    /// When CoreDevice last failed to say how a phone's picture is turned.
+    private var unreadablePhones: [String: Date] = [:]
 
     public init() {}
 
@@ -123,6 +125,37 @@ public actor SimulatorDirectInputClient {
         try await answered(SimulatorDirectInputCommand.hardwareKeyboard(connected: connected).line, deviceUDID: deviceUDID, timeoutSeconds: Self.keyboardTimeout)
     }
 
+    /// Whether the guest render server's debug option `option` is on
+    /// (`SimulatorDebugOption`).
+    public func renderDebugOption(_ option: UInt32, deviceUDID: String) async throws -> Bool {
+        try await renderDebug(.renderDebugOption(option), deviceUDID: deviceUDID)
+    }
+
+    /// Turns it on or off and returns what the device reports afterwards.
+    public func setRenderDebugOption(_ option: UInt32, enabled: Bool, deviceUDID: String) async throws -> Bool {
+        try await renderDebug(.renderDebugOption(option, enabled: enabled), deviceUDID: deviceUDID)
+    }
+
+    private func renderDebug(_ command: SimulatorDirectInputCommand, deviceUDID: String) async throws -> Bool {
+        let answer = try await answered(command.line, deviceUDID: deviceUDID, timeoutSeconds: 5)
+        guard let on = SimulatorDirectInputCommand.flag(fromAnswer: answer) else {
+            throw SimToolError("The simulator gave no state for its debug option: \(answer)")
+        }
+        return on
+    }
+
+    /// Turns the device, as Simulator.app's Rotate Left and Right do.
+    public func setOrientation(_ orientation: SimulatorOrientation, deviceUDID: String) async throws {
+        try await answered(SimulatorDirectInputCommand.orientation(orientation.deviceOrientation).line, deviceUDID: deviceUDID, timeoutSeconds: 5)
+        // The picture turns: what was read about it is stale.
+        if displayStates[deviceUDID]?.pushed == false { displayStates[deviceUDID] = nil }
+    }
+
+    /// Simulate Memory Warning, as Simulator.app's Debug menu did.
+    public func simulateMemoryWarning(deviceUDID: String) async throws {
+        try await answered(SimulatorDirectInputCommand.memoryWarning.line, deviceUDID: deviceUDID, timeoutSeconds: 5)
+    }
+
     /// Room for the helper's first key to connect to the guest's keyboard
     /// daemon, which may have to start first.
     private static let keyboardTimeout: TimeInterval = 7
@@ -164,6 +197,7 @@ public actor SimulatorDirectInputClient {
     /// forgets it, and commands read CoreDevice again.
     public func setDisplayState(_ state: SimulatorDisplayState?, deviceUDID: String) {
         displayStates[deviceUDID] = state.map { ($0, Date(), true) }
+        if state != nil { unreadablePhones[deviceUDID] = nil }
     }
 
     /// The device's screens, read once through the helper.
@@ -182,7 +216,21 @@ public actor SimulatorDirectInputClient {
     /// lit one. Nil for a one-screen device, whose touches go as they always
     /// have.
     private func route(deviceUDID: String, display: String? = nil) async throws -> SimulatorTouchRoute? {
-        guard let layout = await displayLayout(deviceUDID: deviceUDID), layout.isFoldable else { return nil }
+        guard let layout = await displayLayout(deviceUDID: deviceUDID) else { return nil }
+        guard layout.isFoldable else {
+            // A phone on its side keeps its framebuffer upright and turns the
+            // picture; a device CoreDevice cannot describe touches as it always
+            // has — and is not asked again for half a minute, since live
+            // touches come here at every move.
+            guard let screen = layout.displays.first else { return nil }
+            if let failed = unreadablePhones[deviceUDID], Date().timeIntervalSince(failed) < 30 { return nil }
+            guard let state = try? await displayState(deviceUDID: deviceUDID, layout: layout) else {
+                unreadablePhones[deviceUDID] = Date()
+                return nil
+            }
+            guard state.rotation(of: screen.id) != 0 else { return nil }
+            return SimulatorTouchRoute(target: layout.touchTarget(of: screen), display: screen, rotation: state.rotation(of: screen.id))
+        }
         let state = try await displayState(deviceUDID: deviceUDID, layout: layout)
         guard let panel = display.flatMap(layout.display(named:)) ?? layout.display(named: state.active) else { return nil }
         return SimulatorTouchRoute(
@@ -428,6 +476,23 @@ struct SimulatorDirectInputCommand: Equatable {
     }
 
     static let boot = Self(line: "boot")
+
+    /// Reads the render server's debug option, or sets it first: `cadebug N [1|0]`.
+    static func renderDebugOption(_ option: UInt32, enabled: Bool? = nil) -> Self {
+        Self(line: "cadebug \(option)" + (enabled.map { $0 ? " 1" : " 0" } ?? ""))
+    }
+
+    /// Reads `ok 1|0`, the helper's answer to `cadebug`.
+    static func flag(fromAnswer answer: String) -> Bool? {
+        let parts = answer.split(separator: " ")
+        guard parts.count == 2, parts[0] == "ok", parts[1] == "0" || parts[1] == "1" else { return nil }
+        return parts[1] == "1"
+    }
+
+    static let memoryWarning = Self(line: "memwarn")
+
+    /// Turns the device to a UIDeviceOrientation (1…4).
+    static func orientation(_ value: Int) -> Self { Self(line: "orient \(value)") }
 
     static let deviceType = Self(line: "type")
 
@@ -692,6 +757,11 @@ enum SimulatorDirectInputHelperSource {
     //   button PAGE USAGE       presses one HID usage of another page; 12 184
     //                           (Eject) toggles the software keyboard
     //   hwkeyboard 1|0          connects or disconnects the hardware keyboard
+    //   cadebug N [1|0]         "ok 1|0" — the render server's debug option N,
+    //                           after setting it when a value is given
+    //   memwarn                 simulates a memory warning
+    //   orient N                turns the device: UIDeviceOrientation N (1 portrait,
+    //                           2 upside down, 3 landscape left, 4 landscape right)
     // Streamed, never answered (a live finger must not wait on a reply):
     //   down X Y | move X Y | up X Y
     //   down2 X1 Y1 X2 Y2 | move2 … | up2 …     two fingers
@@ -997,6 +1067,65 @@ enum SimulatorDirectInputHelperSource {
       return NULL;
     }
 
+    // MARK: - the device's debug controls (worker thread only)
+
+    // CoreSimulator's SimCADebugOption category hands the number to the guest's
+    // bridge, which passes it to its render server (CARenderServerSetDebugOption).
+    // Older CoreSimulators may type the option differently; only a number is sent.
+    static const char *renderDebugOption(unsigned option, int set, BOOL *now) {
+      SEL setter = sel_registerName("setCADebugOption:enabled:");
+      SEL getter = sel_registerName("getCADebugOption:");
+      Method method = class_getInstanceMethod([device class], getter);
+      char argument[8] = {0};
+      if (method) { method_getArgumentType(method, 2, argument, sizeof(argument)); }
+      if (!method || ![device respondsToSelector:setter] || argument[0] != 'I') { return "this CoreSimulator has no render debug options"; }
+      if (set >= 0) { ((void (*)(id, SEL, unsigned, BOOL))objc_msgSend)(device, setter, option, set ? YES : NO); }
+      *now = ((BOOL (*)(id, SEL, unsigned))objc_msgSend)(device, getter, option);
+      return NULL;
+    }
+
+    // Simulator.app's Simulate Memory Warning: the guest's processes get a
+    // memory-pressure warning, which UIKit turns into didReceiveMemoryWarning.
+    static const char *memoryWarning(void) {
+      static char failure[256];
+      SEL withError = sel_registerName("simulateMemoryWarningWithError:");
+      if ([device respondsToSelector:withError]) {
+        NSError *err = nil;
+        if (((BOOL (*)(id, SEL, NSError **))objc_msgSend)(device, withError, &err)) { return NULL; }
+        snprintf(failure, sizeof(failure), "the simulator refused the memory warning: %s", (err.localizedDescription ?: @"no reason given").UTF8String);
+        return failure;
+      }
+      SEL plain = sel_registerName("simulateMemoryWarning");
+      if (![device respondsToSelector:plain]) { return "this CoreSimulator cannot simulate a memory warning"; }
+      ((void (*)(id, SEL))objc_msgSend)(device, plain);
+      return NULL;
+    }
+
+    // Simulator.app's Rotate Left and Right: a GraphicsServices event — type 50,
+    // "device orientation changed", flagged as coming from the host — sent to
+    // the guest's PurpleWorkspacePort, where backboardd turns the device. The
+    // message is a GSEvent record after the Mach header: its type at 0x18, the
+    // size of its payload at 0x48, the orientation at 0x4C; 108 bytes, id 123
+    // (the layout facebook/idb documents).
+    static const char *setOrientation(unsigned orientation) {
+      if (orientation < 1 || orientation > 4) { return "no such orientation"; }
+      NSError *err = nil;
+      mach_port_t port = ((mach_port_t (*)(id, SEL, NSString *, NSError **))objc_msgSend)(device, sel_registerName("lookup:error:"), @"PurpleWorkspacePort", &err);
+      if (port == MACH_PORT_NULL) { return "the simulator vends no PurpleWorkspacePort"; }
+      uint32_t words[28] = {0};   // 112 bytes, aligned for the header
+      mach_msg_header_t *header = (mach_msg_header_t *)words;
+      header->msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+      header->msgh_size = 108;
+      header->msgh_remote_port = port;
+      header->msgh_local_port = MACH_PORT_NULL;
+      header->msgh_id = 123;
+      words[0x18 / 4] = 50 | 0x20000;
+      words[0x48 / 4] = 4;
+      words[0x4C / 4] = orientation;
+      kern_return_t sent = mach_msg(header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, 108, 0, MACH_PORT_NULL, 1000, MACH_PORT_NULL);
+      return sent == KERN_SUCCESS ? NULL : "the orientation could not be sent";
+    }
+
     // MARK: - the finger (worker thread only)
 
     typedef struct { double x, y, x2, y2; } Spot;
@@ -1109,7 +1238,7 @@ enum SimulatorDirectInputHelperSource {
 
     // MARK: - commands
 
-    typedef enum { CmdDown, CmdMove, CmdUp, CmdTap, CmdSwipe, CmdPath, CmdSize, CmdBoot, CmdType, CmdTarget, CmdKey, CmdPress, CmdButton, CmdHardwareKeyboard, CmdQuit } Kind;
+    typedef enum { CmdDown, CmdMove, CmdUp, CmdTap, CmdSwipe, CmdPath, CmdSize, CmdBoot, CmdType, CmdTarget, CmdKey, CmdPress, CmdButton, CmdHardwareKeyboard, CmdRenderDebug, CmdMemoryWarning, CmdOrientation, CmdQuit } Kind;
     typedef struct {
       Kind kind; int count; Spot spot; double x2, y2; int ms; char *text;
       unsigned usage, page, mods[3]; int modCount; BOOL on;   // keyboard commands
@@ -1261,6 +1390,14 @@ enum SimulatorDirectInputHelperSource {
           return YES;
         }
         case CmdHardwareKeyboard: replyFailure(setHardwareKeyboard(c->on)); return YES;
+        case CmdRenderDebug: {
+          BOOL now = NO;
+          const char *failure = renderDebugOption(c->usage, c->ms, &now);
+          if (failure) { replyFailure(failure); } else { printf("ok %d\n", now ? 1 : 0); fflush(stdout); }
+          return YES;
+        }
+        case CmdMemoryWarning: replyFailure(memoryWarning()); return YES;
+        case CmdOrientation: replyFailure(setOrientation(c->usage)); return YES;
         case CmdQuit: fingerUp(last); releaseKeys(); settleKeys(); return NO;
       }
       return YES;
@@ -1359,6 +1496,9 @@ enum SimulatorDirectInputHelperSource {
       }
       if (!strcmp(name, "button") && n >= 2) { c->kind = CmdButton; c->page = (unsigned)v[0]; c->usage = (unsigned)v[1]; return YES; }
       if (!strcmp(name, "hwkeyboard") && n >= 1) { c->kind = CmdHardwareKeyboard; c->on = v[0] != 0; return YES; }
+      if (!strcmp(name, "cadebug") && n >= 1) { c->kind = CmdRenderDebug; c->usage = (unsigned)v[0]; c->ms = n >= 2 ? (v[1] != 0) : -1; return YES; }
+      if (!strcmp(name, "memwarn")) { c->kind = CmdMemoryWarning; return YES; }
+      if (!strcmp(name, "orient") && n >= 1) { c->kind = CmdOrientation; c->usage = (unsigned)v[0]; return YES; }
       size_t len = strlen(name);
       BOOL two = len > 1 && name[len - 1] == '2';
       if (two) { name[len - 1] = 0; }

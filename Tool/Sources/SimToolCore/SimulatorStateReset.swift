@@ -117,6 +117,20 @@ public enum SimulatorStateReset {
         if permission.service == TestPermission.appTrackingService {
             return await applyAppTracking(permission.decision, deviceUDID: deviceUDID, app: app)
         }
+        // What simctl does not take — notifications, Face ID, speech — SimTool sets itself.
+        if let own = SimulatorPermission(rawValue: permission.service), !own.simctlTakesIt {
+            let decision: SimulatorPermissionDecision = switch permission.decision {
+            case .grant: .grant
+            case .deny: .deny
+            case .reset: .reset
+            }
+            do {
+                _ = try await SimulatorPermissionClient.set(own, to: decision, bundleId: app, deviceUDID: deviceUDID)
+                return nil
+            } catch {
+                return "\(own.title) could not be set: \((error as? SimToolError)?.message ?? error.localizedDescription)"
+            }
+        }
         let action: String
         switch permission.decision {
         case .grant: action = "grant"

@@ -75,6 +75,42 @@ public struct SimToolClient: Sendable {
         try await input(SimulatorInputPayload(action: "pose", name: pose.name, angle: pose.name == nil ? pose.hingeDegrees : nil))
     }
 
+    /// Changes a setting of the device or acts on it (`DeviceControlPayload`);
+    /// answers once the device reports the result.
+    public func device(_ control: DeviceControlPayload) async throws -> CommandResultPayload {
+        try await sendJSON(CommandResultPayload.self, path: "device", payload: control, method: "POST")
+    }
+
+    /// The simulator's camera: its source and the apps that have it.
+    public func camera() async throws -> SimulatorCameraState {
+        try await getJSON(SimulatorCameraState.self, path: "camera")
+    }
+
+    /// An image or a video becomes the simulator camera's picture.
+    @discardableResult
+    public func setCamera(file: URL) async throws -> SimulatorCameraState {
+        try await sendFile(SimulatorCameraState.self, path: "camera", data: Data(contentsOf: file), contentType: "application/octet-stream", filename: file.lastPathComponent)
+    }
+
+    /// The Mac's webcam — `camera` names one by id or name — becomes the picture.
+    @discardableResult
+    public func setCameraWebcam(camera: String? = nil) async throws -> SimulatorCameraState {
+        try await sendJSON(SimulatorCameraState.self, path: "camera/webcam", payload: camera.map { ["camera": $0] } ?? [:], method: "POST")
+    }
+
+    @discardableResult
+    public func cameraOff() async throws -> SimulatorCameraState {
+        let request = makeRequest(url: apiURL.appendingPathComponent("camera"), method: "DELETE")
+        let (data, response) = try await session.data(for: request)
+        try validate(response: response, data: data)
+        return try JSON.decoder.decode(SimulatorCameraState.self, from: data)
+    }
+
+    /// Every setting as the device reports it.
+    public func deviceSettings() async throws -> SimulatorSettings {
+        try await getJSON(SimulatorSettings.self, path: "device")
+    }
+
     /// Pastes an image (PNG, JPEG, HEIC, …) into the focused field the same way.
     public func pasteImage(_ data: Data, contentType: String) async throws -> CommandResultPayload {
         try await sendFile(path: "input/paste-image", data: data, contentType: contentType, filename: nil)
@@ -345,6 +381,10 @@ public struct SimToolClient: Sendable {
 
     /// Posts a file as the raw body; headers carry its type and name.
     private func sendFile(path: String, data: Data, contentType: String, filename: String?) async throws -> CommandResultPayload {
+        try await sendFile(CommandResultPayload.self, path: path, data: data, contentType: contentType, filename: filename)
+    }
+
+    private func sendFile<T: Decodable>(_ type: T.Type, path: String, data: Data, contentType: String, filename: String?) async throws -> T {
         var request = makeRequest(url: apiURL.appendingPathComponent(path), method: "POST")
         request.setValue(contentType, forHTTPHeaderField: "Content-Type")
         if let filename {
@@ -354,7 +394,7 @@ public struct SimToolClient: Sendable {
         request.httpBody = data
         let (body, response) = try await session.data(for: request)
         try validate(response: response, data: body)
-        return try JSON.decoder.decode(CommandResultPayload.self, from: body)
+        return try JSON.decoder.decode(T.self, from: body)
     }
 
     private func makeRequest(url: URL, method: String) -> URLRequest {

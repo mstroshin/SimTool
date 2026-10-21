@@ -37,6 +37,8 @@ function applyConfig(config) {
   applyView3D(config.view3d);
   // A viewer that left a foldable in 3D finds it in 3D again.
   if (screenState.foldable && !screenState.view3d && stored("view3d", "0") === "1") setView3D(true);
+  // A Device tab open before the config came drew no app: it reads it now.
+  if (activeTab("device")) loadDeviceSettings();
 }
 
 // A new server: everything numbered by the old one is stale.

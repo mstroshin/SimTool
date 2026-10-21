@@ -1,5 +1,5 @@
 // The command palette (⇧⌘P) and the page's keyboard shortcuts. Shortcuts
-// follow Simulator.app and Xcode where they exist; tabs use ⌥1–6 because
+// follow Simulator.app and Xcode where they exist; tabs use ⌥1–7 because
 // browsers keep ⌘1–9 for themselves.
 
 function paletteCommands() {
@@ -11,6 +11,7 @@ function paletteCommands() {
     capture.recording ? ["Device", "stop", "Stop recording and save the video", "⌘R", stopRecording] : ["Device", "record", "Record video", "⌘R", startRecording],
     ["Device", "bezel", capture.bezel ? "Screenshots and videos: the screen only" : "Screenshots and videos: with the device bezel", "", () => setCaptureBezel(!capture.bezel)],
     ["Device", "shake", "Shake", "⌃⌘Z", pressShake],
+    ...(screenState.foldable ? [] : [["Device", "rotate", "Rotate left", "⌘←", () => rotateDevice("left")], ["Device", "rotate", "Rotate right", "⌘→", () => rotateDevice("right")]]),
     ["Device", "keyboard", "Show or hide the software keyboard", keyboardBridge.enabled ? "⌘K" : "", toggleSoftwareKeyboard],
     ["Device", "laptop", keyboardBridge.enabled ? "Disconnect the Mac keyboard" : "Connect the Mac keyboard — type into the simulator", "⇧⌘K", () => setKeyboardMode(!keyboardBridge.enabled)],
     ["Device", "paste", "Paste the Mac clipboard", "⌘V", pasteFromClipboard],
@@ -27,12 +28,14 @@ function paletteCommands() {
   if (deviceInfo.app) {
     commands.push(["App", "stop", "Terminate " + deviceInfo.app, "", terminateApp], ["App", "relaunch", "Relaunch " + deviceInfo.app, "", relaunchApp]);
   }
+  commands.push(...deviceSettingCommands());
   commands.push(
     ["Inspector", "panel", inspector.open ? "Hide the inspector" : "Show the inspector", "⌥⌘0", () => setInspectorOpen(!inspector.open)],
     ["Inspector", "panel", "Network", "⌥1", () => openTab("network")],
     ["Inspector", "panel", "Logs", "⌥2", () => openTab("logs")],
     ["Inspector", "panel", "State", "⌥3", () => openTab("state")],
     ["Inspector", "pick", "Accessibility", "⌥4", () => openTab("ax")],
+    ["Inspector", "panel", "Device — the simulator's settings and debug switches", "⌥7", () => openTab("device")],
     ["Inspector", "panel", "Tests", "⌥5", () => openTab("tests")],
     ["Inspector", "pick", "Activity — what was done to the device", "⌥6", () => openTab("activity")],
     ["Inspector", "search", "Filter the current list", "/", focusFilter],
@@ -54,6 +57,56 @@ function paletteCommands() {
   return commands.map(([group, glyph, label, kbd, run]) => ({ group, glyph, label, kbd, run }));
 }
 
+// The settings the Device tab changes, worded as the device has them now:
+// "Turn on" what is off. The palette reads them when it opens.
+function deviceSettingCommands() {
+  const data = deviceSettings.data || {};
+  const debug = data.debug || {};
+  const bio = data.biometrics || {};
+  const otherAppearance = data.appearance === "dark" ? "light" : "dark";
+  const commands = [
+    ["Settings", otherAppearance === "dark" ? "moon" : "sun", "Switch the device to the " + otherAppearance + " appearance", "", () => setAppearance(otherAppearance)],
+    ["Settings", "text", "Larger text on the device (Dynamic Type)", "", () => setTextSize("increment")],
+    ["Settings", "text", "Smaller text on the device (Dynamic Type)", "", () => setTextSize("decrement")],
+    ["Settings", "contrast", (data.increaseContrast ? "Turn off" : "Turn on") + " Increase Contrast", "", () => setContrast(!data.increaseContrast)],
+    ["Settings", "battery", "Status bar: 9:41 for screenshots", "", () => statusBarPreset("clean")],
+    ["Settings", "battery", "Status bar: clear the overrides", "", () => statusBarPreset("clear")],
+    ["Settings", "pin", "Clear the simulated location", "", clearLocation],
+    ["Settings", "bell", "Send a push notification…", "", () => { openTab("device"); openDeviceSection("push"); pushPayload.focus(); }],
+    ["Settings", "camera", "Camera: show an image or a video…", "", () => cameraFile.click()],
+    ["Settings", "camera", "Camera: the Mac's camera", "", () => useMacCamera("")],
+    ...(camera.data && camera.data.source !== "none" ? [["Settings", "camera", "Camera: turn off", "", cameraOff]] : []),
+    ["Settings", "key", "Keychain: add a root certificate…", "", () => certificateFile.click()],
+    ["Settings", "trash", "Keychain: reset", "", resetKeychain]
+  ];
+  const ax = data.accessibility || {};
+  for (const [option, key, title] of AX_SWITCHES) {
+    commands.push(["Accessibility", "pick", (ax[key] ? "Turn off " : "Turn on ") + title, "", () => setAccessibility(option, ax[key] ? "off" : "on", title + (ax[key] ? " off" : " on"))]);
+  }
+  commands.push(["Accessibility", "filter", "Color filters…", "", () => { openTab("device"); openDeviceSection("accessibility"); colorFilterSelect.focus(); }]);
+  if (ax.liquidGlass) {
+    const other = ax.liquidGlass === "tinted" ? "clear" : "tinted";
+    commands.push(["Accessibility", "layers", "Liquid Glass: " + other, "", () => setAccessibility("liquid-glass", other, "Liquid Glass " + other)]);
+  }
+  if (deviceInfo.app) {
+    commands.push(
+      ["App", "panel", "Show " + deviceInfo.app + " in the Finder", "", () => revealApp("bundle")],
+      ["App", "panel", "Show " + deviceInfo.app + "'s data container in the Finder", "", () => revealApp("data")],
+      ["App", "check", "Permissions of " + deviceInfo.app + "…", "", () => { openTab("device"); openDeviceSection("permissions").scrollIntoView({ block: "start" }); }]
+    );
+  }
+  for (const [option, title] of DEBUG_OPTIONS) {
+    commands.push(["Debug", option === "slow-animations" ? "slow" : "layers", (debug[option] ? "Turn off " : "Turn on ") + title, "", () => setDebugOption(option, !debug[option])]);
+  }
+  commands.push(
+    ["Debug", "memory", "Simulate a memory warning", "", simulateMemoryWarning],
+    ["Debug", "face", biometryName() + ": " + (bio.enrolled ? "unenroll" : "enroll"), "", () => biometrics(bio.enrolled ? "unenroll" : "enroll")],
+    ["Debug", "face", biometryName() + ": a matching " + biometryThing(), "", () => biometrics("match")],
+    ["Debug", "face", biometryName() + ": a non-matching " + biometryThing(), "", () => biometrics("nomatch")]
+  );
+  return commands;
+}
+
 // Switching tabs from the keyboard lands in the new tab's list, where ↑/↓ work
 // at once — unless focus was somewhere a person is still using, like the screen.
 function openTab(tab) {
@@ -68,12 +121,13 @@ function focusTabList(tab) {
   const lists = { network: networkList, logs: logsList, ax: axList, tests: tests.view === "history" ? historyList : definitionList, activity: activityList };
   if (lists[tab]) lists[tab].focus();
   else if (tab === "state") (stateModels.querySelector('[tabindex="0"]') || stateModels).focus();
+  else if (tab === "device") { const first = devicePanel.querySelector("button:not([disabled]), select, input"); if (first) first.focus(); }
 }
 
 function focusFilter() {
   if (!inspector.open) setInspectorOpen(true);
   const filters = { network: networkFilter, logs: logsFilter, state: stateFilter, ax: axFilter, tests: testsFilter, activity: activityFilter };
-  filters[inspector.tab].focus();
+  if (filters[inspector.tab]) filters[inspector.tab].focus();
 }
 
 let paletteItems = [];
@@ -108,6 +162,8 @@ function openPalette() {
   $("paletteInput").value = "";
   paletteIndex = 0;
   renderPalette();
+  // Settings commands say "turn on" or "turn off" as the device has them now.
+  loadDeviceSettings().then(() => { if (!$("paletteScrim").hidden) renderPalette(); });
   $("paletteInput").focus();
 }
 
@@ -150,9 +206,9 @@ $("paletteButton").addEventListener("click", openPalette);
 
 function showShortcuts() {
   openPopover($("paletteButton"),
-    "<p><b>⇧⌘P</b> commands · <b>⌥1–5</b> inspector tabs · <b>⌥⌘0</b> show or hide the inspector · <b>/</b> filter</p>" +
+    "<p><b>⇧⌘P</b> commands · <b>⌥1–7</b> inspector tabs · <b>⌥⌘0</b> show or hide the inspector · <b>/</b> filter</p>" +
     "<p><b>↑ ↓</b> move in a list · <b>Enter</b> open · <b>Esc</b> close · <b>⇧F10</b> the row's menu</p>" +
-    "<p><b>⇧⌘H</b> Home · <b>⌃⇧⌘H</b> or a double-click on Home: the app switcher · <b>⌘S</b> screenshot · <b>⌘R</b> record video, again to save it · <b>⌃⌘Z</b> shake · <b>⇧⌘K</b> connect the Mac keyboard (⇧⌘K again releases it) · <b>⌘K</b> software keyboard while typing</p>" +
+    "<p><b>⇧⌘H</b> Home · <b>⌃⇧⌘H</b> or a double-click on Home: the app switcher · <b>⌘S</b> screenshot · <b>⌘R</b> record video, again to save it · <b>⌃⌘Z</b> shake · <b>⌘←</b> <b>⌘→</b> rotate · <b>⇧⌘K</b> connect the Mac keyboard (⇧⌘K again releases it) · <b>⌘K</b> software keyboard while typing</p>" +
     "<p><b>⌥-drag</b> pinch or rotate · <b>⌥⇧-drag</b> two-finger pan · the wheel scrolls · <b>P</b> picks elements in Accessibility · <b>⌘↩</b> runs the selected test</p>");
 }
 
@@ -184,9 +240,11 @@ document.addEventListener("keydown", (event) => {
   if (event.metaKey && !event.shiftKey && !event.altKey && !event.ctrlKey && event.code === "KeyR") { event.preventDefault(); if (!event.repeat) toggleRecording(); return; }
   if (event.metaKey && event.ctrlKey && event.code === "KeyZ") { event.preventDefault(); pressShake(); return; }
   if (event.metaKey && event.altKey && event.code === "Digit0") { event.preventDefault(); setInspectorOpen(!inspector.open); return; }
-  if (event.altKey && !meta && /^Digit[1-6]$/.test(event.code)) { event.preventDefault(); openTab(TABS[Number(event.code.slice(5)) - 1]); return; }
+  if (event.altKey && !meta && /^Digit[1-7]$/.test(event.code)) { event.preventDefault(); openTab(TAB_KEYS[Number(event.code.slice(5)) - 1]); return; }
   if (meta && event.key === "Enter" && inspector.tab === "tests" && tests.view === "tests" && tests.selectedFile) { event.preventDefault(); runTest(tests.selectedFile); return; }
   if (editing || keyboardBridge.enabled) return;
+  // Simulator.app's Rotate Left and Right; with the Mac keyboard connected ⌘← and ⌘→ edit text in the device.
+  if (event.metaKey && !event.shiftKey && !event.altKey && !event.ctrlKey && (event.key === "ArrowLeft" || event.key === "ArrowRight")) { event.preventDefault(); if (!event.repeat) rotateDevice(event.key === "ArrowLeft" ? "left" : "right"); return; }
   if (meta && event.code === "KeyF" && inspector.open) { event.preventDefault(); focusFilter(); return; }
   if (event.key === "/" && !meta && !event.altKey) { event.preventDefault(); focusFilter(); return; }
   if (event.code === "KeyP" && !meta && !event.altKey && !event.shiftKey && inspector.tab === "ax" && inspector.open) { event.preventDefault(); setAxPick(!ax.pick); return; }

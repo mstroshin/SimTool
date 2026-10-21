@@ -319,6 +319,69 @@ picture for people, not for reading the UI). A video of the screen: `POST
   attach its console (useful when the app logs richly to stdout — networking,
   navigation, etc.). Note OSLog can be quiet while the app is idle.
 
+### The simulator's settings and debug switches
+What Simulator.app kept in its menus and Device Hub (Xcode 27) dropped. Each
+command prints the setting without a value and changes it with one; every change
+reaches the viewer's Activity like an input does. `simtool settings` prints them
+all as the device reports them.
+- `simtool ui [appearance light|dark | text-size <size>|bigger|smaller | contrast on|off]`
+  — sizes are simctl's (`large` is iOS's default, `accessibility-medium` …) or
+  `xs`…`xxxl`, `ax1`…`ax5`. The same command takes the accessibility settings
+  simctl has no verb for: `reduce-motion`, `reduce-transparency`,
+  `button-shapes`, `voiceover` (on|off; the first time iOS shows its VoiceOver
+  Gestures sheet — tap OK), `color-filter none|grayscale|protanopia|deuteranopia|tritanopia`
+  (apps read it; the screen and screenshots show no filter), `liquid-glass clear|tinted`.
+- `simtool debug [<option> on|off]` — `slow-animations`, `color-blended`,
+  `color-copies`, `color-misaligned`, `color-offscreen`; they stay on until turned
+  off. `simtool debug memory-warning` sends every app a memory warning.
+- `simtool biometrics enroll|unenroll|match|nomatch` — the device type's Face ID
+  or Touch ID. `match`/`nomatch` answer a prompt the app already has up: tap
+  the button that asks, then answer.
+- `simtool push --alert "<text>"` (or a payload file, `-`, `--payload <json>`)
+  — to `--app`, else the config's bundleId. The app must have notification
+  permission to show it; in the foreground it reaches its
+  `willPresent` delegate.
+- `simtool status-bar clean` (9:41, full Wi-Fi, charged) · `--time … --battery-level …`
+  · `clear`. Naming any cellular field makes simctl fill in the rest (5G,
+  "Carrier").
+- `simtool location set <lat>,<lon>` · `route <lat>,<lon> <lat>,<lon>… [--speed m/s]`
+  · `clear`. simctl cannot read a location back: `simtool location` prints the
+  one SimTool last set.
+
+- `simtool input rotate left|right|portrait|landscape-left|landscape-right|upside-down`
+  — Simulator.app's Rotate Left / Right; returns once the device reports the
+  turn. The app follows if it supports the orientation, and then `ax` frames,
+  coordinates and screenshots are the turned picture's (874 × 402 on an iPhone
+  17 Pro in landscape). Without an argument it prints the orientation.
+- `simtool permissions [grant|deny|reset|always] <permission> [--app …]` —
+  without arguments it prints all of the app's: notifications, location,
+  camera, microphone, photos, contacts, calendar, reminders, motion, faceid,
+  speech, user-tracking, pasteboard, …. A change usually ends the running app,
+  as iOS does; `notifications` resprings the simulator (~8 s, every app ends).
+- `simtool keychain add-root-cert <ca.pem>` — trust a proxy's CA (Proxyman,
+  Charles, mitmproxy); `add-cert`, `reset`.
+- `simtool camera <image|video>` · `webcam [--camera <name>]` · `off` — the
+  simulator has no camera; SimTool gives one to the apps **it launches**
+  (`simtool app launch`, `simtool run`, the viewer's Relaunch, test runs):
+  previews, video frames, photos, QR/barcode scanning and the image picker's
+  camera show the image, the video in a loop, or the Mac's webcam. A new
+  picture reaches running apps at once; an app launched while the camera was
+  off needs a relaunch. `simtool camera` prints the source and which apps have
+  it. The webcam runs in the server watching the device (without one, until
+  Ctrl+C); macOS asks once for camera access. `simtool camera env` prints the
+  variables for an Xcode scheme.
+- `simtool app info [--app …] [--reveal bundle|data]` — version, build, minimum
+  iOS, pid, bundle and data-container paths, permissions; `--reveal` opens it in
+  the Finder. `simtool app install <.app|.ipa>` installs a build.
+
+The same changes are `POST /api/v1/device` (`{"action": "appearance", "value":
+"dark"}`, …; `GET /api/v1/device` reads them), `POST /api/v1/input`
+(`{"action": "rotate", "name": "left"}`), `GET /api/v1/app` (the app card) and
+YAML steps (`simtool-test`); the camera is `GET|POST|DELETE /api/v1/camera`
+and `POST /api/v1/camera/webcam`. In the viewer they are the Device tab (⌥7), the
+toolbar's rotate button (⌘← / ⌘→), and a drop on the screen: images and videos
+go to Photos, an `.app` or `.ipa` is installed.
+
 ### Network (app gRPC/HTTP via the logger)
 `simtool network …` covers a system-level snapshot and app-emitted events. App
 events require the app to be **launched with the network logger armed** —

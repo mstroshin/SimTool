@@ -7,7 +7,7 @@ final class WebViewerPageTests: XCTestCase {
     private let page = WebViewer.pageWithAssets
 
     func testTheInspectorIsATablistWithAPanelPerTab() throws {
-        for tab in ["network", "logs", "state", "ax", "tests", "activity"] {
+        for tab in ["network", "logs", "state", "ax", "tests", "activity", "device"] {
             let tabButton = try XCTUnwrap(page.range(of: #"role="tab" class="tab" type="button" id="tab-\#(tab)""#), "missing tab \(tab)")
             XCTAssertTrue(page[tabButton.upperBound...].prefix(200).contains(#"aria-controls="panel-\#(tab)""#), "tab \(tab) must name its panel")
             XCTAssertTrue(page.contains(#"role="tabpanel" id="panel-\#(tab)" aria-labelledby="tab-\#(tab)""#), "missing panel \(tab)")
@@ -60,13 +60,107 @@ final class WebViewerPageTests: XCTestCase {
         for route in ["/api/v1/input/stream", "/api/v1/input", "/api/v1/screenshot", "/api/v1/photos", "/api/v1/input/paste-image",
                       "/api/v1/network/events", "/api/v1/mocks", "/api/v1/launches", "/api/v1/logs/capture", "/api/v1/state/events",
                       "/api/v1/ax/tree?raw=1", "/api/v1/tests/definitions", "/api/v1/tests/run", "/api/v1/tests/run/stop", "/config",
-                      "/api/v1/events", "/api/v1/activity", "/api/v1/recording", "/api/v1/recording/stop"] {
+                      "/api/v1/events", "/api/v1/activity", "/api/v1/recording", "/api/v1/recording/stop", "/api/v1/device"] {
             XCTAssertTrue(page.contains(route), "missing \(route)")
         }
         for action in [#"action: "button", name: "home""#, #"action: "shake""#, #"action: "terminate""#, #"action: "launch""#,
                        #"action: "software-keyboard""#, #"action: "hardware-keyboard", enabled: on"#, #"action: "paste", text"#] {
             XCTAssertTrue(page.contains(action), "missing \(action)")
         }
+    }
+
+    // The Device tab shows the settings as the device reports them and changes
+    // them as the viewer, so a change lands in Activity as a person's.
+    func testTheDeviceTabReadsTheSettingsAndChangesThemAsTheViewer() throws {
+        XCTAssertTrue(page.contains(#"apiJSON("/api/v1/device")"#))
+        let post = try XCTUnwrap(page.range(of: "async function postDevice("))
+        let body = page[post.upperBound...].prefix(400)
+        XCTAssertTrue(body.contains(#"api("/api/v1/device", { method: "POST""#))
+        XCTAssertTrue(body.contains(#""X-SimTool-Source": "viewer""#))
+        XCTAssertTrue(body.contains("manualInputAllowed("), "a change during someone else's run asks first")
+        for action in ["appearance", "content-size", "increase-contrast", "debug", "memory-warning", "biometrics", "status-bar", "location", "push"] {
+            XCTAssertTrue(page.contains(#"action: "\#(action)""#), "missing \(action)")
+        }
+        XCTAssertTrue(page.contains("/^Digit[1-7]$/"), "⌥7 opens the Device tab")
+        for route in ["/api/v1/app?bundleId=", "/api/v1/app/reveal", "/api/v1/app/install"] {
+            XCTAssertTrue(page.contains(route), "missing \(route)")
+        }
+        XCTAssertTrue(page.contains(#"action: "rotate", name"#), "a turn goes as input")
+        let config = try XCTUnwrap(page.range(of: "function applyConfig(config) {"))
+        XCTAssertTrue(page[config.upperBound...].prefix(3000).contains(#"if (activeTab("device")) loadDeviceSettings();"#), "a tab open before the config came reads the app's card then")
+    }
+
+    // The camera is changed as the viewer, so it lands in Activity as a person's;
+    // a camera the app has not taken yet offers a relaunch.
+    func testTheDeviceTabSetsTheCamera() throws {
+        XCTAssertTrue(page.contains(#"apiJSON("/api/v1/camera")"#))
+        let change = try XCTUnwrap(page.range(of: "async function changeCamera("))
+        let body = page[change.upperBound...].prefix(500)
+        XCTAssertTrue(body.contains("manualInputAllowed("))
+        XCTAssertTrue(body.contains(#""X-SimTool-Source": "viewer""#))
+        XCTAssertTrue(page.contains(#""X-SimTool-Filename": encodeURIComponent(file.name)"#))
+        XCTAssertTrue(page.contains(#""/api/v1/camera/webcam", { method: "POST""#))
+        XCTAssertTrue(page.contains(#""/api/v1/camera", { method: "DELETE" }"#))
+        XCTAssertTrue(page.contains(#"devSection("camera", "Camera","#))
+        XCTAssertTrue(page.contains(#"cameraRelaunch.hidden = !on || !deviceInfo.app"#))
+        XCTAssertTrue(page.contains(#""Camera: the Mac's camera", "", () => useMacCamera("")"#), "the palette has it")
+    }
+
+    // Every section of the Device tab folds and starts folded; what a person
+    // unfolds stays unfolded, and a command that leads into a section unfolds it.
+    func testTheDeviceSectionsStartFolded() throws {
+        let section = try XCTUnwrap(page.range(of: "function devSection(name, title, ...children) {"))
+        XCTAssertTrue(page[section.upperBound...].prefix(400).contains(#"el("details", { class: "dev-sec", "data-sec": name, open: deviceSections[name] === true }"#))
+        XCTAssertTrue(page.contains(#"const deviceSections = stored("device.sections", {});"#))
+        XCTAssertTrue(page.contains(#"store("device.sections", deviceSections);"#))
+        XCTAssertFalse(page.contains(#"el("section", { class: "dev-sec""#), "no section that does not fold")
+        for name in ["appearance", "accessibility", "orientation", "rendering", "biometrics", "status-bar", "location", "camera", "push", "app", "permissions", "keychain"] {
+            XCTAssertTrue(page.contains(#"devSection("\#(name)", "#), "missing section \(name)")
+        }
+        XCTAssertTrue(page.contains(#"openDeviceSection("push"); pushPayload.focus();"#))
+        XCTAssertTrue(page.contains(#"openDeviceSection("permissions").scrollIntoView"#))
+    }
+
+    // Device sits after Accessibility; the ⌥ keys stay each tab's own, so
+    // Tests and Activity keep ⌥5 and ⌥6.
+    func testTheDeviceTabFollowsAccessibilityAndTheTabKeysStay() throws {
+        let ax = try XCTUnwrap(page.range(of: #"id="tab-ax""#))
+        let device = try XCTUnwrap(page.range(of: #"id="tab-device""#))
+        let tests = try XCTUnwrap(page.range(of: #"id="tab-tests""#))
+        XCTAssertTrue(ax.lowerBound < device.lowerBound && device.lowerBound < tests.lowerBound)
+        XCTAssertTrue(page.contains(#"const TABS = ["network", "logs", "state", "ax", "device", "tests", "activity"];"#))
+        XCTAssertTrue(page.contains(#"const TAB_KEYS = ["network", "logs", "state", "ax", "tests", "activity", "device"];"#))
+        XCTAssertTrue(page.contains("openTab(TAB_KEYS[Number(event.code.slice(5)) - 1])"))
+    }
+
+    // One floating tip, moved along so it stays inside the window — a button at
+    // an edge keeps its words — and drawn above its control where there is no room below.
+    func testTooltipsStayInsideTheWindow() throws {
+        XCTAssertTrue(page.contains(#"<div class="tip" id="tip" aria-hidden="true" hidden></div>"#))
+        XCTAssertFalse(page.contains("content: attr(data-tip)"), "no tip drawn by CSS inside its control's box")
+        let draw = try XCTUnwrap(page.range(of: "function drawTip()"))
+        let body = page[draw.upperBound...].prefix(900)
+        XCTAssertTrue(body.contains("innerWidth - box.width - TIP_MARGIN"))
+        XCTAssertTrue(body.contains("anchor.top - TIP_GAP - box.height"))
+        XCTAssertTrue(page.contains(#"document.addEventListener("focusin""#), "keyboard focus shows the tip too")
+    }
+
+    // Rotate Left and Right, as Simulator.app has them: a toolbar button and ⌘← / ⌘→.
+    func testTheDeviceTurnsFromTheToolbarAndTheKeyboard() throws {
+        XCTAssertTrue(page.contains(#"id="rotateButton" aria-label="Rotate left""#))
+        XCTAssertTrue(page.contains(#"aria-keyshortcuts="Meta+ArrowLeft Meta+ArrowRight""#))
+        let keys = try XCTUnwrap(page.range(of: "Simulator.app's Rotate Left and Right; with the Mac keyboard connected"))
+        XCTAssertTrue(page[keys.upperBound...].prefix(400).contains(#"rotateDevice(event.key === "ArrowLeft" ? "left" : "right")"#))
+    }
+
+    // A folder dropped on the screen is read before the first await, while the drop still holds it.
+    func testFilesDroppedOnTheScreenAreReadWhileTheDropHoldsThem() throws {
+        let drop = try XCTUnwrap(page.range(of: #"stageArea.addEventListener("drop""#))
+        let handler = page[drop.upperBound...].prefix(600)
+        XCTAssertTrue(handler.contains("webkitGetAsEntry"))
+        XCTAssertTrue(handler.contains("manualInputAllowed("))
+        XCTAssertTrue(page.contains(#"postFile("/api/v1/app/install""#))
+        XCTAssertTrue(page.contains("tarArchive(entries"))
     }
 
     // Screenshots and videos come with the device's bezel or as the screen

@@ -2,7 +2,9 @@
 // inspector, the filter field every tab shares, app launches, and the
 // split detail under each list.
 
-const TABS = ["network", "logs", "state", "ax", "tests", "activity"];
+const TABS = ["network", "logs", "state", "ax", "device", "tests", "activity"];
+// ⌥1–7, each tab's own: a tab added in between does not move the others' keys.
+const TAB_KEYS = ["network", "logs", "state", "ax", "tests", "activity", "device"];
 const inspector = { tab: stored("tab", "network"), open: stored("inspectorOpen", true), attachedApp: "", configKnown: false };
 const tabHandlers = {};   // tab → { show(), hide() }
 

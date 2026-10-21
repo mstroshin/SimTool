@@ -66,6 +66,24 @@ struct ActivityReporter: Sendable {
         return try await finishing(started, perform)
     }
 
+    /// Runs a change to the device's settings (`simtool ui`, `debug`,
+    /// `biometrics`, …) as one reported activity; `perform` returns what the
+    /// device reports afterwards.
+    func control(_ control: DeviceControlPayload, perform: () async throws -> String) async throws -> String {
+        guard !servers.isEmpty else { return try await perform() }
+        let words = DeviceActivityWording.describe(control: control)
+        let started = await begin(DeviceActivityReport(kind: words.kind, title: words.title, detail: words.detail))
+        do {
+            let result = try await perform()
+            let detail = [words.detail, result].compactMap { $0 }.joined(separator: " · ")
+            await finish(started, error: nil, detail: DeviceActivityWording.reportsResult(of: control) ? detail : nil)
+            return result
+        } catch {
+            await finish(started, error: error)
+            throw error
+        }
+    }
+
     /// Reports something already done — an app launched, a deeplink opened.
     func done(kind: String, title: String, detail: String? = nil) async {
         guard !servers.isEmpty else { return }
@@ -92,9 +110,9 @@ struct ActivityReporter: Sendable {
         return started
     }
 
-    private func finish(_ started: [(URL, Int)], error: Error?) async {
+    private func finish(_ started: [(URL, Int)], error: Error?, detail: String? = nil) async {
         for (server, id) in started {
-            _ = await post(DeviceActivityReport(id: id, status: error == nil ? .done : .failed, error: error.map(message(of:))), to: server)
+            _ = await post(DeviceActivityReport(id: id, detail: detail, status: error == nil ? .done : .failed, error: error.map(message(of:))), to: server)
         }
     }
 
