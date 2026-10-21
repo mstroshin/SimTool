@@ -43,7 +43,10 @@ function startInspectorEvents() {
 
 // The device's screens changed: a foldable folded, or a screen turned.
 function applyDeviceTopic(payload) {
-  if (payload && payload.displays) applyDisplays(payload.displays, payload.activeDisplay);
+  if (!payload) return;
+  if (payload.displays) applyDisplays(payload.displays, payload.activeDisplay);
+  // The topic is the whole state: no fold is a device that does not fold.
+  applyFold(payload.fold);
 }
 
 // Everything the server holds, in place of what the page had: the stream's

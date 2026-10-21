@@ -102,6 +102,7 @@ code { font: var(--fs-11)/1.4 var(--font-mono); }
 .app[data-conn="reconnecting"] .conn-dot, .app[data-conn="offline"] .conn-dot { background: var(--err); }
 .app[data-mode="replay"] .conn-dot { background: var(--ink2); }
 .tb-app { padding: 0 4px; color: var(--ink2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 200px; }
+.tb-fold { display: flex; align-items: center; gap: 2px; flex: none; }
 
 .tb-btn {
   display: inline-grid; place-items: center; width: 28px; height: 28px; flex: none; border: 0; border-radius: var(--r-2);

@@ -24,6 +24,8 @@ struct InspectorSnapshotPayload: Encodable {
 struct DeviceTopicPayload: Encodable {
     var displays: [ServerDisplayPayload]
     var activeDisplay: String?
+    /// A foldable's hinge, posture and primary panel, as SpringBoard reports them.
+    var fold: SimulatorFoldState?
 }
 
 /// `network`: calls the app reported (a known id replaces its call), the

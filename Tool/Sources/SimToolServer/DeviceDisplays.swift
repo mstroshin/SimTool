@@ -8,6 +8,7 @@ final class DeviceDisplays: @unchecked Sendable {
     private let lock = NSLock()
     private var layout: SimulatorDisplayLayout?
     private var state: SimulatorDisplayState?
+    private var foldState: SimulatorFoldState?
 
     var current: (layout: SimulatorDisplayLayout?, state: SimulatorDisplayState?) {
         lock.withLock { (layout, state) }
@@ -29,6 +30,26 @@ final class DeviceDisplays: @unchecked Sendable {
 
     var isFoldable: Bool { current.layout?.isFoldable == true }
 
+    /// The fold, its panel the one CoreDevice says is lit: SpringBoard names
+    /// its primary panel only when that changes.
+    var fold: SimulatorFoldState? {
+        lock.withLock {
+            guard var fold = foldState else { return nil }
+            if let active = state?.active, let role = layout?.display(named: active)?.role { fold.panel = role }
+            return fold
+        }
+    }
+
+    /// Whether the fold changed.
+    @discardableResult
+    func set(fold: SimulatorFoldState) -> Bool {
+        lock.withLock {
+            guard foldState != fold else { return false }
+            foldState = fold
+            return true
+        }
+    }
+
     /// The lit screen of a foldable: simctl names it to screenshot or record
     /// one, and refuses to pick between two. Nil on a one-screen device.
     var activeDisplay: SimulatorDisplay? {
@@ -43,7 +64,7 @@ final class DeviceDisplays: @unchecked Sendable {
     }
 
     var topic: DeviceTopicPayload {
-        DeviceTopicPayload(displays: payloads, activeDisplay: activeDisplay?.id)
+        DeviceTopicPayload(displays: payloads, activeDisplay: activeDisplay?.id, fold: fold)
     }
 
     /// The screen `name` asks for (`primary-1`, `inner`, `3`, `active`), or
@@ -134,6 +155,88 @@ final class DisplayStateMonitor: @unchecked Sendable {
                 return !reportedFailure
             }
             if first { DebugLog.write("displays", "cannot read the lit screen of \(deviceUDID): \(error.localizedDescription)") }
+        }
+    }
+}
+
+/// Follows an iPhone Duo's fold as SpringBoard logs it — the hinge as it
+/// moves, the posture, the panel it makes primary — seeded from the last half
+/// hour of its log, then from a `log stream` kept running (restarted if it
+/// ends).
+final class FoldMonitor: @unchecked Sendable {
+    private let deviceUDID: String
+    private let onChange: @Sendable (_ fold: SimulatorFoldState, _ panelSwitched: Bool) -> Void
+    private let lock = NSLock()
+    private var process: Process?
+    private var state: SimulatorFoldState?
+    private var pending = Data()
+    private var stopped = false
+
+    init(deviceUDID: String, onChange: @escaping @Sendable (_ fold: SimulatorFoldState, _ panelSwitched: Bool) -> Void) {
+        self.deviceUDID = deviceUDID
+        self.onChange = onChange
+    }
+
+    func start() {
+        Task {
+            if let seed = await SimulatorFoldState.read(deviceUDID: deviceUDID) {
+                let fresh = lock.withLock {
+                    guard state == nil else { return false }
+                    state = seed
+                    return true
+                }
+                if fresh { onChange(seed, true) }
+            }
+        }
+        stream()
+    }
+
+    func stop() {
+        let running = lock.withLock {
+            stopped = true
+            defer { process = nil }
+            return process
+        }
+        running?.terminate()
+    }
+
+    private func stream() {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        process.arguments = ["simctl", "spawn", deviceUDID, "log", "stream", "--level", "info", "--style", "compact", "--predicate", SimulatorFoldState.logPredicate]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        output.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty else { handle.readabilityHandler = nil; return }
+            self?.receive(data)
+        }
+        process.terminationHandler = { [weak self] _ in
+            guard let self, !self.lock.withLock({ self.stopped }) else { return }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 1) { [weak self] in self?.stream() }
+        }
+        lock.withLock { self.process = process }
+        do { try process.run() } catch { DebugLog.write("fold", "cannot stream SpringBoard's log: \(error.localizedDescription)") }
+    }
+
+    private func receive(_ data: Data) {
+        let lines: [String] = lock.withLock {
+            pending.append(data)
+            var lines: [String] = []
+            while let newline = pending.firstIndex(of: 10) {
+                lines.append(String(decoding: pending[..<newline], as: UTF8.self))
+                pending.removeSubrange(...newline)
+            }
+            return lines
+        }
+        for line in lines {
+            let change: (SimulatorFoldState, Bool)? = lock.withLock {
+                guard let next = (state ?? SimulatorFoldState()).reading(line), next != state else { return nil }
+                defer { state = next }
+                return (next, next.panel != state?.panel || line.contains("COMPLETED:"))
+            }
+            if let (fold, switched) = change { onChange(fold, switched) }
         }
     }
 }

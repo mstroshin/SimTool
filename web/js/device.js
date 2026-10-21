@@ -16,6 +16,45 @@ async function deviceAction(label, payload, done) {
 }
 
 function pressHome() { deviceAction("Home", { action: "button", name: "home" }, "Home"); }
+
+// ---- A foldable's fold ----
+// The server sweeps the hinge and answers once the device reports the pose,
+// with where it came to rest.
+
+let foldInFlight = false;
+async function foldTo(pose) {
+  if (foldInFlight || !screenState.foldable) return;
+  if (!manualInputAllowed(() => foldTo(pose))) return;
+  foldInFlight = true;
+  renderFold();
+  try {
+    const result = await (await postInput({ action: "pose", name: pose })).json();
+    toast(result && result.stdout ? "Folded: " + result.stdout : "Folded " + pose);
+  } catch (error) {
+    fail("Fold " + pose + " failed", error);
+  } finally {
+    foldInFlight = false;
+    renderFold();
+  }
+}
+
+// Shown only for a foldable: the pose it rests at pressed, the hinge beside it.
+function renderFold() {
+  $("foldGroup").hidden = !screenState.foldable;
+  const fold = screenState.fold || {};
+  for (const button of $("foldGroup").querySelectorAll("[data-pose]")) {
+    button.setAttribute("aria-pressed", String(fold.pose === button.dataset.pose));
+    button.disabled = foldInFlight || screenState.connection !== "live" || app.dataset.mode === "replay";
+  }
+  // Under the device, beside its size: how it is folded, as it reports it.
+  $("readFold").hidden = !screenState.foldable;
+  $("readFold").textContent = foldReadout(fold);
+}
+
+function applyFold(fold) {
+  screenState.fold = fold || null;
+  renderFold();
+}
 function pressShake() { deviceAction("Shake", { action: "shake" }, "Shake sent"); }
 function toggleSoftwareKeyboard() { deviceAction("Software keyboard", { action: "software-keyboard" }, "Software keyboard toggled"); }
 
@@ -492,6 +531,7 @@ document.addEventListener("focusout", () => setTimeout(updateKeyboardIndicator, 
 // ---- Wiring ----
 
 $("homeButton").addEventListener("click", pressHome);
+for (const button of $("foldGroup").querySelectorAll("[data-pose]")) button.addEventListener("click", () => foldTo(button.dataset.pose));
 $("screenshotButton").addEventListener("click", saveScreenshot);
 $("shakeButton").addEventListener("click", pressShake);
 $("softKeyboardButton").addEventListener("click", toggleSoftwareKeyboard);
@@ -504,6 +544,7 @@ $("sbUdid").addEventListener("click", () => { if (deviceInfo.udid) copyText(devi
 function updateDeviceButtons() {
   const usable = screenState.connection === "live" && app.dataset.mode !== "replay";
   for (const id of ["homeButton", "screenshotButton", "shakeButton", "softKeyboardButton", "terminateButton", "relaunchButton"]) $(id).disabled = !usable;
+  renderFold();
 }
 
 onConnection((state) => {

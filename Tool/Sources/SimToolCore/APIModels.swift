@@ -142,6 +142,8 @@ public struct ServerConfigPayload: Codable, Equatable, Sendable {
     public var displays: [ServerDisplayPayload]?
     /// The lit screen's id, the one the stream shows and touches land on.
     public var activeDisplay: String?
+    /// How a foldable is folded, as the device reports it.
+    public var fold: SimulatorFoldState?
 
     public init(
         device: String,
@@ -157,7 +159,8 @@ public struct ServerConfigPayload: Codable, Equatable, Sendable {
         version: String? = nil,
         deviceType: String? = nil,
         displays: [ServerDisplayPayload]? = nil,
-        activeDisplay: String? = nil
+        activeDisplay: String? = nil,
+        fold: SimulatorFoldState? = nil
     ) {
         self.device = device
         self.udid = udid
@@ -173,6 +176,7 @@ public struct ServerConfigPayload: Codable, Equatable, Sendable {
         self.deviceType = deviceType
         self.displays = displays
         self.activeDisplay = activeDisplay
+        self.fold = fold
     }
 }
 
@@ -432,6 +436,8 @@ public struct SimulatorInputPayload: Codable, Equatable, Sendable {
     /// when it taps by coordinates. Only the activity feed reads it; it never
     /// decides where a touch lands.
     public var target: String?
+    /// A hinge angle in degrees, 0…180 (pose, in place of a named `name`).
+    public var angle: Double?
 
     public init(
         action: String? = nil,
@@ -457,7 +463,8 @@ public struct SimulatorInputPayload: Codable, Equatable, Sendable {
         sourceHeight: Double? = nil,
         enabled: Bool? = nil,
         visible: Bool? = nil,
-        target: String? = nil
+        target: String? = nil,
+        angle: Double? = nil
     ) {
         self.action = action
         self.type = type
@@ -483,6 +490,7 @@ public struct SimulatorInputPayload: Codable, Equatable, Sendable {
         self.enabled = enabled
         self.visible = visible
         self.target = target
+        self.angle = angle
     }
 }
 

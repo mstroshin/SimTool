@@ -208,6 +208,7 @@ extension AgentSkill {
           - fling: { direction: up, speed: fast }                 # slow | normal | fast | pt/s
           - drag: { from: { label: "Milk" }, to: { label: "Eggs" } }   # or by: { x: 0, y: 120 }
           - keyboard: hide             # or show — the software keyboard, confirmed on screen
+          - pose: book                 # iPhone Duo: closed | book | open | an angle 0–180, confirmed by the device
           - assertVisible: { text: "Welcome", criterion: AC-1 }   # alias of waitFor
           - assertHidden: { label: "Loading" }
           - wait: 2                    # escape hatch; prefer waitFor / assertHidden

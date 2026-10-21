@@ -177,6 +177,26 @@ dtuhidd, as Device Hub does — while dtuhidd runs, SimulatorHID keeps the cover
 own touch screen stood down, and an Indigo event sent into it would abort
 backboardd.
 
+An iPhone Duo folds from the CLI, the API, a test and the viewer's toolbar:
+
+```sh
+swift run simtool input pose book      # closed | book | open | a hinge angle 0–180
+swift run simtool input pose           # the fold now: open · 180°, inner panel lit
+```
+
+Closed (0°) lights the cover; book (130°) and open (180°) the inner panel. The
+hinge is swept there as a hand would fold it — SpringBoard folds with
+hysteresis, and a jump can leave the panel that was lit — by a helper SimTool
+runs inside the simulator, which posts the hinge the way Device Hub's slider
+does. A pose returns once the device reports it: the hinge as the guest's
+motion service took it and the panel CoreDevice says is lit; one the device does
+not take is an error naming what it reports instead. The fold is read back
+continuously too — Device Hub's own slider included: `/config` and the event
+stream's `device` topic carry it as `fold` (`hingeDegrees`, `pose`, SpringBoard's
+`posture`, the lit `panel`), the toolbar shows it next to its Closed / Book /
+Open buttons, and the activity feed has a pose's result, or a fold made
+elsewhere, as an entry. YAML tests take a `pose:` step.
+
 Directions are the way the finger moves: `scroll up` drags the content up,
 revealing what is below. A `scroll` (and a `swipe`, unless `--hold 0`) slows
 down and rests a quarter second before lifting, which leaves the content where
@@ -907,14 +927,15 @@ stream is down.
 
 `POST /api/v1/input` takes an `action` — `tap`, `longPress`, `type`, `paste`,
 `swipe`, `scroll`, `fling`, `drag`, `button`, `shake`, `terminate`, `launch`,
-`software-keyboard`, `hardware-keyboard` — plus that action's fields: `x`/`y` or
+`software-keyboard`, `hardware-keyboard`, `pose` — plus that action's fields: `x`/`y` or
 `id`/`label` for `tap` and `longPress` (`duration` for the press),
 `startX`/`startY`/`endX`/`endY` with `velocity`, `duration`, `hold` (and `press`
 for `drag`), `direction` with `distance` or `velocity` and an optional start
 `x`/`y` for `scroll` and `fling`, `text` for `type` and `paste`, `enabled` for
 `hardware-keyboard` (connect or disconnect it), `visible` for
 `software-keyboard` (show or hide it and confirm it on screen; without it, a
-toggle). Coordinates are screen points. Images go as the raw request body instead:
+toggle), `name` (`closed`, `book`, `open`) or `angle` (0–180) for `pose`.
+Coordinates are screen points. Images go as the raw request body instead:
 `POST /api/v1/input/paste-image` pastes one into the focused field, and
 `POST /api/v1/photos` adds an image or a video to Photos. Both read the type from
 `Content-Type` and an optional percent-encoded `X-SimTool-Filename` header.
@@ -922,7 +943,8 @@ toggle). Coordinates are screen points. Images go as the raw request body instea
 `/api/v1/input/stream` is the viewer's live finger and keyboard: a WebSocket
 taking one JSON frame per touch event, `{"t": "down"|"move"|"up", "x": 0.5,
 "y": 0.7}` with coordinates as fractions of the screen, plus `x2`/`y2` for a
-second finger, and one per key, `{"t": "keydown"|"keyup", "code": "KeyA"}` with
+second finger and, on a foldable, `"d"` — the screen shown (`primary-1`) — and
+one per key, `{"t": "keydown"|"keyup", "code": "KeyA"}` with
 the browser's `KeyboardEvent.code`. Frames are never answered; moves are
 coalesced, downs, ups and keys never dropped, and when the socket closes a
 finger still down is lifted where it was and held keys are released.

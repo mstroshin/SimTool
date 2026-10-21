@@ -1204,6 +1204,45 @@ enum WebViewerAssets {
         }
 
         function pressHome() { deviceAction("Home", { action: "button", name: "home" }, "Home"); }
+
+        // ---- A foldable's fold ----
+        // The server sweeps the hinge and answers once the device reports the pose,
+        // with where it came to rest.
+
+        let foldInFlight = false;
+        async function foldTo(pose) {
+          if (foldInFlight || !screenState.foldable) return;
+          if (!manualInputAllowed(() => foldTo(pose))) return;
+          foldInFlight = true;
+          renderFold();
+          try {
+            const result = await (await postInput({ action: "pose", name: pose })).json();
+            toast(result && result.stdout ? "Folded: " + result.stdout : "Folded " + pose);
+          } catch (error) {
+            fail("Fold " + pose + " failed", error);
+          } finally {
+            foldInFlight = false;
+            renderFold();
+          }
+        }
+
+        // Shown only for a foldable: the pose it rests at pressed, the hinge beside it.
+        function renderFold() {
+          $("foldGroup").hidden = !screenState.foldable;
+          const fold = screenState.fold || {};
+          for (const button of $("foldGroup").querySelectorAll("[data-pose]")) {
+            button.setAttribute("aria-pressed", String(fold.pose === button.dataset.pose));
+            button.disabled = foldInFlight || screenState.connection !== "live" || app.dataset.mode === "replay";
+          }
+          // Under the device, beside its size: how it is folded, as it reports it.
+          $("readFold").hidden = !screenState.foldable;
+          $("readFold").textContent = foldReadout(fold);
+        }
+
+        function applyFold(fold) {
+          screenState.fold = fold || null;
+          renderFold();
+        }
         function pressShake() { deviceAction("Shake", { action: "shake" }, "Shake sent"); }
         function toggleSoftwareKeyboard() { deviceAction("Software keyboard", { action: "software-keyboard" }, "Software keyboard toggled"); }
 
@@ -1680,6 +1719,7 @@ enum WebViewerAssets {
         // ---- Wiring ----
 
         $("homeButton").addEventListener("click", pressHome);
+        for (const button of $("foldGroup").querySelectorAll("[data-pose]")) button.addEventListener("click", () => foldTo(button.dataset.pose));
         $("screenshotButton").addEventListener("click", saveScreenshot);
         $("shakeButton").addEventListener("click", pressShake);
         $("softKeyboardButton").addEventListener("click", toggleSoftwareKeyboard);
@@ -1692,6 +1732,7 @@ enum WebViewerAssets {
         function updateDeviceButtons() {
           const usable = screenState.connection === "live" && app.dataset.mode !== "replay";
           for (const id of ["homeButton", "screenshotButton", "shakeButton", "softKeyboardButton", "terminateButton", "relaunchButton"]) $(id).disabled = !usable;
+          renderFold();
         }
 
         onConnection((state) => {
@@ -1746,7 +1787,10 @@ enum WebViewerAssets {
 
         // The device's screens changed: a foldable folded, or a screen turned.
         function applyDeviceTopic(payload) {
-          if (payload && payload.displays) applyDisplays(payload.displays, payload.activeDisplay);
+          if (!payload) return;
+          if (payload.displays) applyDisplays(payload.displays, payload.activeDisplay);
+          // The topic is the whole state: no fold is a device that does not fold.
+          applyFold(payload.fold);
         }
 
         // Everything the server holds, in place of what the page had: the stream's
@@ -2985,6 +3029,13 @@ enum WebViewerAssets {
           return radii.map((radius) => Math.round(radius * scale) + "px").join(" ");
         }
 
+        // What the toolbar says about a fold: "130° · inner", "open · 180° · inner".
+        function foldReadout(fold) {
+          if (!fold || fold.hingeDegrees == null) return fold && fold.panel ? fold.panel : "";
+          const degrees = Math.round(fold.hingeDegrees * 10) / 10 + "°";
+          return [fold.pose, degrees, fold.panel].filter(Boolean).join(" · ");
+        }
+
         // ---- Theme ----
 
         // The theme a click on the theme button pins: the other one — or none, so the page
@@ -3478,6 +3529,7 @@ enum WebViewerAssets {
           $("sbApp").textContent = deviceInfo.app || "No app attached";
           $("sbVersion").textContent = config.version ? "simtool " + config.version : "";
           applyDisplays(config.displays, config.activeDisplay);
+          applyFold(config.fold);
         }
 
         // A new server: everything numbered by the old one is stale.
@@ -3970,6 +4022,13 @@ enum WebViewerAssets {
             ["Device", "paste", "Paste the Mac clipboard", "⌘V", pasteFromClipboard],
             ["Device", "photo", "Add files to Photos…", "", () => $("photosFile").click()]
           ];
+          if (screenState.foldable) {
+            commands.push(
+              ["Device", "fold-closed", "Fold closed — the cover lights", "", () => foldTo("closed")],
+              ["Device", "fold-book", "Fold to book, 130°", "", () => foldTo("book")],
+              ["Device", "fold-open", "Fold open flat, 180°", "", () => foldTo("open")]
+            );
+          }
           if (deviceInfo.app) {
             commands.push(["App", "stop", "Terminate " + deviceInfo.app, "", terminateApp], ["App", "relaunch", "Relaunch " + deviceInfo.app, "", relaunchApp]);
           }
@@ -4538,6 +4597,7 @@ enum WebViewerAssets {
           height: 0,
           points: null,     // screen size in points, once known (/config, else the AX root frame)
           display: null,    // the lit screen as /config describes it: id, rotation, points, cornerRadii
+          fold: null,       // a foldable's fold as the device reports it: hingeDegrees, posture, panel, pose
           foldable: false,  // more than one screen: touches name the one shown
           rotation: 0,      // degrees the frame on the canvas is turned (the lit screen's, once frames match it)
           connection: "connecting",  // connecting | live | reconnecting | offline
@@ -4807,6 +4867,7 @@ enum WebViewerAssets {
           touchStream.setDisplay(screenState.foldable ? lit.id : null);
           fitDevice();
           updateReadoutSize();
+          if (typeof renderFold === "function") renderFold();
         }
 
         // Pointer position in points (or pixels until the point size is known).
@@ -5585,6 +5646,7 @@ enum WebViewerAssets {
         .app[data-conn="reconnecting"] .conn-dot, .app[data-conn="offline"] .conn-dot { background: var(--err); }
         .app[data-mode="replay"] .conn-dot { background: var(--ink2); }
         .tb-app { padding: 0 4px; color: var(--ink2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 200px; }
+        .tb-fold { display: flex; align-items: center; gap: 2px; flex: none; }
 
         .tb-btn {
           display: inline-grid; place-items: center; width: 28px; height: 28px; flex: none; border: 0; border-radius: var(--r-2);
@@ -6175,6 +6237,9 @@ enum WebViewerAssets {
               <symbol id="i-sun" viewBox="0 0 16 16"><circle cx="8" cy="8" r="3"/><path d="M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1"/></symbol>
               <symbol id="i-moon" viewBox="0 0 16 16"><path d="M13 9.6A5.5 5.5 0 0 1 6.4 3a5.5 5.5 0 1 0 6.6 6.6Z"/></symbol>
               <symbol id="i-filter" viewBox="0 0 16 16"><path d="M2.5 3.5h11l-4.2 5v4l-2.6 1v-5Z"/></symbol>
+              <symbol id="i-fold-closed" viewBox="0 0 16 16"><rect x="4.5" y="2.5" width="7" height="11" rx="1.2"/><path d="M6.2 2.5v11"/></symbol>
+              <symbol id="i-fold-book" viewBox="0 0 16 16"><path d="M8 4v9.5M8 4 2.5 2.5v9.5L8 13.5M8 4l5.5-1.5v9.5L8 13.5"/></symbol>
+              <symbol id="i-fold-open" viewBox="0 0 16 16"><rect x="1.5" y="3.5" width="13" height="9" rx="1.2"/><path d="M8 3.5v9" stroke-dasharray="1.2 1.8"/></symbol>
             </defs>
           </svg>
 
@@ -6191,6 +6256,12 @@ enum WebViewerAssets {
                 <button class="tb-btn" type="button" id="screenshotButton" aria-label="Save screenshot" data-tip="Save screenshot" data-key="⌘S" aria-keyshortcuts="Meta+S"><svg class="ic" aria-hidden="true"><use href="#i-camera"/></svg></button>
                 <button class="tb-btn" type="button" id="shakeButton" aria-label="Shake" data-tip="Shake" data-key="⌃⌘Z" aria-keyshortcuts="Control+Meta+Z"><svg class="ic" aria-hidden="true"><use href="#i-shake"/></svg></button>
                 <button class="tb-btn" type="button" id="softKeyboardButton" aria-label="Show or hide the software keyboard" data-tip="Software keyboard — ⌘K while typing into the device"><svg class="ic" aria-hidden="true"><use href="#i-keyboard"/></svg></button>
+                <span class="tb-fold" id="foldGroup" role="group" aria-label="Fold" hidden>
+                  <span class="tb-sep" aria-hidden="true"></span>
+                  <button class="tb-btn" type="button" id="foldClosed" data-pose="closed" aria-pressed="false" aria-label="Fold closed" data-tip="Fold closed — the cover lights"><svg class="ic" aria-hidden="true"><use href="#i-fold-closed"/></svg></button>
+                  <button class="tb-btn" type="button" id="foldBook" data-pose="book" aria-pressed="false" aria-label="Fold to book" data-tip="Book, 130° — the inner panel lights"><svg class="ic" aria-hidden="true"><use href="#i-fold-book"/></svg></button>
+                  <button class="tb-btn" type="button" id="foldOpen" data-pose="open" aria-pressed="false" aria-label="Fold open" data-tip="Open flat, 180°"><svg class="ic" aria-hidden="true"><use href="#i-fold-open"/></svg></button>
+                </span>
                 <span class="tb-sep" aria-hidden="true"></span>
                 <span class="tb-app" id="appName" title="App under test">No app</span>
                 <button class="tb-btn" type="button" id="terminateButton" aria-label="Terminate app" data-tip="Terminate app"><svg class="ic" aria-hidden="true"><use href="#i-stop"/></svg></button>
@@ -6253,7 +6324,7 @@ enum WebViewerAssets {
                 </div>
 
                 <div class="readout mono" id="readout" aria-hidden="true">
-                  <span id="readSize">—</span><span id="readFps">— fps</span>
+                  <span id="readSize">—</span><span id="readFold" hidden></span><span id="readFps">— fps</span>
                   <span class="readout-last" id="readLast" title="The last thing done to the device — ⌥6 shows them all" hidden></span>
                   <span class="readout-ptr" id="readPointer"></span>
                 </div>

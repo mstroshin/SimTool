@@ -28,6 +28,7 @@ function applyConfig(config) {
   $("sbApp").textContent = deviceInfo.app || "No app attached";
   $("sbVersion").textContent = config.version ? "simtool " + config.version : "";
   applyDisplays(config.displays, config.activeDisplay);
+  applyFold(config.fold);
 }
 
 // A new server: everything numbered by the old one is stale.

@@ -12,6 +12,7 @@ const screenState = {
   height: 0,
   points: null,     // screen size in points, once known (/config, else the AX root frame)
   display: null,    // the lit screen as /config describes it: id, rotation, points, cornerRadii
+  fold: null,       // a foldable's fold as the device reports it: hingeDegrees, posture, panel, pose
   foldable: false,  // more than one screen: touches name the one shown
   rotation: 0,      // degrees the frame on the canvas is turned (the lit screen's, once frames match it)
   connection: "connecting",  // connecting | live | reconnecting | offline
@@ -281,6 +282,7 @@ function applyDisplays(displays, activeDisplay) {
   touchStream.setDisplay(screenState.foldable ? lit.id : null);
   fitDevice();
   updateReadoutSize();
+  if (typeof renderFold === "function") renderFold();
 }
 
 // Pointer position in points (or pixels until the point size is known).

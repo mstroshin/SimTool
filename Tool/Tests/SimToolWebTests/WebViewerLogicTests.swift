@@ -268,6 +268,14 @@ final class WebViewerLogicTests: XCTestCase {
         XCTAssertEqual(value(context, "place(0, 10, 20)"), "10,20")
     }
 
+    func testTheToolbarSaysHowTheDeviceIsFolded() throws {
+        let context = try makeContext()
+        XCTAssertEqual(value(context, "foldReadout({ hingeDegrees: 130, pose: 'book', panel: 'inner' })"), "book · 130° · inner")
+        XCTAssertEqual(value(context, "foldReadout({ hingeDegrees: 92.64, panel: 'inner' })"), "92.6° · inner")
+        XCTAssertEqual(value(context, "foldReadout({ panel: 'cover' })"), "cover")
+        XCTAssertEqual(value(context, "foldReadout(null)"), "")
+    }
+
     func testTheScreensCornersComeFromItsDeviceTypeInProportion() throws {
         let context = try makeContext()
         XCTAssertEqual(value(context, "screenRadius({ cornerRadii: [8, 59, 59, 8], points: { width: 466, height: 678 } }, 233)"), "4px 30px 30px 4px")

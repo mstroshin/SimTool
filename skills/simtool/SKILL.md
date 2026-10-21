@@ -299,6 +299,10 @@ lit one, or `?display=cover|inner`.
     react. For a photo picker, put the image in the library instead: `xcrun
     simctl addmedia <udid> <file>…` (or right-click the viewer's screen › Add
     files to Photos…).
+  - `pose closed|book|open|<0–180>` — folds an iPhone Duo and waits until the
+    device reports the pose (closed lights the cover, book and open the inner
+    panel; coordinates then follow the lit panel). Without an argument it prints
+    the fold. A pose the device does not take fails, saying what it reports.
   - `keyboard show|hide` — the software keyboard, confirmed on screen (or off
     it) through the accessibility tree; idempotent. Hide it when it covers the
     button you need; `show` fails when no text field is focused — tap one

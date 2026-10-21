@@ -23,6 +23,31 @@ final class InputRouteTests: XCTestCase {
         XCTAssertTrue(body.contains("Launch requires an app bundle id"), "unexpected error body: \(body)")
     }
 
+    // A device that does not fold refuses a pose instead of reporting it done.
+    func testAPoseOnADeviceThatDoesNotFoldFailsWithExplanation() async throws {
+        let port = try availablePort()
+        let device = SimulatorDevice(udid: "TEST-UDID", name: "iPhone", runtime: "iOS", state: "Booted", isAvailable: true)
+        let server = StreamServer(config: StreamServerConfig(host: "127.0.0.1", port: port, device: device, captureEnabled: false))
+        try server.start()
+        defer { server.stop() }
+
+        for (body, expected) in [
+            (#"{"action": "pose", "name": "book"}"#, "does not fold"),
+            (#"{"action": "pose", "name": "tent"}"#, "Unknown pose tent"),
+            (#"{"action": "pose", "angle": 200}"#, "Unknown pose"),
+            (#"{"action": "pose"}"#, "Pose input requires name"),
+        ] {
+            var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/api/v1/input")!)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = Data(body.utf8)
+            let (data, response) = try await URLSession.shared.data(for: request)
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 400, body)
+            let text = String(decoding: data, as: UTF8.self)
+            XCTAssertTrue(text.contains(expected), "\(body) → \(text)")
+        }
+    }
+
     func testPasteActionWithoutTextFailsBeforeTouchingTheSimulator() async throws {
         let port = try availablePort()
         let device = SimulatorDevice(udid: "TEST-UDID", name: "iPhone", runtime: "iOS", state: "Booted", isAvailable: true)

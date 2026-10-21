@@ -216,6 +216,9 @@ public enum DeviceActivityWording {
             return ("paste", text.isEmpty ? "Paste" : "Paste " + quoted(excerpt(text)), text.count > excerptLength ? "\(text.count) characters" : nil)
         case "shake":
             return ("shake", "Shake", nil)
+        case "pose":
+            let pose = input.angle.map { SimulatorFoldState.degrees($0) } ?? named(input.name)
+            return ("pose", pose.map { "Fold to " + $0 } ?? "Fold", nil)
         case "terminate":
             return ("terminate", "Terminate " + (named(input.name) ?? "the app"), nil)
         case "launch", "relaunch":

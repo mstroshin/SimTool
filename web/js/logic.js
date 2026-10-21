@@ -557,6 +557,13 @@ function screenRadius(display, cssWidth) {
   return radii.map((radius) => Math.round(radius * scale) + "px").join(" ");
 }
 
+// What the toolbar says about a fold: "130° · inner", "open · 180° · inner".
+function foldReadout(fold) {
+  if (!fold || fold.hingeDegrees == null) return fold && fold.panel ? fold.panel : "";
+  const degrees = Math.round(fold.hingeDegrees * 10) / 10 + "°";
+  return [fold.pose, degrees, fold.panel].filter(Boolean).join(" · ");
+}
+
 // ---- Theme ----
 
 // The theme a click on the theme button pins: the other one — or none, so the page

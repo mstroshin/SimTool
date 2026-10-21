@@ -84,6 +84,12 @@ public final class StreamServer: @unchecked Sendable {
     /// The device's screens and the lit one, once its device type is read.
     private let displays = DeviceDisplays()
     private var displayMonitor: DisplayStateMonitor?
+    private var foldMonitor: FoldMonitor?
+    /// The fold last told to the activity feed, and a viewer update or a
+    /// settle check already on its way.
+    private var recordedFold: SimulatorFoldState?
+    private var foldTopicPending = false
+    private var foldSettleGeneration = 0
     /// OSLog category that, by convention, carries a crash summary of the previous run (apps can
     /// only write it after relaunching - crash handlers cannot safely log at crash time).
     private static let crashReportCategory = "Crash"
@@ -158,8 +164,71 @@ public final class StreamServer: @unchecked Sendable {
         let monitor = DisplayStateMonitor(deviceUDID: config.device.udid, layout: layout) { [weak self] state in
             self?.displayStateChanged(state)
         }
-        stateLock.withLock { displayMonitor = monitor }
+        let fold = FoldMonitor(deviceUDID: config.device.udid) { [weak self] state, panelSwitched in
+            self?.foldChanged(state, panelSwitched: panelSwitched)
+        }
+        stateLock.withLock {
+            displayMonitor = monitor
+            foldMonitor = fold
+        }
         monitor.start()
+        fold.start()
+    }
+
+    /// SpringBoard reported the hinge, the posture or the primary panel. The
+    /// viewer hears it at most ten times a second; a new panel is read at once;
+    /// where the fold comes to rest goes to the activity feed.
+    private func foldChanged(_ fold: SimulatorFoldState, panelSwitched: Bool) {
+        guard displays.set(fold: fold) else { return }
+        if panelSwitched, let monitor = stateLock.withLock({ displayMonitor }) {
+            Task { await monitor.refresh() }
+        }
+        let publish = stateLock.withLock {
+            defer { foldTopicPending = true }
+            return !foldTopicPending
+        }
+        if publish {
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                guard let self else { return }
+                self.stateLock.withLock { self.foldTopicPending = false }
+                self.inspectorEvents.publish(.device, self.displays.topic)
+            }
+        }
+        let generation = stateLock.withLock {
+            foldSettleGeneration += 1
+            return foldSettleGeneration
+        }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.8) { [weak self] in
+            self?.foldSettled(generation: generation)
+        }
+    }
+
+    /// The fold has rested for a moment. A pose SimTool was asked for carries
+    /// where it landed in its own entry; one made elsewhere — Device Hub's
+    /// hinge slider — gets an entry of its own.
+    private func foldSettled(generation: Int) {
+        guard let fold = displays.fold else { return }
+        let changed = stateLock.withLock {
+            guard generation == foldSettleGeneration,
+                  recordedFold?.pose != fold.pose || recordedFold?.panel != fold.panel || recordedFold.flatMap(\.hingeDegrees).map({ abs($0 - (fold.hingeDegrees ?? $0)) >= 5 }) ?? true else { return false }
+            recordedFold = fold
+            return true
+        }
+        guard changed else { return }
+        // A pose still running is the one that moved it; one that just
+        // finished where the device is now already says so.
+        let recent = Date().addingTimeInterval(-6)
+        if let asked = activity.last(where: { $0.kind == "pose" && $0.via != "device" }) {
+            if asked.status == .running {
+                activity.update(id: asked.id) { $0.detail = fold.summary }
+                return
+            }
+            if (asked.endedAt ?? asked.at) > recent, asked.detail == nil || asked.detail == fold.summary {
+                if asked.detail == nil { activity.update(id: asked.id) { $0.detail = fold.summary } }
+                return
+            }
+        }
+        activity.record(actor: .viewer, via: "device", kind: "pose", title: "Folded to " + (fold.pose ?? fold.hingeDegrees.map(SimulatorFoldState.degrees) ?? "an unknown pose"), detail: fold.summary)
     }
 
     private func displayStateChanged(_ state: SimulatorDisplayState) {
@@ -174,6 +243,7 @@ public final class StreamServer: @unchecked Sendable {
 
     public func stop() {
         stateLock.withLock { displayMonitor }?.stop()
+        stateLock.withLock { foldMonitor }?.stop()
         inspectorEvents.closeAll()
         testDefinitionsWatcher?.stop()
         testDefinitionsWatcher = nil
@@ -848,7 +918,8 @@ public final class StreamServer: @unchecked Sendable {
             version: SimToolVersion.current,
             deviceType: displays.current.layout?.deviceType ?? config.device.deviceTypeIdentifier,
             displays: displays.current.layout == nil ? nil : displays.payloads,
-            activeDisplay: displays.activeDisplay?.id
+            activeDisplay: displays.activeDisplay?.id,
+            fold: displays.fold
         )
     }
 
@@ -896,6 +967,10 @@ public final class StreamServer: @unchecked Sendable {
                 }
             }
             testSessions.noteInput(at: startedAt)
+            // A fold says where the device came to rest.
+            if action == "pose", !output.stdoutString.isEmpty {
+                activity.update(id: entry.id) { $0.detail = output.stdoutString }
+            }
             activity.finish(id: entry.id)
             return try jsonEncodedResponse(CommandResultPayload(
                 ok: true,
@@ -1291,6 +1366,28 @@ public final class StreamServer: @unchecked Sendable {
                 return try await play(try await SimulatorInputClient.flingStroke(deviceUDID: udid, direction: direction, velocity: velocity, x: start?.x, y: start?.y))
             }
             return try await play(try await SimulatorInputClient.scrollStroke(deviceUDID: udid, direction: direction, distance: input.distance, x: start?.x, y: start?.y))
+        case "pose":
+            // A foldable's hinge: a named pose or an angle, confirmed by the device.
+            let pose: SimulatorPose
+            if let angle = input.angle {
+                pose = try SimulatorPose(parsing: String(angle))
+            } else if let name = input.name {
+                pose = try SimulatorPose(parsing: name)
+            } else {
+                throw SimToolError("Pose input requires name (closed, book, open) or angle (0…180)")
+            }
+            let displays = displays
+            let monitor = stateLock.withLock { displayMonitor }
+            let state = try await SimulatorFoldClient.shared.fold(
+                to: pose,
+                from: displays.fold?.hingeDegrees,
+                layout: displays.current.layout,
+                deviceUDID: udid
+            ) {
+                await monitor?.refresh()
+                return (displays.current.state?.active, displays.fold)
+            }
+            return ProcessOutput(status: 0, stdout: Data(state.summary.utf8))
         case "shake":
             // Same darwin notification Simulator.app's Device > Shake menu posts;
             // UIKit in the simulated OS turns it into motionEnded(.motionShake).
