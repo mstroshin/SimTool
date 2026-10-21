@@ -18,9 +18,12 @@ final class Duo3DStream: @unchecked Sendable {
         }
     }
 
+    /// How the asking viewer shows it: theme, stage colour and stage shape
+    /// (width per unit of height), which the frames take.
     struct Look: Equatable {
         var dark: Bool
         var background: String
+        var aspect: Double?
     }
 
     private let deviceUDID: String
@@ -84,6 +87,7 @@ final class Duo3DStream: @unchecked Sendable {
             guard keyframe || state.map({ $0.panel != next.panel || $0.hinge != next.hinge || $0.look != next.look }) ?? true else { return }
             state = next
             var message: [String: Any] = ["panel": panel, "hinge": hinge, "dark": next.look.dark, "background": next.look.background]
+            if let aspect = next.look.aspect { message["aspect"] = aspect }
             if keyframe { message["keyframe"] = true }
             guard let data = try? JSONSerialization.data(withJSONObject: message) else { return }
             try? input.write(contentsOf: data + Data("\n".utf8))

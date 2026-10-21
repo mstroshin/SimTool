@@ -793,16 +793,18 @@ public final class StreamServer: @unchecked Sendable {
         }
     }
 
-    /// `/stream.avcc?view=3d&theme=dark&bg=1b1d20`: the 3D preview, in the
-    /// same envelopes as the screen plus each frame's projection. 503 with the
-    /// reason when there is none to show.
+    /// `/stream.avcc?view=3d&theme=dark&bg=1b1d20&aspect=0.8`: the 3D
+    /// preview, in the same envelopes as the screen plus each frame's
+    /// projection, framed for a stage of that shape. 503 with the reason when
+    /// there is none to show.
     private func stream3DResponse(_ request: HttpRequest) -> HttpResponse {
         let view = view3D()
         guard let model = view.url, let layout = displays.current.layout, let stream = stateLock.withLock({ duo3D }) else {
             return errorResponse(SimToolError(view.reason ?? "the 3D preview is not running"), statusCode: 503, reason: "Service Unavailable")
         }
         let background = request.queryValue("bg").flatMap { $0.count == 6 && Int($0, radix: 16) != nil ? "#" + $0 : nil } ?? "#000000"
-        let look = Duo3DStream.Look(dark: request.queryValue("theme") != "light", background: background)
+        let aspect = request.queryValue("aspect").flatMap(Double.init).flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
+        let look = Duo3DStream.Look(dark: request.queryValue("theme") != "light", background: background, aspect: aspect)
         let role = displays.activeDisplay?.role ?? "cover"
         let hinge = displays.fold?.hingeDegrees ?? (role == "cover" ? 0 : 180)
         return .raw(200, "OK", [

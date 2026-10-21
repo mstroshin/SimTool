@@ -31,8 +31,8 @@ public final class Duo3DRenderer {
     public static let innerMaterial = "CvyXbAGXoolRUYl"
     public static let foldClip = "l_over_r"
 
-    public let width: Int
-    public let height: Int
+    public private(set) var width: Int
+    public private(set) var height: Int
     private let renderer: RealityRenderer
     private let device: MTLDevice
     private let commands: MTLCommandQueue
@@ -41,10 +41,11 @@ public final class Duo3DRenderer {
     private let subject: Entity
     private let controller: AnimationPlaybackController
     private let flatBounds: BoundingBox
-    private let cameraDistance: Float
+    private let camera = PerspectiveCamera()
+    private var cameraDistance: Float = 0
     private let fieldOfView: Float = 2 * atan(36 / (2 * 200.0)) * 180 / .pi
-    private let output: MTLTexture
-    private let cameraOutput: RealityRenderer.CameraOutput
+    private var output: MTLTexture
+    private var cameraOutput: RealityRenderer.CameraOutput
     private var screens: [Panel: (model: ModelEntity, index: Int)] = [:]
     private var textures: [Panel: LowLevelTexture] = [:]
     private let projections: [Panel: Duo3DScreenProjection]
@@ -84,26 +85,55 @@ public final class Duo3DRenderer {
         rest.orientation = simd_quatf(angle: .pi / 2, axis: [1, 0, 0])
         subject.position -= subject.visualBounds(relativeTo: rest).center
         flatBounds = subject.visualBounds(relativeTo: wrapper)
-        cameraDistance = max(flatBounds.extents.x, flatBounds.extents.y) * 1.8 * tan(35 * .pi / 360) / tan(fieldOfView * .pi / 360)
         renderer.entities.append(wrapper)
-        let camera = PerspectiveCamera()
         camera.camera.fieldOfViewInDegrees = fieldOfView
         camera.camera.near = 0.001
         camera.camera.far = 10000
-        camera.position = [0, 0, cameraDistance]
         renderer.entities.append(camera)
         renderer.activeCamera = camera
         renderer.lighting.resource = try await EnvironmentResource(equirectangular: Self.studio())
         renderer.cameraSettings.antialiasing = .none
         renderer.cameraSettings.colorBackground = .color(CGColor(red: 0, green: 0, blue: 0, alpha: 0))
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm_srgb, width: width, height: height, mipmapped: false)
-        descriptor.storageMode = .private
-        descriptor.usage = [.renderTarget, .shaderRead]
-        guard let output = device.makeTexture(descriptor: descriptor) else { throw Duo3DError("Cannot allocate the 3D frame") }
-        self.output = output
-        cameraOutput = try RealityRenderer.CameraOutput(.singleProjection(colorTexture: output))
+        (output, cameraOutput) = try Self.frame(on: device, width: width, height: height)
         controller = subject.playAnimation(clip, transitionDuration: 0, startsPaused: true)
         for panel in [Panel.cover, .inner] { blank(panel) }
+    }
+
+    /// The frame for a stage `aspect` wide per unit of height: its long side
+    /// `longSide` pixels (what the encoder streams at most), its sides even.
+    nonisolated public static func frameSize(aspect: Double, longSide: Int = 1280) -> (width: Int, height: Int) {
+        let aspect = aspect.isFinite && aspect > 0 ? min(3, max(1.0 / 3, aspect)) : 1
+        let even = { (side: Double) in max(64, Int((side / 2).rounded()) * 2) }
+        return aspect >= 1 ? (longSide, even(Double(longSide) / aspect)) : (even(Double(longSide) * aspect), longSide)
+    }
+
+    /// Renders the frames at a new size from the next one on.
+    public func resize(width: Int, height: Int) throws {
+        guard width != self.width || height != self.height else { return }
+        (output, cameraOutput) = try Self.frame(on: device, width: width, height: height)
+        self.width = width
+        self.height = height
+    }
+
+    /// Where the camera stands and how far the device moves sideways for it
+    /// to fill a frame `aspect` wide per unit of height, up to `margin`, in the
+    /// middle: `outline` is the device seen from above (x across, z towards
+    /// the camera, the hinge at the origin), `height` how tall it stands. In
+    /// perspective — a leaf folded towards the camera looks bigger. The field
+    /// of view is vertical.
+    nonisolated static func framing(outline: [(x: Float, z: Float)], height: Float, aspect: Float, fieldOfView: Float, margin: Float = 1.1) -> (distance: Float, shift: Float) {
+        let up = tan(fieldOfView * .pi / 360) / margin, across = up * aspect
+        let nearest = outline.map(\.z).max() ?? 0
+        let xs = outline.map(\.x)
+        var shift = -((xs.min() ?? 0) + (xs.max() ?? 0)) / 2
+        var distance: Float = 0
+        for _ in 0..<4 {
+            distance = outline.reduce(nearest + height / 2 / up) { max($0, $1.z + abs($1.x + shift) / across) }
+            let seen = outline.map { ($0.x + shift) / (distance - $0.z) }
+            shift -= ((seen.min() ?? 0) + (seen.max() ?? 0)) / 2 * (distance - nearest)
+        }
+        distance = outline.reduce(nearest + height / 2 / up) { max($0, $1.z + abs($1.x + shift) / across) }
+        return (distance, shift)
     }
 
     /// Shows a panel's live picture: `source` is its framebuffer, as an sRGB
@@ -139,9 +169,21 @@ public final class Duo3DRenderer {
         rest.orientation = yaw * simd_quatf(angle: .pi / 2, axis: [1, 0, 0])
         wrapper.orientation = simd_quatf(angle: Float(roll * .pi / 180), axis: [0, 0, 1])
         let fold = simd_quatf(angle: raise, axis: [0, 1, 0])
-        let half = flatBounds.extents.x / 2
-        let xs = [fold.act([-half, 0, 0]), SIMD3<Float>(0, 0, 0), [half, 0, 0]].map { yaw.act($0).x }
-        rest.position.x = -((xs.min() ?? 0) + (xs.max() ?? 0)) / 2
+        // Framed around the device as it is folded, at the frame's own shape:
+        // closed, open or anywhere between, it fills the frame. Each leaf is
+        // a slab from the hinge to its edge, as thick as the open device; the
+        // hinge's spine stands a quarter of that out behind it (as measured on
+        // V68.usdz).
+        let half = flatBounds.extents.x / 2, thickness = flatBounds.extents.z
+        let outline = [fold.act([-half, 0, 0]), SIMD3<Float>(half, 0, 0)].flatMap { edge -> [(x: Float, z: Float)] in
+            let end = yaw.act(edge), along = simd_normalize(SIMD2(end.x, end.z))
+            let normal = SIMD2(-along.y, along.x) * thickness / 2
+            return [-along * thickness / 4, SIMD2(end.x, end.z)].flatMap { [$0 + normal, $0 - normal] }.map { (x: $0.x, z: $0.y) }
+        }
+        let framing = Self.framing(outline: outline, height: flatBounds.extents.y, aspect: Float(width) / Float(height), fieldOfView: fieldOfView)
+        rest.position.x = framing.shift
+        cameraDistance = framing.distance
+        camera.position = [0, 0, cameraDistance]
         // Skinning settles an update after the clip's time moves.
         let passes = lastAngle == angle ? 1 : 2
         lastAngle = angle
@@ -156,6 +198,14 @@ public final class Duo3DRenderer {
         }
         let pieces = projections[panel]?.pieces(cameraDistance: cameraDistance, fieldOfView: fieldOfView, aspect: Float(width) / Float(height)) ?? []
         return Frame(texture: output, pieces: pieces)
+    }
+
+    private static func frame(on device: MTLDevice, width: Int, height: Int) throws -> (MTLTexture, RealityRenderer.CameraOutput) {
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm_srgb, width: width, height: height, mipmapped: false)
+        descriptor.storageMode = .private
+        descriptor.usage = [.renderTarget, .shaderRead]
+        guard let output = device.makeTexture(descriptor: descriptor) else { throw Duo3DError("Cannot allocate the 3D frame") }
+        return (output, try RealityRenderer.CameraOutput(.singleProjection(colorTexture: output)))
     }
 
     private func lowLevelTexture(for panel: Panel, width: Int, height: Int) throws -> LowLevelTexture {

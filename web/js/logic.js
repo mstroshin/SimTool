@@ -606,6 +606,13 @@ function pictureRatio(raw, rotation) {
   }
 }
 
+// Whether 3D frames asked for a stage `requested` wide per unit of height
+// would sit in one `current` wide with more than a sliver of it left empty.
+function stageReframes(requested, current) {
+  if (!(requested > 0) || !(current > 0)) return false;
+  return Math.abs(current / requested - 1) >= 0.04;
+}
+
 // `rgb(27, 29, 32)` → `1b1d20`, the stage's colour for the 3D frame's backdrop.
 function cssColorHex(color) {
   const parts = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(color || "");

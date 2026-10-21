@@ -64,13 +64,6 @@
         <button class="tb-btn" type="button" id="screenshotButton" aria-label="Save screenshot" data-tip="Save screenshot" data-key="⌘S" aria-keyshortcuts="Meta+S"><svg class="ic" aria-hidden="true"><use href="#i-camera"/></svg></button>
         <button class="tb-btn" type="button" id="shakeButton" aria-label="Shake" data-tip="Shake" data-key="⌃⌘Z" aria-keyshortcuts="Control+Meta+Z"><svg class="ic" aria-hidden="true"><use href="#i-shake"/></svg></button>
         <button class="tb-btn" type="button" id="softKeyboardButton" aria-label="Show or hide the software keyboard" data-tip="Software keyboard — ⌘K while typing into the device"><svg class="ic" aria-hidden="true"><use href="#i-keyboard"/></svg></button>
-        <span class="tb-fold" id="foldGroup" role="group" aria-label="Fold" hidden>
-          <span class="tb-sep" aria-hidden="true"></span>
-          <button class="tb-btn" type="button" id="foldClosed" data-pose="closed" aria-pressed="false" aria-label="Fold closed" data-tip="Fold closed — the cover lights"><svg class="ic" aria-hidden="true"><use href="#i-fold-closed"/></svg></button>
-          <button class="tb-btn" type="button" id="foldBook" data-pose="book" aria-pressed="false" aria-label="Fold to book" data-tip="Book, 130° — the inner panel lights"><svg class="ic" aria-hidden="true"><use href="#i-fold-book"/></svg></button>
-          <button class="tb-btn" type="button" id="foldOpen" data-pose="open" aria-pressed="false" aria-label="Fold open" data-tip="Open flat, 180°"><svg class="ic" aria-hidden="true"><use href="#i-fold-open"/></svg></button>
-          <button class="tb-btn" type="button" id="view3dButton" aria-pressed="false" aria-label="3D preview" data-tip="Show the device in 3D"><svg class="ic" aria-hidden="true"><use href="#i-cube"/></svg></button>
-        </span>
         <span class="tb-sep" aria-hidden="true"></span>
         <span class="tb-app" id="appName" title="App under test">No app</span>
         <button class="tb-btn" type="button" id="terminateButton" aria-label="Terminate app" data-tip="Terminate app"><svg class="ic" aria-hidden="true"><use href="#i-stop"/></svg></button>
@@ -130,6 +123,15 @@
             <div id="scrubTicks"></div>
             <span class="scrub-head" id="scrubHead"></span>
           </div>
+        </div>
+
+        <div class="fold-bar" id="foldGroup" role="toolbar" aria-label="Fold" hidden>
+          <span class="seg" role="group" aria-label="Pose">
+            <button type="button" id="foldClosed" data-pose="closed" aria-pressed="false" data-tip="Fold closed — the cover lights"><svg class="ic ic-sm" aria-hidden="true"><use href="#i-fold-closed"/></svg>Closed</button>
+            <button type="button" id="foldBook" data-pose="book" aria-pressed="false" data-tip="Book, 130° — the inner panel lights"><svg class="ic ic-sm" aria-hidden="true"><use href="#i-fold-book"/></svg>Book</button>
+            <button type="button" id="foldOpen" data-pose="open" aria-pressed="false" data-tip="Open flat, 180°"><svg class="ic ic-sm" aria-hidden="true"><use href="#i-fold-open"/></svg>Open</button>
+          </span>
+          <button class="pill" type="button" id="view3dButton" aria-pressed="false" data-tip="Show the device in 3D"><svg class="ic ic-sm" aria-hidden="true"><use href="#i-cube"/></svg>3D</button>
         </div>
 
         <div class="readout mono" id="readout" aria-hidden="true">

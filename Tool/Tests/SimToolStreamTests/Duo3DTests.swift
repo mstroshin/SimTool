@@ -21,17 +21,42 @@ final class AVCCEnvelopeReaderTests: XCTestCase {
 /// it is never part of SimTool — and checks the projection lands where the
 /// picture does.
 final class Duo3DRendererTests: XCTestCase {
+    func testTheFrameTakesTheStagesShapeAtTheEncodersSize() throws {
+        guard #available(macOS 15.0, *) else { throw XCTSkip("RealityKit renders offscreen from macOS 15") }
+        XCTAssertTrue(Duo3DRenderer.frameSize(aspect: 0.6) == (768, 1280), "a tall stage")
+        XCTAssertTrue(Duo3DRenderer.frameSize(aspect: 1.6) == (1280, 800), "a wide one")
+        XCTAssertTrue(Duo3DRenderer.frameSize(aspect: 1) == (1280, 1280))
+        XCTAssertTrue(Duo3DRenderer.frameSize(aspect: 0.01) == (426, 1280), "a sliver of a stage gets a third")
+        XCTAssertTrue(Duo3DRenderer.frameSize(aspect: .nan) == (1280, 1280))
+        XCTAssertTrue(Duo3DRenderer.frameSize(aspect: 0.777) == (994, 1280), "even sides")
+    }
+
+    // Closed, in book and open, on a tall stage and on a wide one, the device
+    // fills the frame up to its margin and none of it is cut off.
+    @MainActor
+    func testTheDeviceFillsTheFrameHoweverItIsFolded() async throws {
+        guard #available(macOS 15.0, *) else { throw XCTSkip("RealityKit renders offscreen from macOS 15") }
+        let renderer = try await Duo3DRenderer(modelURL: try Self.model(), dark: true, width: 240, height: 400)
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        for (width, height) in [(240, 400), (400, 240)] {
+            try renderer.resize(width: width, height: height)
+            for hinge in [0.0, 130, 180] {
+                _ = try await renderer.render(hinge: hinge, panel: hinge < 90 ? .cover : .inner)
+                let frame = try await renderer.render(hinge: hinge, panel: hinge < 90 ? .cover : .inner)
+                XCTAssertEqual([frame.texture.width, frame.texture.height], [width, height])
+                let box = try XCTUnwrap(Self.drawn(try Self.read(frame.texture, device: device), width: width, height: height), "\(hinge)° drew nothing")
+                let shown = "\(hinge)° on \(width)×\(height): \(box)"
+                XCTAssertGreaterThan(max(box.width / Double(width), box.height / Double(height)), 0.87, "fills the frame — \(shown)")
+                let edge = 0.01 * Double(max(width, height))
+                XCTAssertTrue(box.minX > edge && box.minY > edge && box.maxX < Double(width) - edge && box.maxY < Double(height) - edge, "clear of the edges — \(shown)")
+            }
+        }
+    }
+
     @MainActor
     func testTheProjectionLandsWhereThePanelsPictureIsDrawn() async throws {
         guard #available(macOS 15.0, *) else { throw XCTSkip("RealityKit renders offscreen from macOS 15") }
-        let layout = SimulatorDisplayLayout(displays: [
-            SimulatorDisplay(id: "primary", screenID: 1, role: "cover", width: 1398, height: 2034, scale: 3),
-            SimulatorDisplay(id: "primary-1", screenID: 3, role: "inner", width: 2007, height: 2853, scale: 3),
-        ], productClass: "V68")
-        guard let model = Duo3DModel.locate(layout: layout, developerDir: DeveloperFrameworks.developerDir()).url else {
-            throw XCTSkip("the selected Xcode has no iPhone Duo model")
-        }
-        let renderer = try await Duo3DRenderer(modelURL: model, dark: true, width: 400, height: 360)
+        let renderer = try await Duo3DRenderer(modelURL: try Self.model(), dark: true, width: 400, height: 360)
         let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
         // The inner panel's framebuffer: red on its top half, blue below.
         try renderer.show(try Self.halves(device: device, width: 2007, height: 2853), on: .inner)
@@ -52,6 +77,30 @@ final class Duo3DRendererTests: XCTestCase {
             }
             XCTAssertLessThan(green, 120)
         }
+    }
+
+    private static func model() throws -> URL {
+        let layout = SimulatorDisplayLayout(displays: [
+            SimulatorDisplay(id: "primary", screenID: 1, role: "cover", width: 1398, height: 2034, scale: 3),
+            SimulatorDisplay(id: "primary-1", screenID: 3, role: "inner", width: 2007, height: 2853, scale: 3),
+        ], productClass: "V68")
+        guard let model = Duo3DModel.locate(layout: layout, developerDir: DeveloperFrameworks.developerDir()).url else {
+            throw XCTSkip("the selected Xcode has no iPhone Duo model")
+        }
+        return model
+    }
+
+    /// The box around what was drawn: the frame is clear where the device is not.
+    private static func drawn(_ bytes: [UInt8], width: Int, height: Int) -> CGRect? {
+        var (minX, minY, maxX, maxY) = (width, height, -1, -1)
+        for row in 0..<height {
+            for column in 0..<width where bytes[(row * width + column) * 4 + 3] > 16 {
+                minX = min(minX, column); maxX = max(maxX, column)
+                minY = min(minY, row); maxY = max(maxY, row)
+            }
+        }
+        guard maxX >= minX, maxY >= minY else { return nil }
+        return CGRect(x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1)
     }
 
     private static func halves(device: MTLDevice, width: Int, height: Int) throws -> MTLTexture {
