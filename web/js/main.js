@@ -20,8 +20,13 @@ function applyConfig(config) {
   $("deviceName").textContent = deviceInfo.name || "Simulator";
   $("deviceRuntime").textContent = runtimeName(config.runtime);
   document.title = (deviceInfo.name ? deviceInfo.name + " — " : "") + "SimTool";
-  $("appName").textContent = deviceInfo.app || "No app";
-  $("appName").title = deviceInfo.app ? "App under test: " + deviceInfo.app : "No app attached — start the server with --app <bundle-id>";
+  // The app is named once, in the status bar; the toolbar's app buttons say which app they act on.
+  $("sbApp").title = deviceInfo.app ? "App under test" : "Start the server with --app <bundle-id>";
+  for (const [id, verb] of [["terminateButton", "Terminate"], ["relaunchButton", "Relaunch"]]) {
+    const label = verb + " " + (deviceInfo.app || "the app");
+    $(id).dataset.tip = label;
+    $(id).setAttribute("aria-label", label);
+  }
   $("sbDevice").textContent = [deviceInfo.name, runtimeName(config.runtime)].filter(Boolean).join(" · ");
   $("sbUdid").textContent = deviceInfo.udid ? deviceInfo.udid.slice(0, 4) + "…" + deviceInfo.udid.slice(-4) : "";
   $("sbServer").textContent = location.host;
@@ -40,6 +45,7 @@ function forgetServer() {
   resetLogs();
   resetState();
   resetActivity();
+  applyRecordingTopic({});
   ax.tree = null;
   networkLastPayload = "";
   testsLastSessions = "";
@@ -88,6 +94,8 @@ poller.add("ax", AX_CHECK_MS, loadAx, () => activeTab("ax") && app.dataset.mode 
 // Every tab needs it — the marks on the screen and who drives the device — so
 // while the stream is down it is polled quickly.
 poller.add("activity", 500, pollActivity, polling);
+// A recording in progress shows in every viewer; without the stream it is asked for.
+poller.add("recording", 2000, loadRecording, polling);
 
 onReconnect(async () => {
   try { await bootstrap(); } catch (_) {}
@@ -107,6 +115,7 @@ renderTheme();
 setInspectorOpen(inspector.open);
 setTab(inspector.tab);
 updateKeyboardIndicator();
+renderCapture();
 startInspectorEvents();
 runStream();
 bootstrap().catch((error) => setMessage("Could not read the server's configuration: " + error.message, "err")).then(loadScreenPoints);

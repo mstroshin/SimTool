@@ -39,6 +39,7 @@ function startInspectorEvents() {
   on("launches", (payload) => { applyLaunchesTopic(payload); renderSoon(renderNetwork); renderSoon(renderLogs); });
   on("activity", (payload) => applyActivityTopic(payload, false));
   on("device", applyDeviceTopic);
+  on("recording", applyRecordingTopic);
 }
 
 // The device's screens changed: a foldable folded, or a screen turned.
@@ -61,6 +62,7 @@ function applySnapshot(snapshot) {
   applyTestsTopic(snapshot.tests || {}, true);
   applyActivityTopic(snapshot.activity || {}, true);
   applyDeviceTopic(snapshot.device);
+  applyRecordingTopic(snapshot.recording || {});
   // A restarted server captures the app's logs once asked again.
   ensureLogsCapture().catch(() => renderLogs());
 }

@@ -79,6 +79,8 @@ public final class StreamServer: @unchecked Sendable {
     /// Agent test sessions: timeline + screen recording, persisted on disk.
     private let testSessions: TestSessionController
     private let testRuns: TestRunController
+    /// Screen recordings started from the viewer.
+    private let screenRecordings: ScreenRecordingController
     /// What was done to the device and by whom, for the viewer's activity feed.
     private let activity = DeviceActivityLog()
     /// The device's screens and the lit one, once its device type is read.
@@ -128,6 +130,14 @@ public final class StreamServer: @unchecked Sendable {
             device: config.device,
             // A foldable's recording follows the screen lit when it starts.
             makeRecorder: { SimctlVideoRecorder(display: { displays.activeDisplay?.id }) }
+        )
+        let events = inspectorEvents
+        self.screenRecordings = ScreenRecordingController(
+            directory: FileManager.default.temporaryDirectory.appendingPathComponent("simtool-recordings-\(config.port)", isDirectory: true),
+            deviceUDID: config.device.udid,
+            display: { displays.activeDisplay?.id },
+            makeRecorder: { masked in SimctlVideoRecorder(display: { displays.activeDisplay?.id }, masked: masked) },
+            onChange: { events.publish(.recording, $0) }
         )
         self.testRuns = TestRunController(
             testsRoot: config.testsRoot,
@@ -270,6 +280,7 @@ public final class StreamServer: @unchecked Sendable {
         testDefinitionsWatcher = nil
         closeLiveInputs()
         shutdownTestSessions()
+        shutdownScreenRecordings()
         stopLogCapture()
         frameCapture.stop()
         h264Encoder.stop()
@@ -758,13 +769,63 @@ public final class StreamServer: @unchecked Sendable {
             } catch {
                 return self.errorResponse(error, statusCode: 400, reason: "Bad Request")
             }
+            // `bezel=1`: the device drawn around the screen, as Simulator shows it.
+            let bezel = request.queryFlag("bezel")
             do {
                 let data = try self.waitForAsync {
-                    try await SimulatorScreenshotClient.png(deviceUDID: self.config.device.udid, display: display?.id, maxDimension: maxDimension)
+                    let png = try await SimulatorScreenshotClient.png(deviceUDID: self.config.device.udid, display: display?.id, maxDimension: bezel ? nil : maxDimension, masked: bezel)
+                    guard bezel else { return png }
+                    let framed = try self.framedScreenshot(png: png, display: display)
+                    return try maxDimension.map { try SimulatorScreenshotClient.downscaled(pngData: framed, maxDimension: $0) } ?? framed
                 }
                 return self.dataResponse(data, contentType: "image/png")
             } catch {
                 return self.errorResponse(error)
+            }
+        }
+
+        // Screen recordings started from the viewer: one at a time, the newest
+        // kept to download until the next one starts.
+        server.GET["/api/v1/recording"] = { _ in
+            do { return try self.jsonEncodedResponse(self.screenRecordings.topic) }
+            catch { return self.errorResponse(error) }
+        }
+
+        // `{"bezel": true}`: saved with the device around the screen, as a
+        // screenshot with `bezel=1` is.
+        server.POST["/api/v1/recording"] = { request in
+            let data = Data(request.body)
+            let bezel = (data.isEmpty ? nil : try? JSON.decoder.decode(StartRecordingBody.self, from: data))?.bezel == true
+            do {
+                let framer = bezel ? Self.bezelFramer(display: self.displays.shownDisplay) : nil
+                return try self.jsonEncodedResponse(try self.screenRecordings.start(framer: framer))
+            } catch ScreenRecordingError.alreadyRecording {
+                return self.errorResponse(ScreenRecordingError.alreadyRecording, statusCode: 409, reason: "Conflict")
+            } catch {
+                return self.errorResponse(error)
+            }
+        }
+
+        server.POST["/api/v1/recording/stop"] = { _ in
+            let recordings = self.screenRecordings
+            do {
+                let recording: ScreenRecording = try self.waitForAsync { try await recordings.stop() }
+                return try self.jsonEncodedResponse(recording)
+            } catch ScreenRecordingError.notRecording {
+                return self.errorResponse(ScreenRecordingError.notRecording, statusCode: 409, reason: "Conflict")
+            } catch {
+                return self.errorResponse(error)
+            }
+        }
+
+        server.GET["/api/v1/recording/:id/video"] = { request in
+            guard let id = request.params[":id"], !id.isEmpty else {
+                return self.errorResponse(SimToolError("Missing recording id"), statusCode: 400, reason: "Bad Request")
+            }
+            do {
+                return self.videoFileResponse(try self.screenRecordings.videoFile(id: id), rangeHeader: request.headers["range"])
+            } catch {
+                return self.errorResponse(error, statusCode: 404, reason: "Not Found")
             }
         }
 
@@ -880,7 +941,8 @@ public final class StreamServer: @unchecked Sendable {
                 let page = activity.query(since: nil)
                 return ActivityTopicPayload(entries: page.entries, revision: page.revision)
             }(),
-            device: displays.topic
+            device: displays.topic,
+            recording: screenRecordings.topic
         )
     }
 
@@ -1473,6 +1535,9 @@ public final class StreamServer: @unchecked Sendable {
             if name.lowercased() == "home" {
                 return try await ProcessRunner.runXcrun(["simctl", "launch", config.device.udid, "com.apple.springboard"])
             }
+            if name.lowercased() == "app-switcher" {
+                return try await SimulatorInputClient.openAppSwitcher(deviceUDID: config.device.udid)
+            }
             return try await SimulatorInputClient.button(name, deviceUDID: config.device.udid)
         default:
             throw SimToolError("Unsupported input action: \(action.isEmpty ? "<missing>" : action)")
@@ -1588,6 +1653,41 @@ public final class StreamServer: @unchecked Sendable {
         }
         semaphore.wait()
         return try box.result!.get()
+    }
+
+    private struct StartRecordingBody: Decodable { var bezel: Bool? }
+
+    /// Puts the device around a recording of `display`.
+    static func bezelFramer(display: SimulatorDisplay?) -> ScreenRecordingController.Framer {
+        { input, output in
+            try await BezelVideo.frame(input: input, output: output) { pixels in bezel(for: display, pixels: pixels) }
+        }
+    }
+
+    /// The bezel around a picture of `pixels` of `display` — the screen a
+    /// screenshot or a recording shows. Without the device type read yet, a
+    /// drawn frame at the phones' 3× scale.
+    static func bezel(for display: SimulatorDisplay?, pixels: CGSize) -> DeviceBezel {
+        let scale = display.map { CGFloat($0.scale) }.flatMap { $0 > 0 ? $0 : nil } ?? 3
+        return DeviceBezel(screen: CGSize(width: pixels.width / scale, height: pixels.height / scale), cornerRadii: display?.cornerRadii, chrome: display?.chrome)
+    }
+
+    /// A screenshot with the device drawn around it.
+    private func framedScreenshot(png: Data, display: SimulatorDisplay?) throws -> Data {
+        guard let image = DeviceBezel.image(png: png) else { throw SimToolError("The screenshot is not a decodable image") }
+        let bezel = Self.bezel(for: display ?? displays.shownDisplay, pixels: CGSize(width: image.width, height: image.height))
+        guard let framed = bezel.compose(screenshot: image), let data = DeviceBezel.png(framed) else { throw SimToolError("Could not draw the device bezel") }
+        return data
+    }
+
+    private func shutdownScreenRecordings() {
+        let semaphore = DispatchSemaphore(value: 0)
+        let controller = screenRecordings
+        Task {
+            await controller.shutdown()
+            semaphore.signal()
+        }
+        _ = semaphore.wait(timeout: .now() + .seconds(8))
     }
 
     private func shutdownTestSessions() {

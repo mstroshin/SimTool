@@ -83,4 +83,12 @@ final class SimctlVideoRecorderTests: XCTestCase {
             ["simctl", "io", "U", "recordVideo", "--codec", "h264", "--force", "/tmp/v.mp4"]
         )
     }
+
+    // A recording that gets the bezel records the glass too: the corners and the Dynamic Island in black.
+    func testARecordingForTheBezelIsMasked() {
+        XCTAssertEqual(
+            SimctlVideoRecorder.arguments(deviceUDID: "U", display: nil, outputFile: URL(fileURLWithPath: "/tmp/v.mp4"), masked: true),
+            ["simctl", "io", "U", "recordVideo", "--codec", "h264", "--mask=black", "--force", "/tmp/v.mp4"]
+        )
+    }
 }

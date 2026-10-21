@@ -114,14 +114,25 @@ async function copyText(text, label) {
 // ---- Menus (APG menu: arrows move, Enter runs, Esc returns focus) ----
 
 let menuOpener = null;
-// items: [{ icon, label, kbd, run, tone: "course"|"danger", disabled }] or "-" for a rule.
+// items: [{ icon, label, kbd, run, tone: "course"|"danger", disabled }], "-" for a rule, or
+// { caption } naming the items under it. An item with `checked` is a switch that says
+// whether it is on; with `radio` too, it is one choice of several, ticked when chosen.
 function openMenu(x, y, items, opener) {
   const menu = $("menu");
+  if (!menu.hidden) setMenuExpanded(false);
   menu.innerHTML = "";
   for (const item of items) {
     if (item === "-") { menu.append(el("hr", { role: "separator" })); continue; }
-    const button = el("button", { type: "button", role: "menuitem", tabindex: "-1", class: item.tone ? "m-" + item.tone : null, disabled: item.disabled },
-      el("span", { html: icon(item.icon || "chev-r") }), el("span", { text: item.label }), item.kbd ? el("kbd", { text: item.kbd }) : null);
+    if (item.caption) { menu.append(el("div", { class: "m-caption", role: "presentation", text: item.caption })); continue; }
+    const choice = item.checked != null;
+    const button = el("button", {
+      type: "button", role: choice ? (item.radio ? "menuitemradio" : "menuitemcheckbox") : "menuitem", tabindex: "-1",
+      class: [item.tone ? "m-" + item.tone : "", item.radio ? "m-radio" : ""].join(" ").trim() || null,
+      disabled: item.disabled, "aria-checked": choice ? String(!!item.checked) : null
+    },
+      el("span", { html: icon(item.radio ? "check" : item.icon || "chev-r") }), el("span", { text: item.label }),
+      choice && !item.radio ? el("span", { class: "m-switch", "aria-hidden": "true" }) : null,
+      item.kbd ? el("kbd", { text: item.kbd }) : null);
     button.addEventListener("click", () => { closeMenu(); item.run(); });
     menu.append(button);
   }
@@ -130,17 +141,40 @@ function openMenu(x, y, items, opener) {
   menu.style.left = Math.max(6, Math.min(x, innerWidth - rect.width - 6)) + "px";
   menu.style.top = Math.max(6, Math.min(y, innerHeight - rect.height - 6)) + "px";
   menuOpener = opener || document.activeElement;
+  setMenuExpanded(true);
   const first = menu.querySelector("button:not([disabled])");
   if (first) first.focus();
+}
+
+// A button that opens a menu says whether it is open.
+function setMenuExpanded(open) {
+  if (menuOpener && menuOpener.getAttribute && menuOpener.getAttribute("aria-haspopup") === "menu") menuOpener.setAttribute("aria-expanded", String(open));
 }
 
 function closeMenu(restoreFocus) {
   const menu = $("menu");
   if (menu.hidden) return false;
   menu.hidden = true;
+  setMenuExpanded(false);
   if (restoreFocus && menuOpener && menuOpener.focus) menuOpener.focus();
   menuOpener = null;
   return true;
+}
+
+// A toolbar button whose menu drops under it: a click, Enter, Space or ↓ opens
+// it, and a click on the open menu's button closes it. `items()` is read at
+// every opening, so the menu shows the state of the moment.
+function wireMenuButton(button, items) {
+  button.addEventListener("click", () => {
+    if (!$("menu").hidden && menuOpener === button) { closeMenu(); return; }
+    const rect = button.getBoundingClientRect();
+    openMenu(rect.left, rect.bottom + 4, items(), button);
+  });
+  button.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowDown") return;
+    event.preventDefault();
+    if ($("menu").hidden || menuOpener !== button) button.click();
+  });
 }
 
 $("menu").addEventListener("keydown", (event) => {

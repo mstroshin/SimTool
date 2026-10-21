@@ -5,11 +5,14 @@
 function paletteCommands() {
   const commands = [
     ["Device", "home", "Home", "⇧⌘H", pressHome],
+    ["Device", "home", "Open the app switcher", "⌃⇧⌘H", openAppSwitcher],
     ["Device", "camera", "Save screenshot", "⌘S", saveScreenshot],
     ["Device", "copy", "Copy screenshot", "", copyScreenshot],
+    capture.recording ? ["Device", "stop", "Stop recording and save the video", "⌘R", stopRecording] : ["Device", "record", "Record video", "⌘R", startRecording],
+    ["Device", "bezel", capture.bezel ? "Screenshots and videos: the screen only" : "Screenshots and videos: with the device bezel", "", () => setCaptureBezel(!capture.bezel)],
     ["Device", "shake", "Shake", "⌃⌘Z", pressShake],
     ["Device", "keyboard", "Show or hide the software keyboard", keyboardBridge.enabled ? "⌘K" : "", toggleSoftwareKeyboard],
-    ["Device", "keyboard", keyboardBridge.enabled ? "Stop typing with the Mac keyboard" : "Type with the Mac keyboard", "⇧⌘K", () => setKeyboardMode(!keyboardBridge.enabled)],
+    ["Device", "laptop", keyboardBridge.enabled ? "Disconnect the Mac keyboard" : "Connect the Mac keyboard — type into the simulator", "⇧⌘K", () => setKeyboardMode(!keyboardBridge.enabled)],
     ["Device", "paste", "Paste the Mac clipboard", "⌘V", pasteFromClipboard],
     ["Device", "photo", "Add files to Photos…", "", () => $("photosFile").click()]
   ];
@@ -149,7 +152,7 @@ function showShortcuts() {
   openPopover($("paletteButton"),
     "<p><b>⇧⌘P</b> commands · <b>⌥1–5</b> inspector tabs · <b>⌥⌘0</b> show or hide the inspector · <b>/</b> filter</p>" +
     "<p><b>↑ ↓</b> move in a list · <b>Enter</b> open · <b>Esc</b> close · <b>⇧F10</b> the row's menu</p>" +
-    "<p><b>⇧⌘H</b> Home · <b>⌘S</b> screenshot · <b>⌃⌘Z</b> shake · <b>⇧⌘K</b> type with the Mac keyboard (⇧⌘K again releases it) · <b>⌘K</b> software keyboard while typing</p>" +
+    "<p><b>⇧⌘H</b> Home · <b>⌃⇧⌘H</b> or a double-click on Home: the app switcher · <b>⌘S</b> screenshot · <b>⌘R</b> record video, again to save it · <b>⌃⌘Z</b> shake · <b>⇧⌘K</b> connect the Mac keyboard (⇧⌘K again releases it) · <b>⌘K</b> software keyboard while typing</p>" +
     "<p><b>⌥-drag</b> pinch or rotate · <b>⌥⇧-drag</b> two-finger pan · the wheel scrolls · <b>P</b> picks elements in Accessibility · <b>⌘↩</b> runs the selected test</p>");
 }
 
@@ -158,7 +161,7 @@ function showShortcuts() {
 function isViewerChord(event) {
   const meta = event.metaKey || event.ctrlKey;
   return (meta && event.shiftKey && !event.altKey && (event.code === "KeyP" || event.code === "KeyH")) ||
-    (event.metaKey && !event.shiftKey && !event.altKey && !event.ctrlKey && event.code === "KeyS") ||
+    (event.metaKey && !event.shiftKey && !event.altKey && !event.ctrlKey && (event.code === "KeyS" || event.code === "KeyR")) ||
     (event.metaKey && event.ctrlKey && !event.shiftKey && event.code === "KeyZ") ||
     (event.metaKey && event.altKey && event.code === "Digit0");
 }
@@ -175,8 +178,10 @@ document.addEventListener("keydown", (event) => {
     if (app.dataset.mode === "replay") { event.preventDefault(); exitReplay(); return; }
     return;
   }
+  if (event.metaKey && event.ctrlKey && event.shiftKey && event.code === "KeyH") { event.preventDefault(); openAppSwitcher(); return; }
   if (meta && event.shiftKey && event.code === "KeyH") { event.preventDefault(); pressHome(); return; }
   if (event.metaKey && !event.shiftKey && !event.altKey && !event.ctrlKey && event.code === "KeyS") { event.preventDefault(); saveScreenshot(); return; }
+  if (event.metaKey && !event.shiftKey && !event.altKey && !event.ctrlKey && event.code === "KeyR") { event.preventDefault(); if (!event.repeat) toggleRecording(); return; }
   if (event.metaKey && event.ctrlKey && event.code === "KeyZ") { event.preventDefault(); pressShake(); return; }
   if (event.metaKey && event.altKey && event.code === "Digit0") { event.preventDefault(); setInspectorOpen(!inspector.open); return; }
   if (event.altKey && !meta && /^Digit[1-6]$/.test(event.code)) { event.preventDefault(); openTab(TABS[Number(event.code.slice(5)) - 1]); return; }
@@ -188,9 +193,10 @@ document.addEventListener("keydown", (event) => {
   if (event.key === " " && app.dataset.mode === "replay" && event.target === document.body) { event.preventDefault(); $("playPause").click(); }
 });
 
-// A click outside closes menus and popovers.
+// A click outside closes menus and popovers; the button of an open menu closes it itself.
 document.addEventListener("mousedown", (event) => {
-  if (!$("menu").hidden && !$("menu").contains(event.target)) closeMenu();
+  const onMenuButton = menuOpener && menuOpener.contains && menuOpener.contains(event.target) && menuOpener.getAttribute("aria-haspopup") === "menu";
+  if (!$("menu").hidden && !$("menu").contains(event.target) && !onMenuButton) closeMenu();
   if (!$("popover").hidden && !$("popover").contains(event.target) && !event.target.closest("[aria-haspopup=dialog]")) closePopover();
 });
 window.addEventListener("resize", () => { closeMenu(); closePopover(); });

@@ -508,11 +508,13 @@ public enum SimulatorLogsClient {
 public enum SimulatorScreenshotClient {
     /// `display` names one screen of a device with several (simctl's
     /// `primary-1`, or a screen number): simctl will not choose between them.
-    public static func png(deviceUDID: String, display: String? = nil, maxDimension: Int? = nil) async throws -> Data {
+    /// `masked` blacks out what the device's glass hides — its rounded corners
+    /// and the Dynamic Island — as a picture of the device shows them.
+    public static func png(deviceUDID: String, display: String? = nil, maxDimension: Int? = nil, masked: Bool = false) async throws -> Data {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("simtool-screenshot-\(UUID().uuidString).png")
         defer { try? FileManager.default.removeItem(at: url) }
-        let output = try await ProcessRunner.runXcrun(arguments(deviceUDID: deviceUDID, display: display, file: url.path))
+        let output = try await ProcessRunner.runXcrun(arguments(deviceUDID: deviceUDID, display: display, file: url.path, masked: masked))
         guard output.status == 0 else {
             throw SimToolError(output.stderrString.isEmpty ? "simctl screenshot failed" : output.stderrString)
         }
@@ -522,8 +524,8 @@ public enum SimulatorScreenshotClient {
         return try downscaled(pngData: data, maxDimension: maxDimension)
     }
 
-    static func arguments(deviceUDID: String, display: String?, file: String) -> [String] {
-        ["simctl", "io", deviceUDID, "screenshot", "--type=png"] + (display.map { ["--display=\($0)"] } ?? []) + [file]
+    static func arguments(deviceUDID: String, display: String?, file: String, masked: Bool = false) -> [String] {
+        ["simctl", "io", deviceUDID, "screenshot", "--type=png"] + (display.map { ["--display=\($0)"] } ?? []) + (masked ? ["--mask=black"] : []) + [file]
     }
 
     /// Scales the PNG down so its longest edge is at most `maxDimension`,

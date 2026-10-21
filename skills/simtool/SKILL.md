@@ -270,10 +270,14 @@ server (`GET /api/v1/screenshot`, see the viewer below) or use
 frame is usually the splash — capture again to see the settled screen. An iPhone
 Duo has two screens and simctl refuses to choose: pass `--display=primary` (the
 cover) or `--display=primary-1` (the inner panel); the server's route takes the
-lit one, or `?display=cover|inner`.
+lit one, or `?display=cover|inner`. `?bezel=1` draws the device around the screen (a
+picture for people, not for reading the UI). A video of the screen: `POST
+/api/v1/recording` (`{"bezel": true}` optional), then `POST
+/api/v1/recording/stop` and download `GET /api/v1/recording/<id>/video`.
 
 ### Input · accessibility · logs
-- `simtool input …` — touches, typing, hardware buttons. Coordinates are
+- `simtool input …` — touches, typing, hardware buttons (`button app-switcher`
+  presses Home twice and opens the app switcher). Coordinates are
   screen **points** (the frames `simtool ax` reports) — on an iPhone Duo, points
   of the lit panel as its screenshot reads (the open inner panel is 951 × 669,
   landscape) —, and every touch is played by SimTool's own HID helper as a

@@ -244,29 +244,208 @@ function createList(container, options) {
   };
 }
 
-// Column headers that sort; clicking the sorted column flips the direction.
-function createSortHeader(className, columns, state, onChange) {
-  const header = el("div", { class: "thead " + className, role: "row" });
+// A table's header whose columns a person arranges: a column's name dragged
+// moves it, the line at its right edge sizes it (a double-click resets it),
+// the header's menu shows or hides columns — ⌥←/⌥→, ←/→ on an edge and ⇧F10
+// do the same from the keyboard — and the layout is kept per browser under
+// `storeKey`. With `sort`, a click on a column's name sorts by it; on the
+// sorted column it flips the direction.
+//
+// options: { className, spec (see LOG_COLUMNS), storeKey, classes: { key: "c-size num" },
+//   sort: { state: { key, dir }, dirs: { key: default direction }, onChange() }, onLayout() }
+// The rows draw `header.columns`, in that order; `attach(list)` gives the list
+// the grid templates its rows follow (`--cols`, `--cols-n1`… per narrower step).
+function createColumnHeader(options) {
+  const spec = options.spec;
+  const sort = options.sort || null;
+  let layout = columnLayout(spec, stored(options.storeKey, null));
+  let target = null;
+  let drag = null;
+  const header = el("div", { class: "thead col-head " + options.className, role: "row" });
+  const columnOf = (key) => layout.find((column) => column.key === key);
+  const shown = () => layout.filter((column) => !column.hidden);
+
   function render() {
-    header.innerHTML = "";
-    for (const column of columns) {
-      const cell = el("span", { class: "cell " + (column.class || ""), role: "columnheader",
-        "aria-sort": state.key === column.key ? (state.dir > 0 ? "ascending" : "descending") : (column.sort ? "none" : null) });
-      if (column.sort) {
-        const button = el("button", { type: "button", class: state.key === column.key ? "sorted" : null }, column.label);
-        if (state.key === column.key) button.insertAdjacentHTML("beforeend", icon(state.dir > 0 ? "chev-u" : "chev-d", "ic-xs"));
-        button.addEventListener("click", () => {
-          if (state.key === column.key) state.dir = -state.dir; else { state.key = column.key; state.dir = column.defaultDir || 1; }
-          render();
-          onChange();
-        });
-        cell.append(button);
-      } else {
-        cell.textContent = column.label;
-      }
-      header.append(cell);
+    const focused = header.contains(document.activeElement) ? document.activeElement : null;
+    const focusCol = focused && focused.dataset.col, focusEdge = focused && focused.dataset.resize;
+    header.innerHTML = shown().map((column, index) => {
+      const label = escapeHTML(spec.labels[column.key]);
+      const sorts = sort && sort.dirs[column.key] != null;
+      const sorted = sorts && sort.state.key === column.key;
+      const name = sorts
+        ? '<button type="button" class="col-sort' + (sorted ? " sorted" : "") + '" tabindex="-1" data-sort="' + column.key + '">' + label + (sorted ? icon(sort.state.dir > 0 ? "chev-u" : "chev-d", "ic-xs") : "") + "</button>"
+        : '<span class="col-label">' + label + "</span>";
+      return '<span class="cell col ' + (options.classes && options.classes[column.key] || "") + '" role="columnheader" data-col="' + column.key + '" tabindex="' + (index === 0 ? 0 : -1) + '"' +
+        (sorts ? ' aria-sort="' + (sorted ? (sort.state.dir > 0 ? "ascending" : "descending") : "none") + '"' : "") +
+        ' aria-roledescription="movable column" title="' + (sorts ? "Click to sort · " : "") + 'drag to move · ⌥← ⌥→ moves it · right-click for the columns">' + name +
+        (column.key === spec.flex ? "" : '<span class="col-resize" role="separator" aria-orientation="vertical" tabindex="0" data-resize="' + column.key + '" aria-label="Resize ' + label +
+          '" aria-valuemin="' + (spec.min[column.key] || 40) + '" aria-valuemax="640" aria-valuenow="' + column.width + '" title="Drag to resize · double-click resets"></span>') +
+        "</span>";
+    }).join("");
+    const again = focusEdge ? header.querySelector('[data-resize="' + focusEdge + '"]') : focusCol ? header.querySelector('[data-col="' + focusCol + '"]') : null;
+    if (again) {
+      if (focusCol) { header.querySelectorAll("[data-col]").forEach((cell) => { cell.tabIndex = -1; }); again.tabIndex = 0; }
+      again.focus({ preventScroll: true });
     }
   }
+
+  // The widths go to the rows as grid templates; a new order or a column shown re-renders them.
+  function apply({ save, rows } = {}) {
+    if (target) {
+      target.style.setProperty("--cols", gridTemplate(spec, layout, 0));
+      spec.narrow.forEach((_, index) => target.style.setProperty("--cols-n" + (index + 1), gridTemplate(spec, layout, index + 1)));
+    }
+    if (rows !== false) { render(); if (options.onLayout) options.onLayout(); }
+    if (save) store(options.storeKey, layout);
+  }
+
+  function set(next, message) {
+    layout = columnLayout(spec, next);
+    apply({ save: true });
+    if (message) setMessage(message);
+  }
+
+  function moveBy(key, step) {
+    const visible = shown();
+    const target = visible[visible.findIndex((column) => column.key === key) + step];
+    if (!target) return;
+    const before = layout.findIndex((column) => column.key === target.key) + (step > 0 ? 1 : 0);
+    set(moveColumn(layout, key, before), spec.labels[key] + " moved " + (step > 0 ? "right" : "left"));
+  }
+
+  function sortBy(key) {
+    if (!sort || sort.dirs[key] == null) return;
+    if (sort.state.key === key) sort.state.dir = -sort.state.dir; else { sort.state.key = key; sort.state.dir = sort.dirs[key]; }
+    render();
+    sort.onChange();
+  }
+
+  function menu(key) {
+    const visible = shown();
+    const at = visible.findIndex((column) => column.key === key);
+    return [
+      { icon: "chev-r", label: "Move " + spec.labels[key] + " left", kbd: "⌥←", disabled: at <= 0, run: () => moveBy(key, -1) },
+      { icon: "chev-r", label: "Move " + spec.labels[key] + " right", kbd: "⌥→", disabled: at < 0 || at >= visible.length - 1, run: () => moveBy(key, 1) },
+      "-",
+      { caption: "Columns" },
+      ...layout.filter((column) => column.key !== spec.flex).map((column) => ({
+        label: spec.labels[column.key], checked: !column.hidden,
+        run: () => set(layout.map((other) => other.key === column.key ? { ...other, hidden: !other.hidden } : other))
+      })),
+      "-",
+      { icon: "relaunch", label: "Reset the columns", run: () => set(null, "Columns reset") }
+    ];
+  }
+
+  function endDrag(event, cancelled) {
+    const ending = drag;
+    if (!ending) return;
+    drag = null;
+    try { header.releasePointerCapture(event.pointerId); } catch (_) {}
+    header.querySelectorAll(".dragging, .drop-before, .drop-after, .active").forEach((node) => node.classList.remove("dragging", "drop-before", "drop-after", "active"));
+    if (cancelled) apply();
+    else if (ending.kind === "resize") apply({ save: true, rows: false });
+    else if (ending.moved && ending.before != null) set(moveColumn(layout, ending.key, ending.before));
+  }
+
+  // A name moves its column once dragged a few pixels — a plain click sorts —
+  // and the line at its right edge sizes it from the first pixel.
+  header.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    const handle = event.target.closest("[data-resize]");
+    const cell = event.target.closest("[data-col]");
+    if (!handle && !cell) return;
+    event.preventDefault();
+    const key = handle ? handle.dataset.resize : cell.dataset.col;
+    drag = { kind: handle ? "resize" : "move", key, x: event.clientX, width: columnOf(key).width, moved: false, before: null, node: handle || cell, pointerId: event.pointerId };
+    if (handle) {
+      try { header.setPointerCapture(event.pointerId); } catch (_) {}
+      handle.classList.add("active");
+    }
+  });
+  header.addEventListener("pointermove", (event) => {
+    if (!drag) return;
+    if (!event.buttons) { endDrag(event, true); return; }
+    const dx = event.clientX - drag.x;
+    if (drag.kind === "resize") {
+      const column = columnOf(drag.key);
+      column.width = clampColumnWidth(spec, drag.key, drag.width + dx);
+      drag.node.setAttribute("aria-valuenow", String(column.width));
+      apply({ rows: false });
+      return;
+    }
+    if (!drag.moved && Math.abs(dx) < 4) return;
+    if (!drag.moved) {
+      drag.moved = true;
+      drag.node.classList.add("dragging");
+      try { header.setPointerCapture(event.pointerId); } catch (_) {}
+    }
+    const cells = [...header.querySelectorAll("[data-col]")];
+    const over = cells.find((cell) => { const rect = cell.getBoundingClientRect(); return event.clientX < rect.left + rect.width / 2; });
+    drag.before = over ? layout.findIndex((column) => column.key === over.dataset.col) : layout.length;
+    cells.forEach((cell) => cell.classList.remove("drop-before", "drop-after"));
+    if (over) over.classList.add("drop-before"); else cells[cells.length - 1].classList.add("drop-after");
+  });
+  header.addEventListener("pointerup", (event) => endDrag(event, false));
+  header.addEventListener("pointercancel", (event) => endDrag(event, true));
+  header.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-sort]");
+    if (button) sortBy(button.dataset.sort);
+  });
+  header.addEventListener("dblclick", (event) => {
+    const handle = event.target.closest("[data-resize]");
+    if (!handle) return;
+    columnOf(handle.dataset.resize).width = spec.widths[handle.dataset.resize];
+    apply({ save: true });
+  });
+  header.addEventListener("contextmenu", (event) => {
+    const cell = event.target.closest("[data-col]");
+    if (!cell) return;
+    event.preventDefault();
+    event.stopPropagation();
+    openMenu(event.clientX, event.clientY, menu(cell.dataset.col), cell);
+  });
+  header.addEventListener("keydown", (event) => {
+    const handle = event.target.closest("[data-resize]");
+    if (handle) {
+      const step = { ArrowLeft: -1, ArrowRight: 1 }[event.key];
+      if (!step) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const column = columnOf(handle.dataset.resize);
+      column.width = clampColumnWidth(spec, column.key, column.width + step * (event.shiftKey ? 32 : 8));
+      handle.setAttribute("aria-valuenow", String(column.width));
+      apply({ save: true, rows: false });
+      return;
+    }
+    const cell = event.target.closest("[data-col]");
+    if (!cell || event.target !== cell) return;
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      event.preventDefault();
+      event.stopPropagation();
+      const step = event.key === "ArrowRight" ? 1 : -1;
+      if (event.altKey) { moveBy(cell.dataset.col, step); return; }
+      const cells = [...header.querySelectorAll("[data-col]")];
+      const next = cells[cells.indexOf(cell) + step];
+      if (next) { cells.forEach((other) => { other.tabIndex = -1; }); next.tabIndex = 0; next.focus(); }
+    } else if (event.key === "Enter" || event.key === " ") {
+      if (!sort || sort.dirs[cell.dataset.col] == null) return;
+      event.preventDefault();
+      event.stopPropagation();
+      sortBy(cell.dataset.col);
+    } else if (event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey)) {
+      event.preventDefault();
+      event.stopPropagation();
+      openMenuAt(cell, menu(cell.dataset.col));
+    }
+  });
+
   render();
-  return header;
+  return {
+    element: header,
+    get columns() { return shown(); },
+    attach(list) { target = list; apply({ rows: false }); },
+    set,
+    moveBy
+  };
 }

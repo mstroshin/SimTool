@@ -498,7 +498,7 @@ extension Input {
     struct Button: AsyncParsableCommand {
         static let configuration = CommandConfiguration(commandName: "button", abstract: "Press a simulator hardware button.")
 
-        @Argument(help: "home, lock, side-button, siri, apple-pay") var name: String
+        @Argument(help: "home, app-switcher (Home pressed twice), lock, side-button, siri, apple-pay") var name: String
         @Option var device: String?
         @OptionGroup var common: CommonJSON
 
@@ -507,6 +507,8 @@ extension Input {
             let output = try await ActivityReporter(device: device).command(SimulatorInputPayload(action: "button", name: name)) {
                 if name.lowercased() == "home" {
                     try await ProcessRunner.runXcrun(["simctl", "launch", device.udid, "com.apple.springboard"])
+                } else if name.lowercased() == "app-switcher" {
+                    try await SimulatorInputClient.openAppSwitcher(deviceUDID: device.udid)
                 } else {
                     try await SimulatorInputClient.button(name, deviceUDID: device.udid)
                 }

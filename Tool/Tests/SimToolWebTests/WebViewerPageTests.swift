@@ -60,13 +60,87 @@ final class WebViewerPageTests: XCTestCase {
         for route in ["/api/v1/input/stream", "/api/v1/input", "/api/v1/screenshot", "/api/v1/photos", "/api/v1/input/paste-image",
                       "/api/v1/network/events", "/api/v1/mocks", "/api/v1/launches", "/api/v1/logs/capture", "/api/v1/state/events",
                       "/api/v1/ax/tree?raw=1", "/api/v1/tests/definitions", "/api/v1/tests/run", "/api/v1/tests/run/stop", "/config",
-                      "/api/v1/events", "/api/v1/activity"] {
+                      "/api/v1/events", "/api/v1/activity", "/api/v1/recording", "/api/v1/recording/stop"] {
             XCTAssertTrue(page.contains(route), "missing \(route)")
         }
         for action in [#"action: "button", name: "home""#, #"action: "shake""#, #"action: "terminate""#, #"action: "launch""#,
                        #"action: "software-keyboard""#, #"action: "hardware-keyboard", enabled: on"#, #"action: "paste", text"#] {
             XCTAssertTrue(page.contains(action), "missing \(action)")
         }
+    }
+
+    // Screenshots and videos come with the device's bezel or as the screen
+    // alone; a recording runs on the server, so every viewer shows it and a
+    // reload keeps it, and the viewer that stops it downloads the video.
+    func testScreenshotsAndRecordingsTakeTheFrameAndARecordingShowsWhileItRuns() throws {
+        XCTAssertTrue(page.contains(#"id="recordButton" aria-label="Record video" data-tip="Record video" data-key="⌘R""#))
+        XCTAssertTrue(page.contains(#"id="captureMenuButton" aria-haspopup="menu""#))
+        XCTAssertTrue(page.contains(#"wireMenuButton($("captureMenuButton"), captureMenuItems);"#))
+        XCTAssertTrue(page.contains(#"api("/api/v1/screenshot" + (capture.bezel ? "?bezel=1" : ""))"#), "a screenshot takes the frame option")
+        XCTAssertTrue(page.contains(#"body: JSON.stringify({ bezel: capture.bezel })"#), "a recording takes it when it starts")
+        XCTAssertTrue(page.contains(#"bezel: stored("capture.bezel", false)"#), "the option is remembered per browser")
+        let items = try XCTUnwrap(page.range(of: "function captureMenuItems()"))
+        let menu = String(page[items.upperBound...].prefix(1800))
+        XCTAssertTrue(menu.contains(#"label: "Screen only", radio: true"#))
+        XCTAssertTrue(menu.contains(#"label: "With the device bezel", radio: true"#))
+        XCTAssertTrue(page.contains(#"on("recording", applyRecordingTopic);"#), "every viewer hears the recording")
+        XCTAssertTrue(page.contains("applyRecordingTopic(snapshot.recording || {});"))
+        XCTAssertTrue(page.contains(#"saveFile("/api/v1/recording/" + encodeURIComponent(recording.id) + "/video", name);"#), "the video is downloaded once saved")
+        XCTAssertTrue(page.contains(#"event.code === "KeyR") { event.preventDefault(); if (!event.repeat) toggleRecording(); return; }"#), "⌘R records and stops, as in Simulator.app")
+        XCTAssertTrue(page.contains(".tb-rec.recording .rec-dot {"), "a running recording is marked")
+    }
+
+    // A call's detail: Request and Response, as tabs or side by side, each in
+    // sections that fold; bodies as trees that stay folded as a person left
+    // them; a search that marks what it found and steps through it.
+    func testTheNetworkDetailShowsRequestAndResponseAndTheSearchMarksWhatItFound() throws {
+        XCTAssertTrue(page.contains(#"const tabs = [["request", "Request"], ["response", "Response"]]"#))
+        XCTAssertTrue(page.contains(#"data-act="split" aria-pressed=""#), "request and response side by side")
+        XCTAssertTrue(page.contains(#"split: stored("network.split", false)"#))
+        XCTAssertTrue(page.contains(#"bodyView: stored("network.bodyView", "tree")"#))
+        XCTAssertTrue(page.contains("const parsed = parseBodyTree(text);"), "bodies are read as trees")
+        XCTAssertTrue(page.contains(#"networkView.detail.addEventListener("toggle", (domEvent) => {"#), "folds survive re-renders")
+        XCTAssertTrue(page.contains("fields: NETWORK_FILTER_FIELDS,"), "url:, header:, body: … scope the search")
+        XCTAssertTrue(page.contains("return matchesFilters(fields.all, chips, query.term, fields, query.field);"), "the search reads headers and bodies")
+        XCTAssertTrue(page.contains(#"'<span class="tag tag-hit" title="'"#), "a call found only in its body says where")
+        XCTAssertTrue(page.contains(#"data-act="next-match""#), "the marks can be stepped through")
+        XCTAssertTrue(page.contains("patchPane(networkView.detail, event.id + \"|\" + (network.split ? \"split\" : network.detailTab),"), "polling keeps the pane's scroll")
+    }
+
+    // The columns of Logs and Network move by dragging their names, size by
+    // dragging their edges, show or hide from the header's menu, and stay as a
+    // person left them; Network's still sort on a click.
+    func testTableColumnsMoveResizeAndAreRemembered() throws {
+        XCTAssertTrue(page.contains("let layout = columnLayout(spec, stored(options.storeKey, null));"), "the layout is read back")
+        XCTAssertTrue(page.contains("if (save) store(options.storeKey, layout);"), "and kept")
+        XCTAssertTrue(page.contains(#"target.style.setProperty("--cols", gridTemplate(spec, layout, 0));"#))
+        XCTAssertTrue(page.contains(#"aria-roledescription="movable column""#))
+        XCTAssertTrue(page.contains(#"role="separator" aria-orientation="vertical" tabindex="0" data-resize=""#), "an edge sizes its column, from the keyboard too")
+        XCTAssertTrue(page.contains("else if (ending.moved && ending.before != null) set(moveColumn(layout, ending.key, ending.before));"), "a drop moves the column")
+        XCTAssertTrue(page.contains("if (event.altKey) { moveBy(cell.dataset.col, step); return; }"), "⌥←/⌥→ moves it without a mouse")
+        for (table, key) in [("logs", "logs.columns"), ("network", "network.columns")] {
+            XCTAssertTrue(page.contains(#"storeKey: "\#(key)","#), "\(table) keeps its own layout")
+            XCTAssertTrue(page.contains("\(table)Header.attach(\(table)View.list);"), "\(table)'s rows follow its header")
+        }
+        XCTAssertTrue(page.contains(".log-grid { grid-template-columns: var(--cols,"))
+        XCTAssertTrue(page.contains(".net-grid { grid-template-columns: var(--cols,"))
+        XCTAssertTrue(page.contains("row.innerHTML = logsHeader.columns.map((column) => LOG_CELLS[column.key](entry, level, query)).join(\"\");"), "rows draw the header's order")
+        XCTAssertTrue(page.contains("row.innerHTML = networkHeader.columns.map((column) => cells[column.key]()).join(\"\");"))
+        XCTAssertTrue(page.contains("sort: { state: network.sort, dirs: { time: 1, name: 1, status: 1, size: -1, duration: -1 }"), "Network's columns still sort")
+        let stored = try XCTUnwrap(page.range(of: "function stored(key, fallback) {"))
+        XCTAssertTrue(page[stored.upperBound...].prefix(200).contains("try {"), "storage that throws leaves the default layout")
+    }
+
+    // The Home button is a phone's: a click goes home, a double-click opens the
+    // app switcher — and a click waits out a double-click so the two never race.
+    func testADoubleClickOnHomeOpensTheAppSwitcher() throws {
+        XCTAssertTrue(page.contains(#"$("homeButton").addEventListener("click", homeButtonClicked);"#))
+        let handler = try XCTUnwrap(page.range(of: "function homeButtonClicked(event) {"))
+        let body = String(page[handler.upperBound...].prefix(400))
+        XCTAssertTrue(body.contains("if (event.detail === 2) { openAppSwitcher(); return; }"))
+        XCTAssertTrue(body.contains("homeClick = setTimeout(() => { homeClick = null; pressHome(); }, DOUBLE_CLICK_MS);"), "a single click goes home once no second one came")
+        XCTAssertTrue(page.contains(#"action: "button", name: "app-switcher""#))
+        XCTAssertTrue(page.contains(#"event.metaKey && event.ctrlKey && event.shiftKey && event.code === "KeyH") { event.preventDefault(); openAppSwitcher();"#), "⌃⇧⌘H, as Simulator.app's App Switcher")
     }
 
     // A person watching can tell what was done to the device, and by whom,

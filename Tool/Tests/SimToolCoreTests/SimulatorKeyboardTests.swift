@@ -45,6 +45,7 @@ final class SimulatorKeyboardTests: XCTestCase {
             "the helper holds at most three modifiers"
         )
         XCTAssertEqual(SimulatorDirectInputCommand.ejectKey.line, "button 12 184")
+        XCTAssertEqual(SimulatorDirectInputCommand.homeButton.line, "button 12 64", "Home is Consumer Menu, as DeviceKit's home button sends it")
         XCTAssertEqual(SimulatorDirectInputCommand.hardwareKeyboard(connected: true).line, "hwkeyboard 1")
         XCTAssertEqual(SimulatorDirectInputCommand.hardwareKeyboard(connected: false).line, "hwkeyboard 0")
     }

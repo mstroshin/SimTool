@@ -111,6 +111,14 @@ public actor SimulatorDirectInputClient {
         try await answered(SimulatorDirectInputCommand.ejectKey.line, deviceUDID: deviceUDID, timeoutSeconds: Self.keyboardTimeout)
     }
 
+    /// Presses Home the way a phone's Home button does, `times` times in quick
+    /// succession: twice opens the app switcher.
+    public func pressHome(times: Int = 1, deviceUDID: String) async throws {
+        for _ in 0..<max(1, times) {
+            try await answered(SimulatorDirectInputCommand.homeButton.line, deviceUDID: deviceUDID, timeoutSeconds: Self.keyboardTimeout)
+        }
+    }
+
     public func setHardwareKeyboard(connected: Bool, deviceUDID: String) async throws {
         try await answered(SimulatorDirectInputCommand.hardwareKeyboard(connected: connected).line, deviceUDID: deviceUDID, timeoutSeconds: Self.keyboardTimeout)
     }
@@ -411,6 +419,9 @@ struct SimulatorDirectInputCommand: Equatable {
 
     /// Eject, on the Consumer page (12).
     static let ejectKey = Self(line: "button 12 184")
+
+    /// Home (Menu, 64) on the Consumer page (12) — what DeviceKit's home button sends.
+    static let homeButton = Self(line: "button 12 64")
 
     static func hardwareKeyboard(connected: Bool) -> Self {
         Self(line: "hwkeyboard \(connected ? 1 : 0)")

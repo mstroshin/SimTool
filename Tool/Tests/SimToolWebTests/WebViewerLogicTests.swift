@@ -94,6 +94,112 @@ final class WebViewerLogicTests: XCTestCase {
         XCTAssertEqual(value(context, "held.map(e => e.n).join()"), "1,1", "what the page held is not changed under it")
     }
 
+    // MARK: - A call's detail
+
+    func testAJSONBodyIsATreeOfKeysAndItems() throws {
+        let context = try makeContext()
+        context.evaluateScript(#"var tree = parseBodyTree('{"user":{"id":42,"vip":true,"note":null},"tags":["a","b"]}');"#)
+        XCTAssertEqual(value(context, "tree.format + ' ' + tree.complete"), "json true")
+        XCTAssertEqual(value(context, "tree.root.children.map(c => c.key + ':' + c.kind).join(',')"), "user:object,tags:array")
+        XCTAssertEqual(value(context, "tree.root.children[0].children.map(c => c.key + '=' + c.type + ' ' + c.text).join(',')"), "id=num 42,vip=lit true,note=null null")
+        XCTAssertEqual(value(context, "tree.root.children[1].children.map(c => c.key + '=' + c.text).join(',')"), #"0="a",1="b""#)
+        XCTAssertEqual(value(context, "treeSize(tree.root)"), "8")
+    }
+
+    // gRPC loggers print messages in the protobuf text format, cut at the preview's length.
+    func testAProtobufTextMessageIsATreeAndACutOneReadsAsFarAsItGoes() throws {
+        let context = try makeContext()
+        context.evaluateScript(#"""
+        var whole = parseBodyTree('InvestAPI.PBPortfolioResponse:\nportfolio {\n  account_id: "acc \\"1\\""\n  total {\n    currency_code: "USD"\n    units: 5000\n  }\n  kind: KIND_CASH\n  open: true\n}\n');
+        var cut = parseBodyTree('Payments.Response:\nresponse {\n  attributes {\n    key: "account"\n    value {\n      per_o');
+        """#)
+        XCTAssertEqual(value(context, "whole.format + ' ' + whole.complete + ' ' + whole.root.typeName"), "proto true InvestAPI.PBPortfolioResponse")
+        let portfolio = "whole.root.children[0]"
+        XCTAssertEqual(value(context, "\(portfolio).key + ' ' + \(portfolio).kind"), "portfolio message")
+        XCTAssertEqual(value(context, "\(portfolio).children.map(c => c.key + '=' + (c.type || c.kind)).join(',')"), "account_id=str,total=message,kind=enum,open=lit")
+        XCTAssertEqual(value(context, "\(portfolio).children[0].value"), #"acc "1""#)
+        XCTAssertEqual(value(context, "\(portfolio).children[1].children[1].type"), "num")
+        XCTAssertEqual(value(context, "cut.format + ' ' + cut.complete"), "proto false", "a cut preview is still a tree, and says it is cut")
+        XCTAssertEqual(value(context, "cut.root.children[0].children[0].children[0].value"), "account")
+    }
+
+    func testTextThatIsNeitherStaysText() throws {
+        let context = try makeContext()
+        XCTAssertEqual(value(context, "parseBodyTree('hello world, nothing structured').format"), "text")
+        XCTAssertEqual(value(context, "parseBodyTree('{\"cut\": [1, 2').format"), "text", "a cut JSON preview is shown as text")
+        XCTAssertEqual(value(context, "parseBodyTree('').format"), "empty")
+    }
+
+    func testTheQueryIsDecodedAndTheStatusNamed() throws {
+        let context = try makeContext()
+        XCTAssertEqual(value(context, "JSON.stringify(queryParams('https://x.test/a?limit=20&cursor=abc%20def&flag&q=a+b#frag'))"),
+                       #"[["limit","20"],["cursor","abc def"],["flag",""],["q","a b"]]"#)
+        XCTAssertEqual(value(context, "queryParams('/svc.Service/Method').length"), "0")
+        XCTAssertEqual(value(context, "httpStatusText(404) + '|' + httpStatusText(503) + '|' + httpStatusText(299)"), "Not Found|Service Unavailable|")
+    }
+
+    // A search reads headers and bodies too, and says where it found the term.
+    func testASearchFindsATermInHeadersAndBodiesAndSaysWhere() throws {
+        let context = try makeContext()
+        context.evaluateScript(#"""
+        var call = { protocol: 'grpc',
+          request: { grpcService: 'pkg.Svc', grpcMethod: 'GetThing', path: '/pkg.Svc/GetThing', metadata: { 'x-trace': 'T-77' }, bodyPreview: 'Req:\nid: "abc"\n' },
+          response: { grpcStatusCode: '5', metadata: { server: 'envoy' }, bodyPreview: 'Resp:\nowner: "ABC Corp"\n' } };
+        var fields = networkSearchFields(call);
+        """#)
+        XCTAssertEqual(value(context, "networkHits(fields, 'abc').join(',')"), "request body,response body")
+        XCTAssertEqual(value(context, "networkHits(fields, 't-77').join(',')"), "request headers")
+        XCTAssertEqual(value(context, "networkHits(fields, 'not_found').join(',')"), "status", "a gRPC code is found by its name")
+        XCTAssertEqual(value(context, "networkHits(fields, 'abc', 'header').length"), "0", "header: searches the headers alone")
+        XCTAssertEqual(value(context, "networkHits(fields, 'getthing').join(',')"), "url,method")
+        XCTAssertEqual(value(context, "matchesFilters(fields.url + fields.body, [], 'corp', fields, 'body')"), "true")
+    }
+
+    func testMarksAreEscapedAndCaseInsensitive() throws {
+        let context = try makeContext()
+        XCTAssertEqual(value(context, "markHTML('<b>Token</b> token', 'TOKEN')"), "&lt;b&gt;<mark>Token</mark>&lt;/b&gt; <mark>token</mark>")
+        XCTAssertEqual(value(context, "markHTML('a&b', '')"), "a&amp;b")
+    }
+
+    // MARK: - Table columns (Logs, Network)
+
+    func testASavedLayoutIsMadeWholeAndKeptInBounds() throws {
+        let context = try makeContext()
+        context.evaluateScript("var describe = (l) => l.map(c => c.key + (c.hidden ? '-' : '') + (c.width ? c.width : '')).join(',');")
+        XCTAssertEqual(value(context, "describe(columnLayout(LOG_COLUMNS, null))"),
+                       "time86,level62,subsystem160,category-120,process-110,message", "by default category and process are off")
+        // Unknown and repeated columns go, widths are bounded, a missing column comes back after the one it follows.
+        let saved = #"[{"key":"message"},{"key":"bogus","width":10},{"key":"time","width":5},{"key":"level","width":9999,"hidden":true},{"key":"time","width":300}]"#
+        XCTAssertEqual(value(context, "describe(columnLayout(LOG_COLUMNS, \(saved)))"),
+                       "message,time60,level-640,subsystem160,category-120,process-110")
+        XCTAssertEqual(value(context, "columnLayout(LOG_COLUMNS, [{ key: 'message', hidden: true }])[0].hidden"), "false", "the flexible column is never hidden")
+        XCTAssertEqual(value(context, "columnLayout(LOG_COLUMNS, 'not a list').length"), "6")
+        // A column a later viewer adds lands after its neighbour in an older saved order.
+        XCTAssertEqual(value(context, "describe(columnLayout(NETWORK_COLUMNS, ['name', 'time', 'status', 'method', 'size', 'duration'].map(key => ({ key }))))"),
+                       "name,time86,status118,method46,size62,duration64,wf90")
+    }
+
+    func testAMovedColumnStandsBeforeTheOneItWasDroppedOn() throws {
+        let context = try makeContext()
+        context.evaluateScript("var layout = columnLayout(LOG_COLUMNS, null); var keys = (l) => l.map(c => c.key).join(',');")
+        XCTAssertEqual(value(context, "keys(moveColumn(layout, 'message', 1))"), "time,message,level,subsystem,category,process")
+        XCTAssertEqual(value(context, "keys(moveColumn(layout, 'time', 3))"), "level,subsystem,time,category,process,message", "moving right counts the gap it leaves")
+        XCTAssertEqual(value(context, "keys(moveColumn(layout, 'level', layout.length))"), "time,subsystem,category,process,message,level")
+        XCTAssertEqual(value(context, "keys(moveColumn(layout, 'nope', 0))"), "time,level,subsystem,category,process,message")
+    }
+
+    func testTheRowsGridFollowsTheShownColumnsAndEachNarrowerStepDropsItsColumns() throws {
+        let context = try makeContext()
+        context.evaluateScript("var logs = moveColumn(columnLayout(LOG_COLUMNS, [{ key: 'subsystem', width: 200 }, { key: 'process', hidden: false }]), 'message', 0);")
+        XCTAssertEqual(value(context, "gridTemplate(LOG_COLUMNS, logs, 0)"), "minmax(120px, 1fr) 86px 62px 200px 110px")
+        XCTAssertEqual(value(context, "gridTemplate(LOG_COLUMNS, logs, 1)"), "minmax(120px, 1fr) 86px 62px")
+        XCTAssertEqual(value(context, "shownColumns(LOG_COLUMNS, logs, 1).map(c => c.key).join(',')"), "message,time,level")
+        context.evaluateScript("var net = moveColumn(columnLayout(NETWORK_COLUMNS, null), 'duration', 0);")
+        XCTAssertEqual(value(context, "gridTemplate(NETWORK_COLUMNS, net, 0)"), "64px 86px 46px minmax(140px, 1fr) 118px 62px 90px")
+        XCTAssertEqual(value(context, "gridTemplate(NETWORK_COLUMNS, net, 1)"), "64px 86px 46px minmax(140px, 1fr) 118px", "≤ 760 px: no size, no waterfall")
+        XCTAssertEqual(value(context, "gridTemplate(NETWORK_COLUMNS, net, 2)"), "64px 86px minmax(140px, 1fr) 118px", "≤ 560 px: no method either")
+    }
+
     // MARK: - Filters
 
     func testChipsExcludeFirstThenIncludeAnyThenTheLiveText() throws {

@@ -117,6 +117,9 @@ app's own data never uses it.
 - **ok** `#45c08a`, **warn** `#e7a93f`, **err** `#f26b76` — only when the data
   says so: HTTP 2xx / 4xx / 5xx and transport failures, gRPC codes by class,
   log level Error and Fault, verdicts.
+- **Recording** is the one red that is not a failure: the REC mark of a screen
+  recording in progress, in err ink — every recorder marks recording so, and it
+  must not be missed.
 
 ### Named Rules
 - **Colour is a fact.** A colour must trace to a field: status class, log level,
@@ -202,6 +205,14 @@ always confirm.
 Filter chips sit inside the filter field: include chips are outlined in ok,
 exclude chips tinted in err with a leading minus; each has its own remove button.
 
+### Menus
+A toolbar button with a caret drops a menu under it and says whether it is open.
+An item that is on or off carries a switch — in course ink while on, as the keys
+it sends to the device are; one choice of several is ticked in accent. Groups
+are named by a caption in ink3. The keyboard button turns course while the Mac
+keyboard types into the device; the capture caret carries a small device while
+screenshots and videos take the bezel.
+
 ### Inputs
 The filter field is the only text input on most screens: 26 px, thick outline,
 accent ring on focus, `/` to reach it.
@@ -214,7 +225,12 @@ client-side problems (4xx, gRPC client codes) an amber one — the colours the r
 ### Lists
 Keyed rows that survive polling, 26 px high, roving focus, ↑/↓/Home/End,
 Enter to open, Esc to clear, Shift-F10 for the row's menu; sticky column
-headers that sort; app launches as collapsible groups.
+headers that sort; app launches as collapsible groups. The columns of Network
+and Logs are the person's: dragged into another order by their names (a click
+still sorts), sized by the line at their right edge (accent while it is dragged
+or focused), shown or hidden from the header's menu — remembered per browser,
+per table; the flexible column (Name, Message) takes what is left. A request's body reads as a tree that folds, in
+the code block's ground, with the JSON inks.
 
 ### Redlines (signature)
 Faint outlines on every element a test can name; a dashed outline on the

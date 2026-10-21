@@ -23,8 +23,11 @@ public struct SimulatorDisplay: Codable, Equatable, Sendable {
     /// framebuffer's own orientation. The cover's are uneven: tight on the
     /// hinge side, round on the outer edge.
     public var cornerRadii: [Double]?
+    /// The DeviceKit chrome Simulator draws around this screen
+    /// (`com.apple.dt.devicekit.chrome.phone11`): its bezel and buttons.
+    public var chrome: String?
 
-    public init(id: String, screenID: Int, role: String? = nil, width: Int, height: Int, scale: Double, cornerRadii: [Double]? = nil) {
+    public init(id: String, screenID: Int, role: String? = nil, width: Int, height: Int, scale: Double, cornerRadii: [Double]? = nil, chrome: String? = nil) {
         self.id = id
         self.screenID = screenID
         self.role = role
@@ -32,6 +35,7 @@ public struct SimulatorDisplay: Codable, Equatable, Sendable {
         self.height = height
         self.scale = scale
         self.cornerRadii = cornerRadii
+        self.chrome = chrome
     }
 
     /// The screen in points as its picture shows it: a picture turned a
@@ -126,7 +130,8 @@ public struct SimulatorDisplayLayout: Codable, Equatable, Sendable {
                 width: width,
                 height: height,
                 scale: (entry["scale"] as? NSNumber)?.doubleValue ?? 1,
-                cornerRadii: radii.allSatisfy { $0 != nil } ? radii.compactMap { $0 } : nil
+                cornerRadii: radii.allSatisfy { $0 != nil } ? radii.compactMap { $0 } : nil,
+                chrome: chrome
             ))
         }
         if displays.count == 2 {

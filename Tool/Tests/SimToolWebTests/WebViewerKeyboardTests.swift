@@ -3,13 +3,31 @@ import JavaScriptCore
 import XCTest
 
 final class WebViewerKeyboardTests: XCTestCase {
-    func testToolbarHasTheSoftwareKeyboardButtonAndTheKeyboardToggle() throws {
+    // One button for both keyboards: its menu shows or hides the software
+    // keyboard and connects the Mac keyboard, with a switch that says which.
+    func testOneKeyboardButtonOpensAMenuForBothKeyboards() throws {
         let html = WebViewer.pageWithAssets
-        XCTAssertTrue(html.contains(#"id="softKeyboardButton" aria-label="Show or hide the software keyboard""#), "missing the software keyboard button")
-        XCTAssertTrue(html.contains("action: \"software-keyboard\""), "the button must toggle the software keyboard")
-        XCTAssertTrue(html.contains(#"id="keyboardToggle" aria-pressed="false""#), "the keyboard toggle must say whether it is on")
-        XCTAssertTrue(html.contains("$(\"keyboardToggle\").setAttribute(\"aria-pressed\", String(on))"))
-        XCTAssertTrue(html.contains("action: \"hardware-keyboard\", enabled: on"), "the toggle connects the hardware keyboard as Simulator.app does")
+        XCTAssertTrue(html.contains(#"id="keyboardButton" aria-haspopup="menu" aria-expanded="false" aria-label="Keyboard""#), "missing the keyboard menu button")
+        XCTAssertFalse(html.contains(#"id="softKeyboardButton""#), "the software keyboard has no button of its own any more")
+        XCTAssertFalse(html.contains(#"id="keyboardToggle""#), "the Mac keyboard has no toggle of its own any more")
+        XCTAssertTrue(html.contains(#"wireMenuButton($("keyboardButton"), keyboardMenuItems);"#))
+        let items = try XCTUnwrap(html.range(of: "function keyboardMenuItems()"))
+        let body = String(html[items.upperBound...].prefix(700))
+        XCTAssertTrue(body.contains(#"label: "Show or hide the software keyboard""#))
+        XCTAssertTrue(body.contains("run: toggleSoftwareKeyboard"))
+        XCTAssertTrue(body.contains(#"label: "Connect the Mac keyboard", kbd: "⇧⌘K", checked: keyboardBridge.enabled"#), "the Mac keyboard's item says whether it is connected")
+        XCTAssertTrue(html.contains("action: \"software-keyboard\""), "the menu toggles the software keyboard")
+        XCTAssertTrue(html.contains("action: \"hardware-keyboard\", enabled: on"), "connecting the Mac keyboard connects the hardware keyboard as Simulator.app does")
+        XCTAssertTrue(html.contains(#"button.classList.toggle("on", on);"#), "the button shows that the Mac keyboard is connected")
+    }
+
+    // A switch item is a menuitemcheckbox with aria-checked; a menu button says whether its menu is open.
+    func testMenusCarrySwitchesAndTheirButtonsSayWhetherTheyAreOpen() {
+        let html = WebViewer.pageWithAssets
+        XCTAssertTrue(html.contains(#"role: choice ? (item.radio ? "menuitemradio" : "menuitemcheckbox") : "menuitem""#))
+        XCTAssertTrue(html.contains(#""aria-checked": choice ? String(!!item.checked) : null"#))
+        XCTAssertTrue(html.contains(#"menuOpener.setAttribute("aria-expanded", String(open));"#))
+        XCTAssertTrue(html.contains(".menu [aria-checked=\"true\"] .m-switch { background: var(--course); }"), "a switch that is on is in course ink, as the keys sent to the device are")
     }
 
     func testTheScreenShowsWhereTheKeysGo() {
@@ -17,7 +35,8 @@ final class WebViewerKeyboardTests: XCTestCase {
         XCTAssertTrue(html.contains(".app.keys-on .screen {"), "missing the ring around the screen")
         XCTAssertTrue(html.contains(".app.keys-on.keys-paused .screen {"), "missing the paused ring")
         XCTAssertTrue(html.contains("id=\"sbKeys\""), "missing the status bar cell")
-        XCTAssertTrue(html.contains("Keys → device · ⇧⌘K releases"), "the way out of the mode must be on screen")
+        XCTAssertTrue(html.contains("Mac keyboard types into the simulator · ⇧⌘K stops"), "the way out of the mode must be on screen")
+        XCTAssertTrue(html.contains(#"id="sbKeys" title=""#), "the cell explains itself on hover")
     }
 
     func testThePageKeepsItsOwnKeysAndTheModeChord() throws {

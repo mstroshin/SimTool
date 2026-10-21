@@ -72,11 +72,24 @@ the bottom holds the session's facts — connection, device and runtime, UDID
 The viewer follows the system's light or dark appearance; the sun / moon button
 in the toolbar pins the other theme for this browser.
 ⇧⌘P opens a command palette with every action and test; the shortcuts follow
-Simulator.app and Xcode — ⇧⌘H Home, ⌘S screenshot, ⌃⌘Z shake, ⌥⌘0 show or hide
+Simulator.app and Xcode — ⇧⌘H Home (a double-click on the Home button or ⌃⇧⌘H opens the
+app switcher), ⌘S screenshot, ⌘R record video, ⌃⌘Z shake, ⌥⌘0 show or hide
 the inspector — and ⌥1–6 switch inspector tabs, `/` filters the current list,
 ↑/↓ move through it and Shift-F10 opens a row's menu. When the server goes away
 the viewer greys the last frame, says so, stops sending touches and reconnects
 by itself; a restarted server is noticed and its lists are reloaded.
+
+The toolbar saves a screenshot (⌘S) and records the screen (⌘R): recording, the
+button turns into a red REC mark with the running time, and a click or ⌘R again
+stops it and downloads the video (H.264 `.mp4`). The caret beside them picks the
+frame for both — **Screen only**, or **With the device bezel**: the device drawn
+around the screen as Simulator draws it, side buttons, rounded corners and the
+Dynamic Island included, from the DeviceKit chrome Xcode installed on the Mac
+(SimTool ships no Apple artwork; a device without one gets a plain drawn frame).
+A screenshot with the bezel is a PNG with a clear background, a video one has a
+white background. The recording runs on the server, so a reload keeps it and
+every viewer shows it; the server keeps only the newest video. The caret's menu
+also copies the screenshot and downloads the last video again.
 
 An iPhone Duo adds a bar under the device — Closed, Book and Open, and a **3D**
 switch — and the fold beside its size (`book · 130° · inner`). 3D shows the
@@ -112,11 +125,13 @@ The wheel or trackpad scrolls by dragging a finger too. Hold Option to add a
 second finger mirrored through the screen center — spreading or circling the
 pointer pinches or rotates — and Option-Shift to move both fingers together.
 
-The keyboard works as in Simulator.app. The software keyboard button toggles the
-software keyboard (Toggle Software Keyboard). The **Mac keyboard** toggle, or
-⇧⌘K, types into the simulator with the Mac keyboard and connects its hardware
-keyboard (Connect Hardware Keyboard), so iOS keeps the software keyboard out of
-the way until the button or ⌘K brings it back. Keys travel as physical keys — the simulator's own layout
+The keyboard works as in Simulator.app, from one keyboard button in the toolbar.
+Its menu shows or hides the software keyboard (Toggle Software Keyboard) and
+connects the Mac keyboard — a switch beside it says whether it is connected.
+Connected, or with ⇧⌘K, the Mac keyboard types into the simulator and its
+hardware keyboard is connected (Connect Hardware Keyboard), so iOS keeps the
+software keyboard out of the way until the menu or ⌘K brings it back; the
+button turns course ink while it lasts. Keys travel as physical keys — the simulator's own layout
 decides the character — with modifiers, arrows, ⌫, ⏎, Tab and Esc, which iOS
 uses; ⇧⌘K leaves the mode, and ⌘V pastes the Mac clipboard as text. A ring
 around the screen shows the keys go to the device, and the status bar says so;
@@ -154,6 +169,7 @@ swift run simtool kill <session-id> --json
 
 ```sh
 swift run simtool input button home --json
+swift run simtool input button app-switcher --json   # Home pressed twice
 swift run simtool input keyboard hide --json   # show | hide | toggle the software keyboard
 swift run simtool ax tree --json
 swift run simtool ax tree --flat --labeled
@@ -252,7 +268,7 @@ simulator. Right-clicking the device screen opens a menu with the same
 **Paste** (it asks the browser for clipboard access), **Add clipboard image to
 Photos** and **Add files to Photos…** (images and videos) — both put the media
 in the simulator's Photos library (`simctl addmedia`), where a photo picker
-offers it — and **Save** or **Copy screenshot**. While the Accessibility tab
+offers it — **Save** or **Copy screenshot** and **Record video**. While the Accessibility tab
 picks elements, a right-click opens the element's menu instead.
 
 The **Accessibility** tab shows the served accessibility tree, with anonymous
@@ -555,18 +571,35 @@ calling the framework-agnostic API — `resolved()`/`makeFromEnvironment()` then
 request/response bodies.
 
 The viewer's **Network** tab is a Proxyman-style inspector beside the live
-stream: requests with sortable columns, quick filters (HTTP or gRPC, problems —
+stream: requests in columns that sort on a click and that you arrange as in
+Logs (below: drag a name to move, an edge to size, right-click the header to
+show or hide), quick filters (HTTP or gRPC, problems —
 failed calls in red, 4xx and client-side gRPC codes in amber — and mocked
-calls), pause and clear, and a detail pane under the list with headers or
-metadata, request and response bodies, status (gRPC codes by name) and errors —
-plus **Copy as cURL** / **grpcurl** and **Copy as YAML mock**, a `mocks:` entry
-that answers the call the same way in a test. It updates live from the events
-endpoint.
+calls), pause and clear, and a detail pane under the list. Its head says the
+status (`404 Not Found`, gRPC codes by name), the duration, what was sent and
+received and when; under it **Request** and **Response** — as tabs, or **Side
+by side** — each in sections that fold and stay folded: the request's URL or
+gRPC service and method, its query parameters, then the body, then the headers
+or metadata; the response's errors first, then its body and headers. A body is
+a tree that folds — JSON, or the protobuf text format gRPC loggers print — or
+**Raw** text; a preview the app's logger cut short says so and reads as far as
+it goes. **Copy as cURL** / **grpcurl** and **Copy as YAML mock** (a `mocks:`
+entry that answers the call the same way in a test) sit beside it.
+
+The search field reads URLs, methods, statuses, hosts, headers and bodies —
+`url:`, `method:`, `status:`, `host:`, `header:` or `body:` narrows it to one —
+marks what it found in the list and the detail, tags a call found only in its
+headers or body with where (`response body`), opens the side it is on, and
+steps through the marks with ↑ ↓. It updates live from the events endpoint.
 
 The **Logs** tab is a live log inspector with level toggles, free text and
 field filters (`subsystem:`, `category:`, `process:`), follow mode — scrolling
 up to read turns it off, scrolling back to the end turns it on — and clear; a
-line is red only when its level is Error or Fault. When scoped to an app it
+line is red only when its level is Error or Fault. Its columns are yours: drag a
+column's name to move it and its right edge to size it (double-click the edge
+resets it; ⌥← ⌥→ and ←/→ on the edge do the same from the keyboard), and
+right-click the header to show **Category** and **Process** or reset them —
+the viewer keeps the layout for this browser. When scoped to an app it
 captures both the app's OSLog and its `print`/stdout output (via
 `--console-pty`), polling the capture endpoint incrementally by cursor; no app
 instrumentation is required.
@@ -873,7 +906,11 @@ GET /api/v1/mocks/ack
 GET /api/v1/activity?since=<revision>&limit=200
 POST /api/v1/activity
 GET /api/v1/tests/<session-id>/evidence/<file>
-GET /api/v1/screenshot?maxDim=800&display=<screen>
+GET /api/v1/screenshot?maxDim=800&display=<screen>&bezel=1
+GET /api/v1/recording
+POST /api/v1/recording
+POST /api/v1/recording/stop
+GET /api/v1/recording/<id>/video
 ```
 
 The API answers the viewer's own page and clients that are not browsers — the
@@ -923,6 +960,17 @@ ahead in `view3d` (`available`, `reason`).
 `screenshot` returns the full-resolution PNG by default; `maxDim` scales it so
 the longest edge fits the given pixel size — agents reading the screen pay for
 image pixels, and an 800px screenshot is still perfectly legible.
+`bezel=1` draws the device around the screen (`simctl … --mask=black` for the
+glass, the device type's DeviceKit chrome for the body and buttons).
+
+`recording` records the screen the stream shows, one recording at a time:
+`POST` (`{"bezel": true}` for the device around it) starts `simctl io
+recordVideo`, `recording/stop` finalizes it and answers once it is saved —
+`state` `ready` with `durationSeconds` and `byteCount`, or `failed` with the
+`error` — and `recording/<id>/video` serves the mp4 (byte ranges included).
+`GET` answers `{"current", "last"}`, which the event stream's `recording` topic
+pushes whenever it changes. Only the newest video is kept, in a temporary
+folder the server removes when it stops.
 
 A device with more than one screen — the iPhone Duo, a cover panel and an inner
 one that opens like a book — streams, screenshots and records the screen that is

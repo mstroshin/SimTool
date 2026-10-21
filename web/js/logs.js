@@ -33,8 +33,17 @@ const logsView = buildListPanel("logs", {
 });
 logsView.listWrap.append(logsNew);
 
+// Columns a person moves, sizes, shows and hides; the layout is kept (see createColumnHeader).
+const logsHeader = createColumnHeader({
+  className: "log-grid",
+  spec: LOG_COLUMNS,
+  storeKey: "logs.columns",
+  classes: { subsystem: "c-opt", category: "c-opt", process: "c-opt" },
+  onLayout: () => logsList.invalidate()
+});
+
 const logsList = createList(logsView.list, {
-  header: el("div", { class: "thead log-grid", role: "row", html: '<span class="cell" role="columnheader">Time</span><span class="cell" role="columnheader">Level</span><span class="cell c-ss" role="columnheader">Subsystem</span><span class="cell" role="columnheader">Message</span>' }),
+  header: logsHeader.element,
   key: (entry) => String(entry.sequence),
   version: (entry) => (logsFilter.text || "") + "|" + (entry.launchId === newestLaunchId() ? 1 : 0),
   rowClass: (entry) => "log-grid" + (isLogError(entry) ? " lvl-err" : "") + (!reviewActive() && entry.launchId != null && entry.launchId !== newestLaunchId() ? " retired" : ""),
@@ -48,6 +57,7 @@ const logsList = createList(logsView.list, {
   onGroupMenu: (id, x, y, button) => openMenu(x, y, launchGroupMenu("logs", id), button),
   follow: () => logs.follow
 });
+logsHeader.attach(logsView.list);
 
 function markMatches(text, query) {
   const escaped = escapeHTML(text);
@@ -56,15 +66,20 @@ function markMatches(text, query) {
   return escaped.replace(new RegExp(needle, "gi"), (match) => "<mark>" + match + "</mark>");
 }
 
+// Each column's cell, drawn in the order the header shows.
+const LOG_CELLS = {
+  time: (entry) => '<span class="cell time" title="' + escapeHTML(entry.timestamp || "") + '">' + escapeHTML(formatClock(entry.timestamp, true)) + "</span>",
+  level: (entry, level) => '<span class="cell"><span class="lv lv-' + level.toLowerCase() + '">' + level + "</span></span>",
+  subsystem: (entry) => '<span class="cell ss c-opt" translate="no" title="' + escapeHTML([entry.subsystem, entry.category].filter(Boolean).join(" · ")) + '">' + escapeHTML(entry.subsystem || entry.process || (entry.source === "stdout" ? "stdout" : "—")) + "</span>",
+  category: (entry) => '<span class="cell ss c-opt" translate="no">' + escapeHTML(entry.category || "—") + "</span>",
+  process: (entry) => '<span class="cell ss c-opt" translate="no">' + escapeHTML(entry.process || (entry.source === "stdout" ? "stdout" : "—")) + "</span>",
+  message: (entry, level, query) => '<span class="cell msg" translate="no">' + markMatches(String(entry.message || "").replace(/\s*\n\s*/g, " ⏎ "), query.field && query.field !== "message" ? "" : query.term) + "</span>"
+};
+
 function renderLogRow(entry, row) {
   const level = logLevel(entry);
   const query = parseFieldTerm(logsFilter.text, LOGS_FILTER_FIELDS);
-  const message = String(entry.message || "").replace(/\s*\n\s*/g, " ⏎ ");
-  row.innerHTML =
-    '<span class="cell time" title="' + escapeHTML(entry.timestamp || "") + '">' + escapeHTML(formatClock(entry.timestamp, true)) + "</span>" +
-    '<span class="cell"><span class="lv lv-' + level.toLowerCase() + '">' + level + "</span></span>" +
-    '<span class="cell ss c-ss" translate="no" title="' + escapeHTML([entry.subsystem, entry.category].filter(Boolean).join(" · ")) + '">' + escapeHTML(entry.subsystem || entry.process || (entry.source === "stdout" ? "stdout" : "—")) + "</span>" +
-    '<span class="cell msg" translate="no">' + markMatches(message, query.field && query.field !== "message" ? "" : query.term) + "</span>";
+  row.innerHTML = logsHeader.columns.map((column) => LOG_CELLS[column.key](entry, level, query)).join("");
 }
 
 function logsEmpty() {
