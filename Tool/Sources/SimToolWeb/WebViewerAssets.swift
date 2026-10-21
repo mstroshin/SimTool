@@ -1239,6 +1239,21 @@ enum WebViewerAssets {
         }
 
         function pressHome() { deviceAction("Home", { action: "button", name: "home" }, "Home"); }
+        // Home pressed twice, as on a phone with a Home button.
+        function openAppSwitcher() { deviceAction("App switcher", { action: "button", name: "app-switcher" }, "App switcher"); }
+
+        // The Home button is a phone's: a click goes home, a double-click opens the
+        // app switcher. A first click waits out a double-click's span, so a home
+        // already on its way never lands on the switcher; Enter and Space go home at once.
+        const DOUBLE_CLICK_MS = 300;
+        let homeClick = null;
+        function homeButtonClicked(event) {
+          clearTimeout(homeClick);
+          homeClick = null;
+          if (event.detail === 0) { pressHome(); return; }
+          if (event.detail === 2) { openAppSwitcher(); return; }
+          if (event.detail === 1) homeClick = setTimeout(() => { homeClick = null; pressHome(); }, DOUBLE_CLICK_MS);
+        }
 
         // ---- A foldable's fold ----
         // The server sweeps the hinge and answers once the device reports the pose,
@@ -1934,7 +1949,7 @@ enum WebViewerAssets {
 
         // ---- Wiring ----
 
-        $("homeButton").addEventListener("click", pressHome);
+        $("homeButton").addEventListener("click", homeButtonClicked);
         for (const button of $("foldGroup").querySelectorAll("[data-pose]")) button.addEventListener("click", () => foldTo(button.dataset.pose));
         $("view3dButton").addEventListener("click", () => setView3D(!screenState.view3d));
         $("screenshotButton").addEventListener("click", saveScreenshot);
@@ -4922,6 +4937,7 @@ enum WebViewerAssets {
         function paletteCommands() {
           const commands = [
             ["Device", "home", "Home", "⇧⌘H", pressHome],
+            ["Device", "home", "Open the app switcher", "⌃⇧⌘H", openAppSwitcher],
             ["Device", "camera", "Save screenshot", "⌘S", saveScreenshot],
             ["Device", "copy", "Copy screenshot", "", copyScreenshot],
             capture.recording ? ["Device", "stop", "Stop recording and save the video", "⌘R", stopRecording] : ["Device", "record", "Record video", "⌘R", startRecording],
@@ -5068,7 +5084,7 @@ enum WebViewerAssets {
           openPopover($("paletteButton"),
             "<p><b>⇧⌘P</b> commands · <b>⌥1–5</b> inspector tabs · <b>⌥⌘0</b> show or hide the inspector · <b>/</b> filter</p>" +
             "<p><b>↑ ↓</b> move in a list · <b>Enter</b> open · <b>Esc</b> close · <b>⇧F10</b> the row's menu</p>" +
-            "<p><b>⇧⌘H</b> Home · <b>⌘S</b> screenshot · <b>⌘R</b> record video, again to save it · <b>⌃⌘Z</b> shake · <b>⇧⌘K</b> connect the Mac keyboard (⇧⌘K again releases it) · <b>⌘K</b> software keyboard while typing</p>" +
+            "<p><b>⇧⌘H</b> Home · <b>⌃⇧⌘H</b> or a double-click on Home: the app switcher · <b>⌘S</b> screenshot · <b>⌘R</b> record video, again to save it · <b>⌃⌘Z</b> shake · <b>⇧⌘K</b> connect the Mac keyboard (⇧⌘K again releases it) · <b>⌘K</b> software keyboard while typing</p>" +
             "<p><b>⌥-drag</b> pinch or rotate · <b>⌥⇧-drag</b> two-finger pan · the wheel scrolls · <b>P</b> picks elements in Accessibility · <b>⌘↩</b> runs the selected test</p>");
         }
 
@@ -5094,6 +5110,7 @@ enum WebViewerAssets {
             if (app.dataset.mode === "replay") { event.preventDefault(); exitReplay(); return; }
             return;
           }
+          if (event.metaKey && event.ctrlKey && event.shiftKey && event.code === "KeyH") { event.preventDefault(); openAppSwitcher(); return; }
           if (meta && event.shiftKey && event.code === "KeyH") { event.preventDefault(); pressHome(); return; }
           if (event.metaKey && !event.shiftKey && !event.altKey && !event.ctrlKey && event.code === "KeyS") { event.preventDefault(); saveScreenshot(); return; }
           if (event.metaKey && !event.shiftKey && !event.altKey && !event.ctrlKey && event.code === "KeyR") { event.preventDefault(); if (!event.repeat) toggleRecording(); return; }
@@ -7373,7 +7390,7 @@ enum WebViewerAssets {
               </div>
 
               <div class="tb-group" role="toolbar" aria-label="Device">
-                <button class="tb-btn" type="button" id="homeButton" aria-label="Home" data-tip="Home" data-key="⇧⌘H" aria-keyshortcuts="Shift+Meta+H"><svg class="ic" aria-hidden="true"><use href="#i-home"/></svg></button>
+                <button class="tb-btn" type="button" id="homeButton" aria-label="Home" aria-description="A double-click opens the app switcher" data-tip="Home · double-click: app switcher" data-key="⇧⌘H" aria-keyshortcuts="Shift+Meta+H Control+Shift+Meta+H"><svg class="ic" aria-hidden="true"><use href="#i-home"/></svg></button>
                 <button class="tb-btn" type="button" id="screenshotButton" aria-label="Save screenshot" data-tip="Save screenshot" data-key="⌘S" aria-keyshortcuts="Meta+S"><svg class="ic" aria-hidden="true"><use href="#i-camera"/></svg></button>
                 <button class="tb-btn tb-rec" type="button" id="recordButton" aria-label="Record video" data-tip="Record video" data-key="⌘R" aria-keyshortcuts="Meta+R"><svg class="ic" aria-hidden="true"><use href="#i-record"/></svg><span class="rec-dot" aria-hidden="true"></span><span class="rec-time" id="recordTime"></span></button>
                 <button class="tb-btn tb-menu tb-caret" type="button" id="captureMenuButton" aria-haspopup="menu" aria-expanded="false" aria-label="Screenshot and video options" data-tip="Screenshot and video options — the frame, copy, download"><svg class="ic frame-mark" aria-hidden="true"><use href="#i-bezel"/></svg><svg class="ic caret" aria-hidden="true"><use href="#i-chev-d"/></svg></button>

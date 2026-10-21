@@ -72,7 +72,8 @@ the bottom holds the session's facts — connection, device and runtime, UDID
 The viewer follows the system's light or dark appearance; the sun / moon button
 in the toolbar pins the other theme for this browser.
 ⇧⌘P opens a command palette with every action and test; the shortcuts follow
-Simulator.app and Xcode — ⇧⌘H Home, ⌘S screenshot, ⌘R record video, ⌃⌘Z shake, ⌥⌘0 show or hide
+Simulator.app and Xcode — ⇧⌘H Home (a double-click on the Home button or ⌃⇧⌘H opens the
+app switcher), ⌘S screenshot, ⌘R record video, ⌃⌘Z shake, ⌥⌘0 show or hide
 the inspector — and ⌥1–6 switch inspector tabs, `/` filters the current list,
 ↑/↓ move through it and Shift-F10 opens a row's menu. When the server goes away
 the viewer greys the last frame, says so, stops sending touches and reconnects
@@ -168,6 +169,7 @@ swift run simtool kill <session-id> --json
 
 ```sh
 swift run simtool input button home --json
+swift run simtool input button app-switcher --json   # Home pressed twice
 swift run simtool input keyboard hide --json   # show | hide | toggle the software keyboard
 swift run simtool ax tree --json
 swift run simtool ax tree --flat --labeled

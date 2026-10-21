@@ -230,6 +230,7 @@ public enum DeviceActivityWording {
             return ("keyboard", (input.enabled == false ? "Disconnect" : "Connect") + " the hardware keyboard", nil)
         case "button":
             let name = input.name ?? ""
+            if name.lowercased() == "app-switcher" { return ("button", "Open the app switcher", nil) }
             return ("button", "Press " + (name.lowercased() == "home" ? "Home" : name), nil)
         default:
             return (action.isEmpty ? "input" : action, action.isEmpty ? "Input" : action.prefix(1).uppercased() + action.dropFirst(), nil)

@@ -105,6 +105,13 @@ enum SoftwareKeyboardVisibility {
 }
 
 extension SimulatorInputClient {
+    /// Simulator.app's App Switcher: Home pressed twice in quick succession, as
+    /// on a phone with a Home button.
+    public static func openAppSwitcher(deviceUDID: String) async throws -> ProcessOutput {
+        try await SimulatorDirectInputClient.shared.pressHome(times: 2, deviceUDID: deviceUDID)
+        return ProcessOutput(status: 0)
+    }
+
     /// Simulator.app's Toggle Software Keyboard (⌘K), which Device Hub sends
     /// as the Eject key of a hardware keyboard: iOS shows the software keyboard
     /// a hardware keyboard keeps hidden, or hides it again.

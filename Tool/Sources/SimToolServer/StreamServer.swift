@@ -1535,6 +1535,9 @@ public final class StreamServer: @unchecked Sendable {
             if name.lowercased() == "home" {
                 return try await ProcessRunner.runXcrun(["simctl", "launch", config.device.udid, "com.apple.springboard"])
             }
+            if name.lowercased() == "app-switcher" {
+                return try await SimulatorInputClient.openAppSwitcher(deviceUDID: config.device.udid)
+            }
             return try await SimulatorInputClient.button(name, deviceUDID: config.device.udid)
         default:
             throw SimToolError("Unsupported input action: \(action.isEmpty ? "<missing>" : action)")

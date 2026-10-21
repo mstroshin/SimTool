@@ -16,6 +16,21 @@ async function deviceAction(label, payload, done) {
 }
 
 function pressHome() { deviceAction("Home", { action: "button", name: "home" }, "Home"); }
+// Home pressed twice, as on a phone with a Home button.
+function openAppSwitcher() { deviceAction("App switcher", { action: "button", name: "app-switcher" }, "App switcher"); }
+
+// The Home button is a phone's: a click goes home, a double-click opens the
+// app switcher. A first click waits out a double-click's span, so a home
+// already on its way never lands on the switcher; Enter and Space go home at once.
+const DOUBLE_CLICK_MS = 300;
+let homeClick = null;
+function homeButtonClicked(event) {
+  clearTimeout(homeClick);
+  homeClick = null;
+  if (event.detail === 0) { pressHome(); return; }
+  if (event.detail === 2) { openAppSwitcher(); return; }
+  if (event.detail === 1) homeClick = setTimeout(() => { homeClick = null; pressHome(); }, DOUBLE_CLICK_MS);
+}
 
 // ---- A foldable's fold ----
 // The server sweeps the hinge and answers once the device reports the pose,
@@ -711,7 +726,7 @@ document.addEventListener("focusout", () => setTimeout(updateKeyboardIndicator, 
 
 // ---- Wiring ----
 
-$("homeButton").addEventListener("click", pressHome);
+$("homeButton").addEventListener("click", homeButtonClicked);
 for (const button of $("foldGroup").querySelectorAll("[data-pose]")) button.addEventListener("click", () => foldTo(button.dataset.pose));
 $("view3dButton").addEventListener("click", () => setView3D(!screenState.view3d));
 $("screenshotButton").addEventListener("click", saveScreenshot);

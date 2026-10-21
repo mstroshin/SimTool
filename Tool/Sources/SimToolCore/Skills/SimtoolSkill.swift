@@ -282,7 +282,8 @@ extension AgentSkill {
         /api/v1/recording/stop` and download `GET /api/v1/recording/<id>/video`.
 
         ### Input · accessibility · logs
-        - `simtool input …` — touches, typing, hardware buttons. Coordinates are
+        - `simtool input …` — touches, typing, hardware buttons (`button app-switcher`
+          presses Home twice and opens the app switcher). Coordinates are
           screen **points** (the frames `simtool ax` reports) — on an iPhone Duo, points
           of the lit panel as its screenshot reads (the open inner panel is 951 × 669,
           landscape) —, and every touch is played by SimTool's own HID helper as a

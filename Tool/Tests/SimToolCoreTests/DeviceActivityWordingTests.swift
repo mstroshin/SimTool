@@ -44,6 +44,7 @@ final class DeviceActivityWordingTests: XCTestCase {
 
     func testDeviceActionsReadAsWhatAPersonWouldSay() {
         XCTAssertEqual(title(SimulatorInputPayload(action: "button", name: "home")), "Press Home")
+        XCTAssertEqual(title(SimulatorInputPayload(action: "button", name: "app-switcher")), "Open the app switcher")
         XCTAssertEqual(title(SimulatorInputPayload(action: "launch", name: "com.example.app")), "Launch com.example.app")
         XCTAssertEqual(title(SimulatorInputPayload(action: "software-keyboard", visible: false)), "Hide the software keyboard")
         XCTAssertEqual(title(SimulatorInputPayload(action: "software-keyboard")), "Toggle the software keyboard")

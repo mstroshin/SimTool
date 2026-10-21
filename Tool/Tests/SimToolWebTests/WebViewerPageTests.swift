@@ -131,6 +131,18 @@ final class WebViewerPageTests: XCTestCase {
         XCTAssertTrue(page[stored.upperBound...].prefix(200).contains("try {"), "storage that throws leaves the default layout")
     }
 
+    // The Home button is a phone's: a click goes home, a double-click opens the
+    // app switcher — and a click waits out a double-click so the two never race.
+    func testADoubleClickOnHomeOpensTheAppSwitcher() throws {
+        XCTAssertTrue(page.contains(#"$("homeButton").addEventListener("click", homeButtonClicked);"#))
+        let handler = try XCTUnwrap(page.range(of: "function homeButtonClicked(event) {"))
+        let body = String(page[handler.upperBound...].prefix(400))
+        XCTAssertTrue(body.contains("if (event.detail === 2) { openAppSwitcher(); return; }"))
+        XCTAssertTrue(body.contains("homeClick = setTimeout(() => { homeClick = null; pressHome(); }, DOUBLE_CLICK_MS);"), "a single click goes home once no second one came")
+        XCTAssertTrue(page.contains(#"action: "button", name: "app-switcher""#))
+        XCTAssertTrue(page.contains(#"event.metaKey && event.ctrlKey && event.shiftKey && event.code === "KeyH") { event.preventDefault(); openAppSwitcher();"#), "⌃⇧⌘H, as Simulator.app's App Switcher")
+    }
+
     // A person watching can tell what was done to the device, and by whom,
     // without opening anything: marks on the screen, the driver in the
     // toolbar, the last action under the device.

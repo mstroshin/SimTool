@@ -5,6 +5,7 @@
 function paletteCommands() {
   const commands = [
     ["Device", "home", "Home", "⇧⌘H", pressHome],
+    ["Device", "home", "Open the app switcher", "⌃⇧⌘H", openAppSwitcher],
     ["Device", "camera", "Save screenshot", "⌘S", saveScreenshot],
     ["Device", "copy", "Copy screenshot", "", copyScreenshot],
     capture.recording ? ["Device", "stop", "Stop recording and save the video", "⌘R", stopRecording] : ["Device", "record", "Record video", "⌘R", startRecording],
@@ -151,7 +152,7 @@ function showShortcuts() {
   openPopover($("paletteButton"),
     "<p><b>⇧⌘P</b> commands · <b>⌥1–5</b> inspector tabs · <b>⌥⌘0</b> show or hide the inspector · <b>/</b> filter</p>" +
     "<p><b>↑ ↓</b> move in a list · <b>Enter</b> open · <b>Esc</b> close · <b>⇧F10</b> the row's menu</p>" +
-    "<p><b>⇧⌘H</b> Home · <b>⌘S</b> screenshot · <b>⌘R</b> record video, again to save it · <b>⌃⌘Z</b> shake · <b>⇧⌘K</b> connect the Mac keyboard (⇧⌘K again releases it) · <b>⌘K</b> software keyboard while typing</p>" +
+    "<p><b>⇧⌘H</b> Home · <b>⌃⇧⌘H</b> or a double-click on Home: the app switcher · <b>⌘S</b> screenshot · <b>⌘R</b> record video, again to save it · <b>⌃⌘Z</b> shake · <b>⇧⌘K</b> connect the Mac keyboard (⇧⌘K again releases it) · <b>⌘K</b> software keyboard while typing</p>" +
     "<p><b>⌥-drag</b> pinch or rotate · <b>⌥⇧-drag</b> two-finger pan · the wheel scrolls · <b>P</b> picks elements in Accessibility · <b>⌘↩</b> runs the selected test</p>");
 }
 
@@ -177,6 +178,7 @@ document.addEventListener("keydown", (event) => {
     if (app.dataset.mode === "replay") { event.preventDefault(); exitReplay(); return; }
     return;
   }
+  if (event.metaKey && event.ctrlKey && event.shiftKey && event.code === "KeyH") { event.preventDefault(); openAppSwitcher(); return; }
   if (meta && event.shiftKey && event.code === "KeyH") { event.preventDefault(); pressHome(); return; }
   if (event.metaKey && !event.shiftKey && !event.altKey && !event.ctrlKey && event.code === "KeyS") { event.preventDefault(); saveScreenshot(); return; }
   if (event.metaKey && !event.shiftKey && !event.altKey && !event.ctrlKey && event.code === "KeyR") { event.preventDefault(); if (!event.repeat) toggleRecording(); return; }
