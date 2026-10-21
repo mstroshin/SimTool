@@ -35,7 +35,8 @@ final class WebViewerKeyboardTests: XCTestCase {
         XCTAssertTrue(html.contains(".app.keys-on .screen {"), "missing the ring around the screen")
         XCTAssertTrue(html.contains(".app.keys-on.keys-paused .screen {"), "missing the paused ring")
         XCTAssertTrue(html.contains("id=\"sbKeys\""), "missing the status bar cell")
-        XCTAssertTrue(html.contains("Keys → device · ⇧⌘K releases"), "the way out of the mode must be on screen")
+        XCTAssertTrue(html.contains("Mac keyboard types into the simulator · ⇧⌘K stops"), "the way out of the mode must be on screen")
+        XCTAssertTrue(html.contains(#"id="sbKeys" title=""#), "the cell explains itself on hover")
     }
 
     func testThePageKeepsItsOwnKeysAndTheModeChord() throws {

@@ -672,7 +672,13 @@ function updateKeyboardIndicator() {
   button.dataset.tip = on ? "The Mac keyboard types into the simulator — ⇧⌘K releases it" : "Keyboard — the software keyboard and the Mac keyboard";
   app.classList.toggle("keys-on", on);
   app.classList.toggle("keys-paused", on && !live);
-  $("sbKeys").textContent = !on ? "Keys → page" : live ? "Keys → device · ⇧⌘K releases" : "Keys paused · click the screen";
+  // Where the Mac keyboard's keys go, said in full: the viewer's shortcuts, the simulator, or nowhere for now.
+  const keys = $("sbKeys");
+  keys.textContent = !on ? "Mac keyboard: viewer shortcuts" : live ? "Mac keyboard types into the simulator · ⇧⌘K stops" : "Mac keyboard: paused — click the simulator's screen";
+  // A plain title: the status bar clips the viewer's own tooltips.
+  keys.title = !on ? "The Mac keyboard works the viewer's shortcuts — connect it (⇧⌘K) to type into the simulator"
+    : live ? "Every key goes to the simulator, except SimTool's own shortcuts — ⇧⌘K gives the keyboard back to the viewer"
+    : "Connected, but a viewer field or another window has the keyboard — click the simulator's screen to type into it again";
 }
 
 function setKeyboardMode(on) {
