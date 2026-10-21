@@ -1,0 +1,36 @@
+import Foundation
+import SimToolCore
+import SimToolServer
+import XCTest
+
+// POST /api/v1/device: a change the device cannot take is refused with the
+// reason, and the activity feed says it failed.
+final class DeviceRouteTests: XCTestCase {
+    func testABadDeviceRequestIsRefusedWithTheReasonAndShowsAsFailed() async throws {
+        let port = try freeLoopbackPort()
+        let device = SimulatorDevice(udid: "TEST-UDID", name: "iPhone", runtime: "iOS", state: "Booted", isAvailable: true)
+        let server = StreamServer(config: StreamServerConfig(host: "127.0.0.1", port: port, device: device, captureEnabled: false))
+        try server.start()
+        defer { server.stop() }
+
+        for (body, expected) in [
+            (#"{"action": "appearance", "value": "blue"}"#, "Appearance takes light or dark"),
+            (#"{"action": "push", "payload": {"aps": {}}}"#, "needs the app's bundle id"),
+            (#"{"action": "teleport"}"#, "Unknown device action teleport"),
+        ] {
+            var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/api/v1/device")!)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = Data(body.utf8)
+            let (data, response) = try await URLSession.shared.data(for: request)
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 400, body)
+            XCTAssertTrue(String(decoding: data, as: UTF8.self).contains(expected), "\(body) → \(String(decoding: data, as: UTF8.self))")
+        }
+
+        let (data, _) = try await URLSession.shared.data(from: URL(string: "http://127.0.0.1:\(port)/api/v1/activity")!)
+        let feed = try JSON.decoder.decode(DeviceActivityPayload.self, from: data)
+        XCTAssertEqual(feed.entries.map(\.title), ["Change appearance", "Push to the app", "Teleport"])
+        XCTAssertEqual(Set(feed.entries.map(\.status)), [.failed])
+        XCTAssertEqual(feed.entries.first?.kind, "appearance")
+    }
+}

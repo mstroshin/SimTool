@@ -123,6 +123,60 @@ final class TestDefinitionParserTests: XCTestCase {
         }
     }
 
+    // Steps that set the device up as the scenario needs it: the same requests
+    // the CLI and the viewer send.
+    func testParsesTheDevicesSettingsSteps() throws {
+        let test = try TestDefinitionParser.parse("""
+        steps:
+          - appearance: dark
+          - textSize: ax3
+          - contrast: on
+          - biometrics: nomatch
+          - push: { aps: { alert: "Hello" } }
+          - push: { app: com.example.other, payload: { aps: { badge: 2 } } }
+          - location: "37.3349,-122.0090"
+          - location: { latitude: 1.5, longitude: 2 }
+          - location: { route: ["1,2", "3,4"], speed: 15 }
+          - location: clear
+          - statusBar: clean
+          - statusBar: { time: "9:41", batteryLevel: 20, batteryState: discharging }
+          - statusBar: clear
+        """)
+        XCTAssertEqual(test.steps.map(\.action), [
+            .device(DeviceControlPayload(action: "appearance", value: "dark")),
+            .device(DeviceControlPayload(action: "content-size", value: "accessibility-extra-large")),
+            .device(DeviceControlPayload(action: "increase-contrast", enabled: true)),
+            .device(DeviceControlPayload(action: "biometrics", value: "nomatch")),
+            .device(DeviceControlPayload(action: "push", payload: .object(["aps": .object(["alert": .string("Hello")])]))),
+            .device(DeviceControlPayload(action: "push", bundleId: "com.example.other", payload: .object(["aps": .object(["badge": .number(2)])]))),
+            .device(DeviceControlPayload(action: "location", location: SimulatorLocation(waypoints: [SimulatorCoordinate(latitude: 37.3349, longitude: -122.009)]))),
+            .device(DeviceControlPayload(action: "location", location: SimulatorLocation(waypoints: [SimulatorCoordinate(latitude: 1.5, longitude: 2)]))),
+            .device(DeviceControlPayload(action: "location", location: SimulatorLocation(waypoints: [SimulatorCoordinate(latitude: 1, longitude: 2), SimulatorCoordinate(latitude: 3, longitude: 4)], speed: 15))),
+            .device(DeviceControlPayload(action: "location", value: "clear")),
+            .device(DeviceControlPayload(action: "status-bar", statusBar: .clean)),
+            .device(DeviceControlPayload(action: "status-bar", statusBar: SimulatorStatusBar(time: "9:41", batteryState: "discharging", batteryLevel: 20))),
+            .device(DeviceControlPayload(action: "status-bar", value: "clear")),
+        ])
+        XCTAssertEqual(test.steps.prefix(4).map(\.description), ["Dark appearance", "Text size AX3", "Increase Contrast on", "Non-matching face or finger"])
+        for (step, expected) in [
+            ("- appearance: blue", "takes light or dark"),
+            ("- textSize: huge", "`textSize:` takes one of"),
+            ("- biometrics: maybe", "takes enroll, unenroll, match or nomatch"),
+            ("- push: hello", "`push:` is the payload"),
+            ("- push: { alert: hi }", "needs an `aps` dictionary"),
+            ("- push: { payload: { aps: {} }, sound: x }", "unknown key `sound`"),
+            ("- location: somewhere", "is not a latitude,longitude pair"),
+            ("- location: { route: [\"1,2\"] }", "two or more"),
+            ("- statusBar: { batteryLevel: 120 }", "battery level must be 0…100"),
+            ("- statusBar: { clock: 1 }", "unknown key `clock`"),
+            ("- statusBar: tidy", "takes clear, clean"),
+        ] {
+            XCTAssertThrowsError(try TestDefinitionParser.parse("steps:\n  \(step)\n"), step) { error in
+                XCTAssertTrue("\(error)".contains(expected), "\(step) → \(error)")
+            }
+        }
+    }
+
     func testLongPressDurationIsOptional() throws {
         let test = try TestDefinitionParser.parse("""
         steps:

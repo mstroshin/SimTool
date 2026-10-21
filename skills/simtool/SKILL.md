@@ -319,6 +319,34 @@ picture for people, not for reading the UI). A video of the screen: `POST
   attach its console (useful when the app logs richly to stdout — networking,
   navigation, etc.). Note OSLog can be quiet while the app is idle.
 
+### The simulator's settings and debug switches
+What Simulator.app kept in its menus and Device Hub (Xcode 27) dropped. Each
+command prints the setting without a value and changes it with one; every change
+reaches the viewer's Activity like an input does. `simtool settings` prints them
+all as the device reports them.
+- `simtool ui [appearance light|dark | text-size <size>|bigger|smaller | contrast on|off]`
+  — sizes are simctl's (`large` is iOS's default, `accessibility-medium` …) or
+  `xs`…`xxxl`, `ax1`…`ax5`.
+- `simtool debug [<option> on|off]` — `slow-animations`, `color-blended`,
+  `color-copies`, `color-misaligned`, `color-offscreen`; they stay on until turned
+  off. `simtool debug memory-warning` sends every app a memory warning.
+- `simtool biometrics enroll|unenroll|match|nomatch` — the device type's Face ID
+  or Touch ID. `match`/`nomatch` answer a prompt the app already has up: tap
+  the button that asks, then answer.
+- `simtool push --alert "<text>"` (or a payload file, `-`, `--payload <json>`)
+  — to `--app`, else the config's bundleId. The app must have notification
+  permission to show it; in the foreground it reaches its
+  `willPresent` delegate.
+- `simtool status-bar clean` (9:41, full Wi-Fi, charged) · `--time … --battery-level …`
+  · `clear`. Naming any cellular field makes simctl fill in the rest (5G,
+  "Carrier").
+- `simtool location set <lat>,<lon>` · `route <lat>,<lon> <lat>,<lon>… [--speed m/s]`
+  · `clear`. simctl cannot read a location back: `simtool location` prints the
+  one SimTool last set.
+
+The same changes are `POST /api/v1/device` (`{"action": "appearance", "value":
+"dark"}`, …; `GET /api/v1/device` reads them) and YAML steps (`simtool-test`).
+
 ### Network (app gRPC/HTTP via the logger)
 `simtool network …` covers a system-level snapshot and app-emitted events. App
 events require the app to be **launched with the network logger armed** —

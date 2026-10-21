@@ -25,7 +25,7 @@ import Foundation
 public actor SimulatorDirectInputClient {
     public static let shared = SimulatorDirectInputClient()
 
-    private static let helperVersion = "6"
+    private static let helperVersion = "7"
     /// Part of the cached binary's name, so any change to the helper's source
     /// compiles a fresh one instead of reusing a stale build of the same version.
     private static let helperFingerprint = SHA256.hash(data: Data(SimulatorDirectInputHelperSource.source.utf8))
@@ -121,6 +121,30 @@ public actor SimulatorDirectInputClient {
 
     public func setHardwareKeyboard(connected: Bool, deviceUDID: String) async throws {
         try await answered(SimulatorDirectInputCommand.hardwareKeyboard(connected: connected).line, deviceUDID: deviceUDID, timeoutSeconds: Self.keyboardTimeout)
+    }
+
+    /// Whether the guest render server's debug option `option` is on
+    /// (`SimulatorDebugOption`).
+    public func renderDebugOption(_ option: UInt32, deviceUDID: String) async throws -> Bool {
+        try await renderDebug(.renderDebugOption(option), deviceUDID: deviceUDID)
+    }
+
+    /// Turns it on or off and returns what the device reports afterwards.
+    public func setRenderDebugOption(_ option: UInt32, enabled: Bool, deviceUDID: String) async throws -> Bool {
+        try await renderDebug(.renderDebugOption(option, enabled: enabled), deviceUDID: deviceUDID)
+    }
+
+    private func renderDebug(_ command: SimulatorDirectInputCommand, deviceUDID: String) async throws -> Bool {
+        let answer = try await answered(command.line, deviceUDID: deviceUDID, timeoutSeconds: 5)
+        guard let on = SimulatorDirectInputCommand.flag(fromAnswer: answer) else {
+            throw SimToolError("The simulator gave no state for its debug option: \(answer)")
+        }
+        return on
+    }
+
+    /// Simulate Memory Warning, as Simulator.app's Debug menu did.
+    public func simulateMemoryWarning(deviceUDID: String) async throws {
+        try await answered(SimulatorDirectInputCommand.memoryWarning.line, deviceUDID: deviceUDID, timeoutSeconds: 5)
     }
 
     /// Room for the helper's first key to connect to the guest's keyboard
@@ -429,6 +453,20 @@ struct SimulatorDirectInputCommand: Equatable {
 
     static let boot = Self(line: "boot")
 
+    /// Reads the render server's debug option, or sets it first: `cadebug N [1|0]`.
+    static func renderDebugOption(_ option: UInt32, enabled: Bool? = nil) -> Self {
+        Self(line: "cadebug \(option)" + (enabled.map { $0 ? " 1" : " 0" } ?? ""))
+    }
+
+    /// Reads `ok 1|0`, the helper's answer to `cadebug`.
+    static func flag(fromAnswer answer: String) -> Bool? {
+        let parts = answer.split(separator: " ")
+        guard parts.count == 2, parts[0] == "ok", parts[1] == "0" || parts[1] == "1" else { return nil }
+        return parts[1] == "1"
+    }
+
+    static let memoryWarning = Self(line: "memwarn")
+
     static let deviceType = Self(line: "type")
 
     /// Reads `ok IDENTIFIER BUNDLEPATH`, the helper's answer to `type`; the
@@ -692,6 +730,9 @@ enum SimulatorDirectInputHelperSource {
     //   button PAGE USAGE       presses one HID usage of another page; 12 184
     //                           (Eject) toggles the software keyboard
     //   hwkeyboard 1|0          connects or disconnects the hardware keyboard
+    //   cadebug N [1|0]         "ok 1|0" — the render server's debug option N,
+    //                           after setting it when a value is given
+    //   memwarn                 simulates a memory warning
     // Streamed, never answered (a live finger must not wait on a reply):
     //   down X Y | move X Y | up X Y
     //   down2 X1 Y1 X2 Y2 | move2 … | up2 …     two fingers
@@ -997,6 +1038,40 @@ enum SimulatorDirectInputHelperSource {
       return NULL;
     }
 
+    // MARK: - the device's debug controls (worker thread only)
+
+    // CoreSimulator's SimCADebugOption category hands the number to the guest's
+    // bridge, which passes it to its render server (CARenderServerSetDebugOption).
+    // Older CoreSimulators may type the option differently; only a number is sent.
+    static const char *renderDebugOption(unsigned option, int set, BOOL *now) {
+      SEL setter = sel_registerName("setCADebugOption:enabled:");
+      SEL getter = sel_registerName("getCADebugOption:");
+      Method method = class_getInstanceMethod([device class], getter);
+      char argument[8] = {0};
+      if (method) { method_getArgumentType(method, 2, argument, sizeof(argument)); }
+      if (!method || ![device respondsToSelector:setter] || argument[0] != 'I') { return "this CoreSimulator has no render debug options"; }
+      if (set >= 0) { ((void (*)(id, SEL, unsigned, BOOL))objc_msgSend)(device, setter, option, set ? YES : NO); }
+      *now = ((BOOL (*)(id, SEL, unsigned))objc_msgSend)(device, getter, option);
+      return NULL;
+    }
+
+    // Simulator.app's Simulate Memory Warning: the guest's processes get a
+    // memory-pressure warning, which UIKit turns into didReceiveMemoryWarning.
+    static const char *memoryWarning(void) {
+      static char failure[256];
+      SEL withError = sel_registerName("simulateMemoryWarningWithError:");
+      if ([device respondsToSelector:withError]) {
+        NSError *err = nil;
+        if (((BOOL (*)(id, SEL, NSError **))objc_msgSend)(device, withError, &err)) { return NULL; }
+        snprintf(failure, sizeof(failure), "the simulator refused the memory warning: %s", (err.localizedDescription ?: @"no reason given").UTF8String);
+        return failure;
+      }
+      SEL plain = sel_registerName("simulateMemoryWarning");
+      if (![device respondsToSelector:plain]) { return "this CoreSimulator cannot simulate a memory warning"; }
+      ((void (*)(id, SEL))objc_msgSend)(device, plain);
+      return NULL;
+    }
+
     // MARK: - the finger (worker thread only)
 
     typedef struct { double x, y, x2, y2; } Spot;
@@ -1109,7 +1184,7 @@ enum SimulatorDirectInputHelperSource {
 
     // MARK: - commands
 
-    typedef enum { CmdDown, CmdMove, CmdUp, CmdTap, CmdSwipe, CmdPath, CmdSize, CmdBoot, CmdType, CmdTarget, CmdKey, CmdPress, CmdButton, CmdHardwareKeyboard, CmdQuit } Kind;
+    typedef enum { CmdDown, CmdMove, CmdUp, CmdTap, CmdSwipe, CmdPath, CmdSize, CmdBoot, CmdType, CmdTarget, CmdKey, CmdPress, CmdButton, CmdHardwareKeyboard, CmdRenderDebug, CmdMemoryWarning, CmdQuit } Kind;
     typedef struct {
       Kind kind; int count; Spot spot; double x2, y2; int ms; char *text;
       unsigned usage, page, mods[3]; int modCount; BOOL on;   // keyboard commands
@@ -1261,6 +1336,13 @@ enum SimulatorDirectInputHelperSource {
           return YES;
         }
         case CmdHardwareKeyboard: replyFailure(setHardwareKeyboard(c->on)); return YES;
+        case CmdRenderDebug: {
+          BOOL now = NO;
+          const char *failure = renderDebugOption(c->usage, c->ms, &now);
+          if (failure) { replyFailure(failure); } else { printf("ok %d\n", now ? 1 : 0); fflush(stdout); }
+          return YES;
+        }
+        case CmdMemoryWarning: replyFailure(memoryWarning()); return YES;
         case CmdQuit: fingerUp(last); releaseKeys(); settleKeys(); return NO;
       }
       return YES;
@@ -1359,6 +1441,8 @@ enum SimulatorDirectInputHelperSource {
       }
       if (!strcmp(name, "button") && n >= 2) { c->kind = CmdButton; c->page = (unsigned)v[0]; c->usage = (unsigned)v[1]; return YES; }
       if (!strcmp(name, "hwkeyboard") && n >= 1) { c->kind = CmdHardwareKeyboard; c->on = v[0] != 0; return YES; }
+      if (!strcmp(name, "cadebug") && n >= 1) { c->kind = CmdRenderDebug; c->usage = (unsigned)v[0]; c->ms = n >= 2 ? (v[1] != 0) : -1; return YES; }
+      if (!strcmp(name, "memwarn")) { c->kind = CmdMemoryWarning; return YES; }
       size_t len = strlen(name);
       BOOL two = len > 1 && name[len - 1] == '2';
       if (two) { name[len - 1] = 0; }

@@ -85,6 +85,8 @@ public final class StreamServer: @unchecked Sendable {
     private let activity = DeviceActivityLog()
     /// The device's screens and the lit one, once its device type is read.
     private let displays = DeviceDisplays()
+    /// The device's settings and debug switches as it reports them.
+    private let deviceSettings: DeviceSettingsReader
     private var displayMonitor: DisplayStateMonitor?
     private var foldMonitor: FoldMonitor?
     /// A foldable's 3D preview, rendered while a viewer watches it.
@@ -124,6 +126,10 @@ public final class StreamServer: @unchecked Sendable {
     public init(config: StreamServerConfig) {
         self.config = config
         self.server = SameOriginHttpServer(policy: SameOriginPolicy(serverHost: config.host))
+        let device = config.device
+        self.deviceSettings = DeviceSettingsReader {
+            await SimulatorDeviceControl.read(deviceUDID: device.udid, deviceType: device.deviceTypeIdentifier)
+        }
         let displays = displays
         self.testSessions = TestSessionController(
             store: TestSessionStore(root: config.testSessionsRoot),
@@ -375,6 +381,17 @@ public final class StreamServer: @unchecked Sendable {
             connected: { session in self.openLiveInputChannel(for: session) },
             disconnected: { session in self.closeLiveInputChannel(for: session) }
         )
+        // The device's settings and debug switches: read back as the device
+        // reports them, changed one request at a time.
+        server.GET["/api/v1/device"] = { _ in
+            do {
+                let settings = self.deviceSettings
+                return try self.jsonEncodedResponse(try self.waitForAsync { await settings.current() })
+            } catch {
+                return self.errorResponse(error)
+            }
+        }
+        server.POST["/api/v1/device"] = { request in self.handleDeviceControl(request) }
         server.POST["/api/v1/input/paste-image"] = { request in self.handlePasteImage(request) }
         server.POST["/api/v1/photos"] = { request in self.handleAddToPhotos(request) }
 
@@ -1093,6 +1110,32 @@ public final class StreamServer: @unchecked Sendable {
                 stdout: output.stdoutString,
                 stderr: output.stderrString
             ))
+        } catch {
+            activity.finish(id: entry.id, error: error.localizedDescription)
+            return errorResponse(error, statusCode: 400, reason: "Bad Request")
+        }
+    }
+
+    /// Changes a setting of the device or acts on it, as one activity entry.
+    private func handleDeviceControl(_ request: HttpRequest) -> HttpResponse {
+        let control: DeviceControlPayload
+        do {
+            control = try decodeJSON(DeviceControlPayload.self, from: request)
+        } catch {
+            return errorResponse(error, statusCode: 400, reason: "Bad Request")
+        }
+        let (actor, via) = activityActor(of: request)
+        let words = DeviceActivityWording.describe(control: control)
+        let entry = activity.begin(actor: actor, via: via, kind: words.kind, title: words.title, detail: words.detail)
+        let udid = config.device.udid, app = config.defaultLogApp
+        defer { deviceSettings.invalidate() }
+        do {
+            let startedAt = Date()
+            let result = try waitForAsync { try await SimulatorDeviceControl.perform(control, deviceUDID: udid, app: app) }
+            testSessions.noteInput(at: startedAt)
+            if DeviceActivityWording.reportsResult(of: control) { activity.update(id: entry.id) { $0.detail = result } }
+            activity.finish(id: entry.id)
+            return try jsonEncodedResponse(CommandResultPayload(ok: true, stdout: result, stderr: ""))
         } catch {
             activity.finish(id: entry.id, error: error.localizedDescription)
             return errorResponse(error, statusCode: 400, reason: "Bad Request")

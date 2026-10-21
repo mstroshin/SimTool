@@ -329,6 +329,7 @@ function takeActivity(entries, revision, history) {
   for (const entry of fresh) { if (history) activity.drawn.add(entry.id); else markFresh(entry); }
   renderDriver();
   if (fresh.length || history) renderSoon(renderActivity);
+  if (!history) deviceActivitySeen(entries);
 }
 
 async function pollActivity() {

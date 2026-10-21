@@ -51,6 +51,15 @@
       <symbol id="i-fold-closed" viewBox="0 0 16 16"><rect x="4.5" y="2.5" width="7" height="11" rx="1.2"/><path d="M6.2 2.5v11"/></symbol>
       <symbol id="i-fold-book" viewBox="0 0 16 16"><path d="M8 4v9.5M8 4 2.5 2.5v9.5L8 13.5M8 4l5.5-1.5v9.5L8 13.5"/></symbol>
       <symbol id="i-cube" viewBox="0 0 16 16"><path d="M8 1.8 13.5 5v6L8 14.2 2.5 11V5Z"/><path d="M2.5 5 8 8.2 13.5 5M8 8.2v6"/></symbol>
+      <symbol id="i-bell" viewBox="0 0 16 16"><path d="M4 11V7.5a4 4 0 0 1 8 0V11l1.2 1.5H2.8Z"/><path d="M6.8 14.2h2.4"/></symbol>
+      <symbol id="i-pin" viewBox="0 0 16 16"><path d="M8 14.2s4.5-4.2 4.5-7.7a4.5 4.5 0 0 0-9 0c0 3.5 4.5 7.7 4.5 7.7Z"/><circle cx="8" cy="6.5" r="1.6"/></symbol>
+      <symbol id="i-face" viewBox="0 0 16 16"><path d="M2.5 5V3.5a1 1 0 0 1 1-1H5M11 2.5h1.5a1 1 0 0 1 1 1V5M13.5 11v1.5a1 1 0 0 1-1 1H11M5 13.5H3.5a1 1 0 0 1-1-1V11"/><path d="M6 6.2v1.2M10 6.2v1.2M8 6.2v2.7h-.7M6.2 10.7c1 .8 2.6.8 3.6 0"/></symbol>
+      <symbol id="i-text" viewBox="0 0 16 16"><path d="m1.8 12.5 3.5-9 3.5 9M3 9.5h4.6M10.3 12.5l2-5 2 5M10.9 11h2.8"/></symbol>
+      <symbol id="i-contrast" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5"/><path d="M8 2.5v11a5.5 5.5 0 0 0 0-11Z" fill="currentColor"/></symbol>
+      <symbol id="i-layers" viewBox="0 0 16 16"><path d="M8 2.5 14 5.5 8 8.5 2 5.5Z"/><path d="m2 8.5 6 3 6-3M2 11l6 3 6-3"/></symbol>
+      <symbol id="i-memory" viewBox="0 0 16 16"><rect x="3.5" y="3.5" width="9" height="9" rx="1"/><path d="M6 1.5v2M10 1.5v2M6 12.5v2M10 12.5v2M1.5 6h2M1.5 10h2M12.5 6h2M12.5 10h2"/></symbol>
+      <symbol id="i-battery" viewBox="0 0 16 16"><rect x="1.5" y="5" width="11.5" height="6" rx="1.2"/><path d="M14.5 7v2M3.5 7v2h5.5V7Z"/></symbol>
+      <symbol id="i-slow" viewBox="0 0 16 16"><path d="M4 2h8M4 14h8M5 2c0 3.6 6 3.4 6 6s-6 2.4-6 6M11 2c0 3.6-6 3.4-6 6s6 2.4 6 6"/></symbol>
       <symbol id="i-fold-open" viewBox="0 0 16 16"><rect x="1.5" y="3.5" width="13" height="9" rx="1.2"/><path d="M8 3.5v9" stroke-dasharray="1.2 1.8"/></symbol>
     </defs>
   </svg>
@@ -153,6 +162,7 @@
           <button role="tab" class="tab" type="button" id="tab-ax" data-tab="ax" aria-controls="panel-ax" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+4">Accessibility</button>
           <button role="tab" class="tab" type="button" id="tab-tests" data-tab="tests" aria-controls="panel-tests" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+5">Tests <span class="count" id="count-tests"></span><span class="count-err" id="err-tests" hidden></span></button>
           <button role="tab" class="tab" type="button" id="tab-activity" data-tab="activity" aria-controls="panel-activity" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+6">Activity <span class="count" id="count-activity"></span><span class="count-err" id="err-activity" hidden></span></button>
+          <button role="tab" class="tab" type="button" id="tab-device" data-tab="device" aria-controls="panel-device" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+7">Device</button>
         </div>
         <div class="panel" role="tabpanel" id="panel-network" aria-labelledby="tab-network"></div>
         <div class="panel" role="tabpanel" id="panel-logs" aria-labelledby="tab-logs" hidden></div>
@@ -160,6 +170,7 @@
         <div class="panel" role="tabpanel" id="panel-ax" aria-labelledby="tab-ax" hidden></div>
         <div class="panel" role="tabpanel" id="panel-tests" aria-labelledby="tab-tests" hidden></div>
         <div class="panel" role="tabpanel" id="panel-activity" aria-labelledby="tab-activity" hidden></div>
+        <div class="panel" role="tabpanel" id="panel-device" aria-labelledby="tab-device" hidden></div>
       </section>
     </main>
 
@@ -209,6 +220,7 @@
 {{js/tests.js}}
 {{js/review.js}}
 {{js/activity.js}}
+{{js/settings.js}}
 {{js/palette.js}}
 {{js/events.js}}
 {{js/main.js}}

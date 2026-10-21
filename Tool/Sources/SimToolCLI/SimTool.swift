@@ -30,6 +30,13 @@ struct SimTool: AsyncParsableCommand {
             Logs.self,
             Network.self,
             Mock.self,
+            UI.self,
+            Debug.self,
+            Biometrics.self,
+            Push.self,
+            StatusBar.self,
+            Location.self,
+            Settings.self,
             AppCommand.self,
             TestCommand.self,
             Run.self,
@@ -1577,6 +1584,11 @@ struct TestCommand: AsyncParsableCommand {
                 - fling: { direction: up, speed: fast }
                 - drag: { from: { label: "Milk" }, to: { label: "Eggs" } }
                 - keyboard: hide              # or show — the software keyboard
+                - appearance: dark            # the device's settings: textSize, contrast too
+                - biometrics: match           # enroll | unenroll | match | nomatch
+                - push: { aps: { alert: "Hi" } }   # to the test's app
+                - location: "37.3349,-122.0090"    # or { route: [...], speed: 20 } or clear
+                - statusBar: clean            # or { time: "9:41", batteryLevel: 20 } or clear
                 - assertVisible: { text: "Welcome", criterion: AC-1 }
                 - assertHidden: { label: "Loading" }
                 - wait: 2

@@ -1,4 +1,5 @@
 import SimToolCore
+import SimToolNetworkLogger
 import XCTest
 
 // The feed's words for an input read the same whether the server performed it
@@ -82,5 +83,39 @@ final class TestSessionEntryTimeTests: XCTestCase {
         XCTAssertEqual(decoded.endedAt!.timeIntervalSince(decoded.at), 0.067, accuracy: 0.001)
         let old = try JSON.decoder.decode(TestSessionEntry.self, from: Data(#"{"kind":"step","at":"2026-06-12T16:00:00Z","text":"Tapped"}"#.utf8))
         XCTAssertEqual(old.at.timeIntervalSince1970, 1_781_280_000)
+    }
+}
+
+// A change to the device's settings reads as what it does.
+final class DeviceControlWordingTests: XCTestCase {
+    private func title(_ control: DeviceControlPayload) -> String { DeviceActivityWording.describe(control: control).title }
+
+    func testEachSettingSaysWhatChanged() {
+        XCTAssertEqual(title(DeviceControlPayload(action: "appearance", value: "dark")), "Dark appearance")
+        XCTAssertEqual(title(DeviceControlPayload(action: "content-size", value: "ax2")), "Text size AX2")
+        XCTAssertEqual(title(DeviceControlPayload(action: "content-size", value: "increment")), "Larger text")
+        XCTAssertEqual(title(DeviceControlPayload(action: "increase-contrast", enabled: false)), "Increase Contrast off")
+        XCTAssertEqual(title(DeviceControlPayload(action: "debug", option: "blended", enabled: true)), "Color Blended Layers on")
+        XCTAssertEqual(title(DeviceControlPayload(action: "memory-warning")), "Simulate a memory warning")
+        XCTAssertEqual(title(DeviceControlPayload(action: "biometrics", value: "nomatch")), "Non-matching face or finger")
+        XCTAssertEqual(title(DeviceControlPayload(action: "status-bar", value: "clear")), "Clear the status bar")
+        XCTAssertEqual(title(DeviceControlPayload(action: "status-bar", statusBar: SimulatorStatusBar(time: "9:41", batteryLevel: 100))), "Status bar 9:41 · 100%")
+        XCTAssertEqual(title(DeviceControlPayload(action: "location", location: SimulatorLocation(waypoints: [SimulatorCoordinate(latitude: 1, longitude: 2)]))), "Location 1,2")
+        XCTAssertEqual(DeviceActivityWording.describe(control: DeviceControlPayload(action: "debug", option: "slow", enabled: true)).kind, "debug")
+    }
+
+    func testAPushNamesItsAppAndQuotesItsAlert() {
+        let payload = NetworkLoggerJSONValue.object(["aps": .object(["alert": .object(["title": .string("Order"), "body": .string("Shipped")])])])
+        let words = DeviceActivityWording.describe(control: DeviceControlPayload(action: "push", bundleId: "com.example.shop", payload: payload))
+        XCTAssertEqual(words.title, "Push to com.example.shop")
+        XCTAssertEqual(words.detail, "“Order — Shipped”")
+    }
+
+    // The device's answer is worth the detail line only where it adds to the title.
+    func testOnlyAnAnswerThatSaysMoreBecomesTheDetail() {
+        XCTAssertTrue(DeviceActivityWording.reportsResult(of: DeviceControlPayload(action: "content-size", value: "increment")))
+        XCTAssertTrue(DeviceActivityWording.reportsResult(of: DeviceControlPayload(action: "biometrics", value: "match")))
+        XCTAssertFalse(DeviceActivityWording.reportsResult(of: DeviceControlPayload(action: "appearance", value: "dark")))
+        XCTAssertFalse(DeviceActivityWording.reportsResult(of: DeviceControlPayload(action: "status-bar", value: "clear")))
     }
 }

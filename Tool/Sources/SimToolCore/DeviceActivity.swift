@@ -1,4 +1,5 @@
 import Foundation
+import SimToolNetworkLogger
 
 /// Who acted on the device. `agent` is whatever drives it from outside a
 /// SimTool page — the CLI, a script, the HTTP API; `test` is a YAML test run;
@@ -234,6 +235,78 @@ public enum DeviceActivityWording {
             return ("button", "Press " + (name.lowercased() == "home" ? "Home" : name), nil)
         default:
             return (action.isEmpty ? "input" : action, action.isEmpty ? "Input" : action.prefix(1).uppercased() + action.dropFirst(), nil)
+        }
+    }
+
+    /// The words for a change to the device's settings or a debug action
+    /// (`DeviceControlPayload`); what the device reported afterwards goes in
+    /// the entry's detail once it is done.
+    public static func describe(control: DeviceControlPayload) -> (kind: String, title: String, detail: String?) {
+        let action = control.action.lowercased()
+        let clear = control.value?.lowercased() == "clear"
+        func onOff(_ enabled: Bool?) -> String { enabled == false ? " off" : " on" }
+        switch action {
+        case "appearance":
+            return ("appearance", (control.value?.lowercased() == "dark" ? "Dark" : control.value?.lowercased() == "light" ? "Light" : "Change") + " appearance", nil)
+        case "content-size", "text-size":
+            let size = control.value.flatMap(SimulatorContentSize.parse) ?? control.value ?? ""
+            let title = switch size {
+            case "increment": "Larger text"
+            case "decrement": "Smaller text"
+            default: "Text size " + SimulatorContentSize.short(size)
+            }
+            return ("text-size", title, nil)
+        case "increase-contrast", "contrast":
+            return ("contrast", "Increase Contrast" + onOff(control.enabled), nil)
+        case "debug":
+            let option = control.option.flatMap(SimulatorDebugOption.init(parsing:))
+            return ("debug", (option?.title ?? named(control.option) ?? "Debug option") + onOff(control.enabled), nil)
+        case "memory-warning":
+            return ("memory-warning", "Simulate a memory warning", nil)
+        case "biometrics":
+            let title = switch control.value.flatMap(SimulatorBiometricAction.init(parsing:)) {
+            case .enroll: "Enroll Face ID / Touch ID"
+            case .unenroll: "Unenroll Face ID / Touch ID"
+            case .match: "Matching face or finger"
+            case .nomatch: "Non-matching face or finger"
+            case nil: "Biometrics"
+            }
+            return ("biometrics", title, nil)
+        case "push":
+            return ("push", "Push to " + (named(control.bundleId) ?? "the app"), control.payload.flatMap(pushAlert).map { quoted(excerpt($0)) })
+        case "status-bar":
+            return ("status-bar", clear ? "Clear the status bar" : "Status bar " + (control.statusBar?.summary ?? ""), nil)
+        case "location":
+            if clear { return ("location", "Clear the location", nil) }
+            return ("location", "Location " + (control.location?.summary ?? ""), nil)
+        default:
+            return (action.isEmpty ? "device" : action, action.isEmpty ? "Device" : action.prefix(1).uppercased() + action.dropFirst(), nil)
+        }
+    }
+
+    /// Whether what the device reports afterwards says more than the title:
+    /// the size a step landed on, Face ID or Touch ID, every status bar
+    /// override in force.
+    public static func reportsResult(of control: DeviceControlPayload) -> Bool {
+        switch control.action.lowercased() {
+        case "content-size", "text-size", "biometrics": true
+        case "status-bar": control.value?.lowercased() != "clear"
+        default: false
+        }
+    }
+
+    /// A push's alert text: `aps.alert` as a string, or its title and body.
+    static func pushAlert(_ payload: NetworkLoggerJSONValue) -> String? {
+        guard case .object(let root) = payload, case .object(let aps)? = root["aps"] else { return nil }
+        switch aps["alert"] {
+        case .string(let text)?: return text
+        case .object(let alert)?:
+            let parts = ["title", "body"].compactMap { key -> String? in
+                if case .string(let text)? = alert[key] { return text }
+                return nil
+            }
+            return parts.isEmpty ? nil : parts.joined(separator: " — ")
+        default: return nil
         }
     }
 

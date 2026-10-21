@@ -19,6 +19,7 @@ enum WebViewerAssets {
         "js/network.js": jsNetworkJs,
         "js/palette.js": jsPaletteJs,
         "js/review.js": jsReviewJs,
+        "js/settings.js": jsSettingsJs,
         "js/state.js": jsStateJs,
         "js/stream.js": jsStreamJs,
         "js/tests.js": jsTestsJs,
@@ -360,6 +361,7 @@ enum WebViewerAssets {
           for (const entry of fresh) { if (history) activity.drawn.add(entry.id); else markFresh(entry); }
           renderDriver();
           if (fresh.length || history) renderSoon(renderActivity);
+          if (!history) deviceActivitySeen(entries);
         }
 
         async function pollActivity() {
@@ -2077,7 +2079,7 @@ enum WebViewerAssets {
         // inspector, the filter field every tab shares, app launches, and the
         // split detail under each list.
 
-        const TABS = ["network", "logs", "state", "ax", "tests", "activity"];
+        const TABS = ["network", "logs", "state", "ax", "tests", "activity", "device"];
         const inspector = { tab: stored("tab", "network"), open: stored("inspectorOpen", true), attachedApp: "", configKnown: false };
         const tabHandlers = {};   // tab → { show(), hide() }
 
@@ -4965,6 +4967,7 @@ enum WebViewerAssets {
           if (deviceInfo.app) {
             commands.push(["App", "stop", "Terminate " + deviceInfo.app, "", terminateApp], ["App", "relaunch", "Relaunch " + deviceInfo.app, "", relaunchApp]);
           }
+          commands.push(...deviceSettingCommands());
           commands.push(
             ["Inspector", "panel", inspector.open ? "Hide the inspector" : "Show the inspector", "⌥⌘0", () => setInspectorOpen(!inspector.open)],
             ["Inspector", "panel", "Network", "⌥1", () => openTab("network")],
@@ -4973,6 +4976,7 @@ enum WebViewerAssets {
             ["Inspector", "pick", "Accessibility", "⌥4", () => openTab("ax")],
             ["Inspector", "panel", "Tests", "⌥5", () => openTab("tests")],
             ["Inspector", "pick", "Activity — what was done to the device", "⌥6", () => openTab("activity")],
+            ["Inspector", "panel", "Device — the simulator's settings and debug switches", "⌥7", () => openTab("device")],
             ["Inspector", "search", "Filter the current list", "/", focusFilter],
             ["Network", network.paused ? "play" : "pause", network.paused ? "Resume the request list" : "Pause the request list", "", () => { openTab("network"); networkPause.click(); }],
             ["Network", "trash", "Clear the request list", "", () => { openTab("network"); networkClear.click(); }],
@@ -4992,6 +4996,35 @@ enum WebViewerAssets {
           return commands.map(([group, glyph, label, kbd, run]) => ({ group, glyph, label, kbd, run }));
         }
 
+        // The settings the Device tab changes, worded as the device has them now:
+        // "Turn on" what is off. The palette reads them when it opens.
+        function deviceSettingCommands() {
+          const data = deviceSettings.data || {};
+          const debug = data.debug || {};
+          const bio = data.biometrics || {};
+          const otherAppearance = data.appearance === "dark" ? "light" : "dark";
+          const commands = [
+            ["Settings", otherAppearance === "dark" ? "moon" : "sun", "Switch the device to the " + otherAppearance + " appearance", "", () => setAppearance(otherAppearance)],
+            ["Settings", "text", "Larger text on the device (Dynamic Type)", "", () => setTextSize("increment")],
+            ["Settings", "text", "Smaller text on the device (Dynamic Type)", "", () => setTextSize("decrement")],
+            ["Settings", "contrast", (data.increaseContrast ? "Turn off" : "Turn on") + " Increase Contrast", "", () => setContrast(!data.increaseContrast)],
+            ["Settings", "battery", "Status bar: 9:41 for screenshots", "", () => statusBarPreset("clean")],
+            ["Settings", "battery", "Status bar: clear the overrides", "", () => statusBarPreset("clear")],
+            ["Settings", "pin", "Clear the simulated location", "", clearLocation],
+            ["Settings", "bell", "Send a push notification…", "", () => { openTab("device"); pushPayload.focus(); }]
+          ];
+          for (const [option, title] of DEBUG_OPTIONS) {
+            commands.push(["Debug", option === "slow-animations" ? "slow" : "layers", (debug[option] ? "Turn off " : "Turn on ") + title, "", () => setDebugOption(option, !debug[option])]);
+          }
+          commands.push(
+            ["Debug", "memory", "Simulate a memory warning", "", simulateMemoryWarning],
+            ["Debug", "face", biometryName() + ": " + (bio.enrolled ? "unenroll" : "enroll"), "", () => biometrics(bio.enrolled ? "unenroll" : "enroll")],
+            ["Debug", "face", biometryName() + ": a matching " + biometryThing(), "", () => biometrics("match")],
+            ["Debug", "face", biometryName() + ": a non-matching " + biometryThing(), "", () => biometrics("nomatch")]
+          );
+          return commands;
+        }
+
         // Switching tabs from the keyboard lands in the new tab's list, where ↑/↓ work
         // at once — unless focus was somewhere a person is still using, like the screen.
         function openTab(tab) {
@@ -5006,12 +5039,13 @@ enum WebViewerAssets {
           const lists = { network: networkList, logs: logsList, ax: axList, tests: tests.view === "history" ? historyList : definitionList, activity: activityList };
           if (lists[tab]) lists[tab].focus();
           else if (tab === "state") (stateModels.querySelector('[tabindex="0"]') || stateModels).focus();
+          else if (tab === "device") { const first = devicePanel.querySelector("button:not([disabled]), select, input"); if (first) first.focus(); }
         }
 
         function focusFilter() {
           if (!inspector.open) setInspectorOpen(true);
           const filters = { network: networkFilter, logs: logsFilter, state: stateFilter, ax: axFilter, tests: testsFilter, activity: activityFilter };
-          filters[inspector.tab].focus();
+          if (filters[inspector.tab]) filters[inspector.tab].focus();
         }
 
         let paletteItems = [];
@@ -5046,6 +5080,8 @@ enum WebViewerAssets {
           $("paletteInput").value = "";
           paletteIndex = 0;
           renderPalette();
+          // Settings commands say "turn on" or "turn off" as the device has them now.
+          loadDeviceSettings().then(() => { if (!$("paletteScrim").hidden) renderPalette(); });
           $("paletteInput").focus();
         }
 
@@ -5088,7 +5124,7 @@ enum WebViewerAssets {
 
         function showShortcuts() {
           openPopover($("paletteButton"),
-            "<p><b>⇧⌘P</b> commands · <b>⌥1–5</b> inspector tabs · <b>⌥⌘0</b> show or hide the inspector · <b>/</b> filter</p>" +
+            "<p><b>⇧⌘P</b> commands · <b>⌥1–7</b> inspector tabs · <b>⌥⌘0</b> show or hide the inspector · <b>/</b> filter</p>" +
             "<p><b>↑ ↓</b> move in a list · <b>Enter</b> open · <b>Esc</b> close · <b>⇧F10</b> the row's menu</p>" +
             "<p><b>⇧⌘H</b> Home · <b>⌃⇧⌘H</b> or a double-click on Home: the app switcher · <b>⌘S</b> screenshot · <b>⌘R</b> record video, again to save it · <b>⌃⌘Z</b> shake · <b>⇧⌘K</b> connect the Mac keyboard (⇧⌘K again releases it) · <b>⌘K</b> software keyboard while typing</p>" +
             "<p><b>⌥-drag</b> pinch or rotate · <b>⌥⇧-drag</b> two-finger pan · the wheel scrolls · <b>P</b> picks elements in Accessibility · <b>⌘↩</b> runs the selected test</p>");
@@ -5122,7 +5158,7 @@ enum WebViewerAssets {
           if (event.metaKey && !event.shiftKey && !event.altKey && !event.ctrlKey && event.code === "KeyR") { event.preventDefault(); if (!event.repeat) toggleRecording(); return; }
           if (event.metaKey && event.ctrlKey && event.code === "KeyZ") { event.preventDefault(); pressShake(); return; }
           if (event.metaKey && event.altKey && event.code === "Digit0") { event.preventDefault(); setInspectorOpen(!inspector.open); return; }
-          if (event.altKey && !meta && /^Digit[1-6]$/.test(event.code)) { event.preventDefault(); openTab(TABS[Number(event.code.slice(5)) - 1]); return; }
+          if (event.altKey && !meta && /^Digit[1-7]$/.test(event.code)) { event.preventDefault(); openTab(TABS[Number(event.code.slice(5)) - 1]); return; }
           if (meta && event.key === "Enter" && inspector.tab === "tests" && tests.view === "tests" && tests.selectedFile) { event.preventDefault(); runTest(tests.selectedFile); return; }
           if (editing || keyboardBridge.enabled) return;
           if (meta && event.code === "KeyF" && inspector.open) { event.preventDefault(); focusFilter(); return; }
@@ -5313,6 +5349,292 @@ enum WebViewerAssets {
           openTab(tab);
           refreshReview();
         }
+        """#
+
+    static let jsSettingsJs = #"""
+        // The Device tab: the simulator's settings and debug switches as the device
+        // reports them — appearance, text size, contrast, the render server's debug
+        // colours, slow animations, Face ID or Touch ID, the status bar, the
+        // location — with the controls that change them, and the actions
+        // Simulator.app kept in its menus: a memory warning, a push. A change goes to
+        // POST /api/v1/device and lands in Activity like any other action; the tab
+        // reads the device again after it, while it is open, and when Activity says
+        // something else changed a setting.
+
+        const deviceSettings = { data: null, error: "", loaded: false, loading: null };
+        // Activity kinds that change what this tab shows.
+        const DEVICE_SETTING_KINDS = new Set(["appearance", "text-size", "contrast", "debug", "biometrics", "status-bar", "location"]);
+        const DEBUG_OPTIONS = [
+          ["slow-animations", "Slow Animations", "Every app's animations run ten times slower"],
+          ["color-blended", "Color Blended Layers", "Green where layers are opaque, red where they blend"],
+          ["color-copies", "Color Copied Images", "Cyan where Core Animation copies an image it cannot use as is"],
+          ["color-misaligned", "Color Misaligned Images", "Magenta on images off the pixel grid, yellow on scaled ones"],
+          ["color-offscreen", "Color Off-screen Rendered", "Yellow where a layer is rendered off-screen first"]
+        ];
+        const TEXT_SIZES = [
+          ["extra-small", "XS"], ["small", "S"], ["medium", "M"], ["large", "L — default"], ["extra-large", "XL"],
+          ["extra-extra-large", "XXL"], ["extra-extra-extra-large", "XXXL"], ["accessibility-medium", "AX1"],
+          ["accessibility-large", "AX2"], ["accessibility-extra-large", "AX3"], ["accessibility-extra-extra-large", "AX4"],
+          ["accessibility-extra-extra-extra-large", "AX5"]
+        ];
+
+        async function loadDeviceSettings() {
+          if (deviceSettings.loading) return deviceSettings.loading;
+          deviceSettings.loading = (async () => {
+            try {
+              deviceSettings.data = await apiJSON("/api/v1/device");
+              deviceSettings.error = "";
+            } catch (error) {
+              deviceSettings.error = error.message || String(error);
+            } finally {
+              deviceSettings.loaded = true;
+              deviceSettings.loading = null;
+              syncDeviceSettings();
+            }
+          })();
+          return deviceSettings.loading;
+        }
+
+        // Changes the device; a person's change during someone else's run asks first.
+        async function postDevice(payload, label) {
+          if (!manualInputAllowed(() => postDevice(payload, label))) return false;
+          try {
+            await api("/api/v1/device", { method: "POST", body: JSON.stringify(payload), headers: { "X-SimTool-Source": "viewer" } });
+            toast(label);
+            return true;
+          } catch (error) {
+            fail(label + " failed", error);
+            return false;
+          } finally {
+            loadDeviceSettings();
+          }
+        }
+
+        // What Activity brings: a setting changed by an agent, a test or another viewer.
+        function deviceActivitySeen(entries) {
+          if (activeTab("device") && entries.some((entry) => entry.status !== "running" && DEVICE_SETTING_KINDS.has(entry.kind))) loadDeviceSettings();
+        }
+
+        function setDebugOption(option, enabled) {
+          const title = (DEBUG_OPTIONS.find(([name]) => name === option) || [option, option])[1];
+          return postDevice({ action: "debug", option, enabled }, title + (enabled ? " on" : " off"));
+        }
+
+        function setAppearance(value) { return postDevice({ action: "appearance", value }, (value === "dark" ? "Dark" : "Light") + " appearance"); }
+        function setTextSize(value) { return postDevice({ action: "content-size", value }, value === "increment" ? "Larger text" : value === "decrement" ? "Smaller text" : "Text size " + textSizeName(value)); }
+        function setContrast(enabled) { return postDevice({ action: "increase-contrast", enabled }, "Increase Contrast " + (enabled ? "on" : "off")); }
+        function simulateMemoryWarning() { return postDevice({ action: "memory-warning" }, "Memory warning sent"); }
+        function biometrics(value) {
+          const sensor = biometryName();
+          const words = { enroll: sensor + " enrolled", unenroll: sensor + " unenrolled", match: "Matching " + biometryThing(), nomatch: "Non-matching " + biometryThing() };
+          return postDevice({ action: "biometrics", value }, words[value]);
+        }
+        function statusBarPreset(value) {
+          return value === "clear" ? postDevice({ action: "status-bar", value: "clear" }, "Status bar overrides cleared")
+            : postDevice({ action: "status-bar", statusBar: { time: "9:41", dataNetwork: "wifi", wifiMode: "active", wifiBars: 3, batteryState: "charged", batteryLevel: 100 } }, "Status bar set to 9:41");
+        }
+        function clearLocation() { return postDevice({ action: "location", value: "clear" }, "Location cleared"); }
+
+        function textSizeName(value) { const size = TEXT_SIZES.find(([name]) => name === value); return size ? size[1].split(" ")[0] : value; }
+        function biometryName() { const kind = deviceSettings.data && deviceSettings.data.biometrics && deviceSettings.data.biometrics.kind; return kind === "touch" ? "Touch ID" : "Face ID"; }
+        function biometryThing() { return biometryName() === "Touch ID" ? "finger" : "face"; }
+
+        // ---- The panel: built once, synced with each reading ----
+
+        function switchButton(label, description, onToggle) {
+          const button = el("button", { class: "sw", type: "button", role: "switch", "aria-checked": "false", "aria-label": label, title: description || label });
+          button.addEventListener("click", () => onToggle(button.getAttribute("aria-checked") !== "true"));
+          return button;
+        }
+
+        function settingRow(name, control, note) {
+          return el("div", { class: "dev-row" }, el("span", { class: "dev-name", text: name }), note || null, control);
+        }
+
+        function field(label, control) {
+          return el("label", { class: "field" }, el("span", { text: label }), control);
+        }
+
+        function select(options, label) {
+          const node = el("select", { class: "input", "aria-label": label });
+          for (const [value, text] of options) node.append(el("option", { value, text }));
+          return node;
+        }
+
+        function devSection(title, ...children) {
+          return el("section", { class: "dev-sec", "aria-label": title }, el("h3", { text: title }), ...children);
+        }
+
+        const devicePanel = $("panel-device");
+        const deviceRead = el("span", { class: "muted" });
+        const deviceRefresh = el("button", { class: "tb-btn", type: "button", "aria-label": "Read the settings from the device again", "data-tip": "Read the settings from the device again", html: icon("relaunch") });
+        deviceRefresh.addEventListener("click", () => loadDeviceSettings());
+        const deviceProblem = el("div", { class: "callout warn", hidden: true });
+
+        const appearanceSeg = segmented("Appearance", [["light", "Light"], ["dark", "Dark"]], () => deviceSettings.data && deviceSettings.data.appearance, setAppearance);
+        const textSizeSelect = select(TEXT_SIZES, "Text size");
+        textSizeSelect.addEventListener("change", () => setTextSize(textSizeSelect.value));
+        const textSmaller = el("button", { class: "btn btn-sm", type: "button", "aria-label": "Smaller text", "data-tip": "Smaller text", text: "A−" });
+        const textLarger = el("button", { class: "btn btn-sm", type: "button", "aria-label": "Larger text", "data-tip": "Larger text", text: "A+" });
+        textSmaller.addEventListener("click", () => setTextSize("decrement"));
+        textLarger.addEventListener("click", () => setTextSize("increment"));
+        const contrastSwitch = switchButton("Increase Contrast", "Increase Contrast", setContrast);
+
+        const debugSwitches = {};
+        for (const [option, title, description] of DEBUG_OPTIONS) debugSwitches[option] = switchButton(title, description, (on) => setDebugOption(option, on));
+        const memoryButton = el("button", { class: "btn btn-sm", type: "button", text: "Simulate memory warning", title: "Every app gets didReceiveMemoryWarning, as on a device short of memory" });
+        memoryButton.addEventListener("click", simulateMemoryWarning);
+
+        const biometryTitle = el("h3", { text: "Face ID" });
+        const enrolledSwitch = switchButton("Enrolled", "Whether a face or a finger is enrolled — what canEvaluatePolicy reads", (on) => biometrics(on ? "enroll" : "unenroll"));
+        const matchButton = el("button", { class: "btn btn-sm", type: "button", text: "Matching face" });
+        const noMatchButton = el("button", { class: "btn btn-sm", type: "button", text: "Non-matching face" });
+        matchButton.addEventListener("click", () => biometrics("match"));
+        noMatchButton.addEventListener("click", () => biometrics("nomatch"));
+
+        const statusNow = el("span", { class: "dev-now" });
+        const statusTime = el("input", { class: "input", type: "text", placeholder: "9:41", "aria-label": "Time" });
+        const statusBattery = el("input", { class: "input", type: "number", min: "0", max: "100", placeholder: "100", "aria-label": "Battery level" });
+        const statusBatteryState = select([["", "—"], ["charging", "Charging"], ["charged", "Charged"], ["discharging", "Discharging"]], "Battery state");
+        const statusNetwork = select([["", "—"], ["wifi", "Wi-Fi"], ["hide", "Hidden"], ["3g", "3G"], ["4g", "4G"], ["lte", "LTE"], ["lte-a", "LTE-A"], ["lte+", "LTE+"], ["5g", "5G"], ["5g+", "5G+"], ["5g-uwb", "5G UWB"], ["5g-uc", "5G UC"]], "Data network");
+        const statusWifi = select([["", "—"], ["0", "0"], ["1", "1"], ["2", "2"], ["3", "3"]], "Wi-Fi bars");
+        const statusCell = select([["", "—"], ["0", "0"], ["1", "1"], ["2", "2"], ["3", "3"], ["4", "4"]], "Cellular bars");
+        const statusOperator = el("input", { class: "input", type: "text", placeholder: "Carrier", "aria-label": "Operator name" });
+        const statusApply = el("button", { class: "btn btn-sm btn-primary", type: "button", text: "Override" });
+        const statusClean = el("button", { class: "btn btn-sm", type: "button", text: "9:41 for screenshots", title: "9:41, full Wi-Fi, a charged battery" });
+        const statusClear = el("button", { class: "btn btn-sm", type: "button", text: "Clear overrides" });
+        statusApply.addEventListener("click", () => {
+          const bar = {};
+          if (statusTime.value.trim()) bar.time = statusTime.value.trim();
+          if (statusBattery.value !== "") bar.batteryLevel = Number(statusBattery.value);
+          if (statusBatteryState.value) bar.batteryState = statusBatteryState.value;
+          if (statusNetwork.value) bar.dataNetwork = statusNetwork.value;
+          if (statusWifi.value) bar.wifiBars = Number(statusWifi.value);
+          if (statusCell.value) bar.cellularBars = Number(statusCell.value);
+          if (statusOperator.value) bar.operatorName = statusOperator.value;
+          if (!Object.keys(bar).length) { toast("Fill in a field to override", { error: true }); return; }
+          postDevice({ action: "status-bar", statusBar: bar }, "Status bar overridden");
+        });
+        statusClean.addEventListener("click", () => statusBarPreset("clean"));
+        statusClear.addEventListener("click", () => statusBarPreset("clear"));
+
+        const locationNow = el("span", { class: "dev-now" });
+        const locationPoint = el("input", { class: "input", type: "text", placeholder: "37.3349, -122.0090", "aria-label": "Latitude, longitude" });
+        const locationSet = el("button", { class: "btn btn-sm btn-primary", type: "button", text: "Set" });
+        const locationRoute = el("textarea", { class: "input", rows: "3", placeholder: "One latitude, longitude per line — two or more", "aria-label": "Route" });
+        const locationSpeed = el("input", { class: "input", type: "number", min: "0.1", step: "any", placeholder: "20", "aria-label": "Speed, metres per second" });
+        const locationStart = el("button", { class: "btn btn-sm", type: "button", text: "Start the route" });
+        const locationClear = el("button", { class: "btn btn-sm", type: "button", text: "Clear" });
+        locationSet.addEventListener("click", () => {
+          const point = parseCoordinate(locationPoint.value);
+          if (!point) { toast("A location is latitude, longitude — like 37.3349, -122.0090", { error: true }); return; }
+          postDevice({ action: "location", location: { waypoints: [point] } }, "Location set");
+        });
+        locationStart.addEventListener("click", () => {
+          const points = locationRoute.value.split("\n").map((line) => line.trim()).filter(Boolean).map(parseCoordinate);
+          if (points.length < 2 || points.some((point) => !point)) { toast("A route is two or more lines of latitude, longitude", { error: true }); return; }
+          const location = { waypoints: points };
+          if (locationSpeed.value) location.speed = Number(locationSpeed.value);
+          postDevice({ action: "location", location }, "Route started");
+        });
+        locationClear.addEventListener("click", clearLocation);
+
+        const pushApp = el("input", { class: "input", type: "text", "aria-label": "App bundle identifier" });
+        const pushPayload = el("textarea", { class: "input", rows: "5", spellcheck: "false", "aria-label": "Payload JSON" });
+        pushPayload.value = JSON.stringify({ aps: { alert: { title: "SimTool", body: "A push from the viewer" }, sound: "default" } }, null, 2);
+        const pushSend = el("button", { class: "btn btn-sm btn-primary", type: "button", text: "Send" });
+        pushSend.addEventListener("click", () => {
+          let payload;
+          try { payload = JSON.parse(pushPayload.value); } catch (error) { toast("The payload is not JSON: " + error.message, { error: true }); return; }
+          const bundleId = pushApp.value.trim() || deviceInfo.app;
+          if (!bundleId) { toast("Name the app to push to", { error: true }); return; }
+          postDevice({ action: "push", bundleId, payload }, "Push sent to " + bundleId);
+        });
+
+        const deviceBody = el("div", { class: "dev-body" },
+          deviceProblem,
+          devSection("Appearance and text",
+            settingRow("Appearance", appearanceSeg),
+            settingRow("Text size", el("span", { class: "dev-inline" }, textSmaller, textSizeSelect, textLarger)),
+            settingRow("Increase Contrast", contrastSwitch)),
+          devSection("Rendering",
+            ...DEBUG_OPTIONS.map(([option, title]) => settingRow(title, debugSwitches[option])),
+            el("div", { class: "dev-actions" }, memoryButton)),
+          el("section", { class: "dev-sec", "aria-label": "Biometrics" }, biometryTitle,
+            settingRow("Enrolled", enrolledSwitch),
+            el("div", { class: "dev-actions" }, matchButton, noMatchButton)),
+          devSection("Status bar",
+            el("div", { class: "dev-row" }, statusNow),
+            el("div", { class: "dev-grid" },
+              field("Time", statusTime), field("Battery %", statusBattery), field("Battery", statusBatteryState),
+              field("Data network", statusNetwork), field("Wi-Fi bars", statusWifi), field("Cellular bars", statusCell), field("Operator", statusOperator)),
+            el("div", { class: "dev-actions" }, statusApply, statusClean, statusClear)),
+          devSection("Location",
+            el("div", { class: "dev-row" }, locationNow),
+            el("div", { class: "dev-inline" }, locationPoint, locationSet),
+            field("Route", locationRoute),
+            el("div", { class: "dev-actions" }, field("Speed, m/s", locationSpeed), locationStart, locationClear)),
+          devSection("Push notification",
+            field("App", pushApp),
+            field("Payload", pushPayload),
+            el("div", { class: "dev-actions" }, pushSend))
+        );
+        devicePanel.append(el("div", { class: "ptool" }, deviceRead, el("span", { class: "ptool-spacer" }), deviceRefresh), deviceBody);
+
+        function parseCoordinate(text) {
+          const parts = String(text).split(",").map((part) => Number(part.trim()));
+          if (parts.length !== 2 || parts.some((part) => !isFinite(part)) || Math.abs(parts[0]) > 90 || Math.abs(parts[1]) > 180) return null;
+          return { latitude: parts[0], longitude: parts[1] };
+        }
+
+        function setSwitch(button, on) {
+          button.setAttribute("aria-checked", String(!!on));
+          button.disabled = on == null;
+        }
+
+        // Each control shows the device's answer; what it would not tell stays blank
+        // and the callout says why.
+        function syncDeviceSettings() {
+          const data = deviceSettings.data || {};
+          deviceRead.textContent = deviceSettings.error ? "Could not read the device" : deviceSettings.loaded ? "As the device reports it" : "Reading the device…";
+          const problems = Object.entries(data.unavailable || {}).map(([name, reason]) => name + ": " + reason);
+          if (deviceSettings.error) problems.unshift(deviceSettings.error);
+          deviceProblem.hidden = !problems.length;
+          deviceProblem.innerHTML = icon("warn") + "<span>" + problems.map(escapeHTML).join("<br>") + "</span>";
+          appearanceSeg.sync();
+          if (data.contentSize && TEXT_SIZES.some(([name]) => name === data.contentSize)) textSizeSelect.value = data.contentSize;
+          setSwitch(contrastSwitch, data.increaseContrast);
+          for (const [option] of DEBUG_OPTIONS) setSwitch(debugSwitches[option], data.debug ? data.debug[option] : null);
+          const bio = data.biometrics;
+          biometryTitle.textContent = bio && !bio.kind ? "Biometrics — this device has no sensor" : biometryName();
+          setSwitch(enrolledSwitch, bio ? bio.enrolled : null);
+          matchButton.textContent = "Matching " + biometryThing();
+          noMatchButton.textContent = "Non-matching " + biometryThing();
+          matchButton.title = noMatchButton.title = "Answers the " + biometryName() + " prompt the app has up";
+          statusNow.textContent = data.statusBar ? "Now: " + statusBarSummary(data.statusBar) : "";
+          locationNow.textContent = data.location ? "Set by SimTool " + formatAgo(data.location.setAt) + ": " + locationSummary(data.location) : "No location set by SimTool — simctl cannot read one back";
+          pushApp.placeholder = deviceInfo.app || "com.example.app";
+        }
+
+        function statusBarSummary(bar) {
+          const parts = [];
+          if (bar.time) parts.push(bar.time);
+          if (bar.dataNetwork) parts.push(bar.dataNetwork);
+          if (bar.wifiBars != null) parts.push("Wi-Fi " + bar.wifiBars + "/3");
+          if (bar.cellularBars != null) parts.push("cell " + bar.cellularBars + "/4");
+          if (bar.operatorName) parts.push(bar.operatorName);
+          if (bar.batteryLevel != null) parts.push(bar.batteryLevel + "%" + (bar.batteryState ? " " + bar.batteryState : ""));
+          return parts.length ? parts.join(" · ") : "no overrides";
+        }
+
+        function locationSummary(location) {
+          const points = location.waypoints || [];
+          if (points.length === 1) return points[0].latitude + ", " + points[0].longitude;
+          return "a route of " + points.length + " points" + (location.speed ? " at " + location.speed + " m/s" : "");
+        }
+
+        tabHandlers.device = { show() { syncDeviceSettings(); loadDeviceSettings(); } };
+        syncDeviceSettings();
         """#
 
     static let jsStateJs = #"""
@@ -7254,6 +7576,34 @@ enum WebViewerAssets {
         .who-agent, .who-test { color: var(--course); background: var(--course-bg); }
         .who-viewer { color: var(--ink2); background: var(--g3); }
 
+        /* Device: the simulator's settings and debug switches, a section per subject */
+        .dev-body { flex: 1; overflow: auto; overscroll-behavior: contain; padding: 0 var(--sp-3) var(--sp-5); }
+        .dev-body > .callout { margin-top: var(--sp-2); }
+        .dev-sec { padding: var(--sp-2) 0 var(--sp-3); border-bottom: 1px solid var(--line-hair); }
+        .dev-sec:last-child { border-bottom: 0; }
+        .dev-sec h3 { margin: var(--sp-1) 0 var(--sp-1); color: var(--ink2); font-size: var(--fs-11); font-weight: 600; }
+        .dev-row { display: flex; align-items: center; gap: var(--sp-2); min-height: 30px; }
+        .dev-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .dev-now { color: var(--ink3); font: var(--fs-11)/1.5 var(--font-mono); overflow-wrap: anywhere; }
+        .dev-inline { display: flex; align-items: center; gap: 6px; }
+        .dev-inline .input[type="text"] { flex: 1; min-width: 0; }
+        .dev-actions { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 6px; margin-top: var(--sp-2); }
+        .dev-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: 6px var(--sp-2); margin-top: var(--sp-1); }
+        .field { display: flex; flex-direction: column; gap: 3px; margin-top: 6px; color: var(--ink2); font-size: var(--fs-11); }
+        .dev-grid .field { margin-top: 0; }
+        .input { height: 26px; min-width: 0; padding: 0 6px; border: 1px solid var(--line-thick); border-radius: var(--r-2); background: var(--g0); color: var(--ink1); font: var(--fs-12) var(--font-ui); }
+        .input:focus { outline: 0; border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+        .input::placeholder { color: var(--ink3); }
+        textarea.input { height: auto; padding: 6px; font: var(--fs-11)/1.5 var(--font-mono); resize: vertical; }
+        select.input { padding-right: 2px; }
+        /* A setting that is on or off: the menus' switch, as a control of its own. */
+        .sw { position: relative; flex: none; width: 30px; height: 18px; padding: 0; border: 0; border-radius: 9px; background: var(--line-thick); cursor: pointer; }
+        .sw::after { content: ""; position: absolute; top: 3px; left: 3px; width: 12px; height: 12px; border-radius: 50%; background: var(--g2); transition: transform var(--dur) var(--ease); }
+        .sw[aria-checked="true"] { background: var(--course); }
+        .sw[aria-checked="true"]::after { transform: translateX(12px); }
+        .sw:disabled { opacity: .4; cursor: default; }
+        .sw:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
         /* No app attached */
         .noapp { flex: 1; overflow: auto; padding: var(--sp-6) var(--sp-5); }
         .noapp h2 { margin: 0 0 var(--sp-2); font-size: var(--fs-15); font-weight: 600; }
@@ -7383,6 +7733,15 @@ enum WebViewerAssets {
               <symbol id="i-fold-closed" viewBox="0 0 16 16"><rect x="4.5" y="2.5" width="7" height="11" rx="1.2"/><path d="M6.2 2.5v11"/></symbol>
               <symbol id="i-fold-book" viewBox="0 0 16 16"><path d="M8 4v9.5M8 4 2.5 2.5v9.5L8 13.5M8 4l5.5-1.5v9.5L8 13.5"/></symbol>
               <symbol id="i-cube" viewBox="0 0 16 16"><path d="M8 1.8 13.5 5v6L8 14.2 2.5 11V5Z"/><path d="M2.5 5 8 8.2 13.5 5M8 8.2v6"/></symbol>
+              <symbol id="i-bell" viewBox="0 0 16 16"><path d="M4 11V7.5a4 4 0 0 1 8 0V11l1.2 1.5H2.8Z"/><path d="M6.8 14.2h2.4"/></symbol>
+              <symbol id="i-pin" viewBox="0 0 16 16"><path d="M8 14.2s4.5-4.2 4.5-7.7a4.5 4.5 0 0 0-9 0c0 3.5 4.5 7.7 4.5 7.7Z"/><circle cx="8" cy="6.5" r="1.6"/></symbol>
+              <symbol id="i-face" viewBox="0 0 16 16"><path d="M2.5 5V3.5a1 1 0 0 1 1-1H5M11 2.5h1.5a1 1 0 0 1 1 1V5M13.5 11v1.5a1 1 0 0 1-1 1H11M5 13.5H3.5a1 1 0 0 1-1-1V11"/><path d="M6 6.2v1.2M10 6.2v1.2M8 6.2v2.7h-.7M6.2 10.7c1 .8 2.6.8 3.6 0"/></symbol>
+              <symbol id="i-text" viewBox="0 0 16 16"><path d="m1.8 12.5 3.5-9 3.5 9M3 9.5h4.6M10.3 12.5l2-5 2 5M10.9 11h2.8"/></symbol>
+              <symbol id="i-contrast" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5"/><path d="M8 2.5v11a5.5 5.5 0 0 0 0-11Z" fill="currentColor"/></symbol>
+              <symbol id="i-layers" viewBox="0 0 16 16"><path d="M8 2.5 14 5.5 8 8.5 2 5.5Z"/><path d="m2 8.5 6 3 6-3M2 11l6 3 6-3"/></symbol>
+              <symbol id="i-memory" viewBox="0 0 16 16"><rect x="3.5" y="3.5" width="9" height="9" rx="1"/><path d="M6 1.5v2M10 1.5v2M6 12.5v2M10 12.5v2M1.5 6h2M1.5 10h2M12.5 6h2M12.5 10h2"/></symbol>
+              <symbol id="i-battery" viewBox="0 0 16 16"><rect x="1.5" y="5" width="11.5" height="6" rx="1.2"/><path d="M14.5 7v2M3.5 7v2h5.5V7Z"/></symbol>
+              <symbol id="i-slow" viewBox="0 0 16 16"><path d="M4 2h8M4 14h8M5 2c0 3.6 6 3.4 6 6s-6 2.4-6 6M11 2c0 3.6-6 3.4-6 6s6 2.4 6 6"/></symbol>
               <symbol id="i-fold-open" viewBox="0 0 16 16"><rect x="1.5" y="3.5" width="13" height="9" rx="1.2"/><path d="M8 3.5v9" stroke-dasharray="1.2 1.8"/></symbol>
             </defs>
           </svg>
@@ -7485,6 +7844,7 @@ enum WebViewerAssets {
                   <button role="tab" class="tab" type="button" id="tab-ax" data-tab="ax" aria-controls="panel-ax" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+4">Accessibility</button>
                   <button role="tab" class="tab" type="button" id="tab-tests" data-tab="tests" aria-controls="panel-tests" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+5">Tests <span class="count" id="count-tests"></span><span class="count-err" id="err-tests" hidden></span></button>
                   <button role="tab" class="tab" type="button" id="tab-activity" data-tab="activity" aria-controls="panel-activity" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+6">Activity <span class="count" id="count-activity"></span><span class="count-err" id="err-activity" hidden></span></button>
+                  <button role="tab" class="tab" type="button" id="tab-device" data-tab="device" aria-controls="panel-device" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+7">Device</button>
                 </div>
                 <div class="panel" role="tabpanel" id="panel-network" aria-labelledby="tab-network"></div>
                 <div class="panel" role="tabpanel" id="panel-logs" aria-labelledby="tab-logs" hidden></div>
@@ -7492,6 +7852,7 @@ enum WebViewerAssets {
                 <div class="panel" role="tabpanel" id="panel-ax" aria-labelledby="tab-ax" hidden></div>
                 <div class="panel" role="tabpanel" id="panel-tests" aria-labelledby="tab-tests" hidden></div>
                 <div class="panel" role="tabpanel" id="panel-activity" aria-labelledby="tab-activity" hidden></div>
+                <div class="panel" role="tabpanel" id="panel-device" aria-labelledby="tab-device" hidden></div>
               </section>
             </main>
 
@@ -7541,6 +7902,7 @@ enum WebViewerAssets {
         {{js/tests.js}}
         {{js/review.js}}
         {{js/activity.js}}
+        {{js/settings.js}}
         {{js/palette.js}}
         {{js/events.js}}
         {{js/main.js}}

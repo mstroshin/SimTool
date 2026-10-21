@@ -7,7 +7,7 @@ final class WebViewerPageTests: XCTestCase {
     private let page = WebViewer.pageWithAssets
 
     func testTheInspectorIsATablistWithAPanelPerTab() throws {
-        for tab in ["network", "logs", "state", "ax", "tests", "activity"] {
+        for tab in ["network", "logs", "state", "ax", "tests", "activity", "device"] {
             let tabButton = try XCTUnwrap(page.range(of: #"role="tab" class="tab" type="button" id="tab-\#(tab)""#), "missing tab \(tab)")
             XCTAssertTrue(page[tabButton.upperBound...].prefix(200).contains(#"aria-controls="panel-\#(tab)""#), "tab \(tab) must name its panel")
             XCTAssertTrue(page.contains(#"role="tabpanel" id="panel-\#(tab)" aria-labelledby="tab-\#(tab)""#), "missing panel \(tab)")
@@ -60,13 +60,28 @@ final class WebViewerPageTests: XCTestCase {
         for route in ["/api/v1/input/stream", "/api/v1/input", "/api/v1/screenshot", "/api/v1/photos", "/api/v1/input/paste-image",
                       "/api/v1/network/events", "/api/v1/mocks", "/api/v1/launches", "/api/v1/logs/capture", "/api/v1/state/events",
                       "/api/v1/ax/tree?raw=1", "/api/v1/tests/definitions", "/api/v1/tests/run", "/api/v1/tests/run/stop", "/config",
-                      "/api/v1/events", "/api/v1/activity", "/api/v1/recording", "/api/v1/recording/stop"] {
+                      "/api/v1/events", "/api/v1/activity", "/api/v1/recording", "/api/v1/recording/stop", "/api/v1/device"] {
             XCTAssertTrue(page.contains(route), "missing \(route)")
         }
         for action in [#"action: "button", name: "home""#, #"action: "shake""#, #"action: "terminate""#, #"action: "launch""#,
                        #"action: "software-keyboard""#, #"action: "hardware-keyboard", enabled: on"#, #"action: "paste", text"#] {
             XCTAssertTrue(page.contains(action), "missing \(action)")
         }
+    }
+
+    // The Device tab shows the settings as the device reports them and changes
+    // them as the viewer, so a change lands in Activity as a person's.
+    func testTheDeviceTabReadsTheSettingsAndChangesThemAsTheViewer() throws {
+        XCTAssertTrue(page.contains(#"apiJSON("/api/v1/device")"#))
+        let post = try XCTUnwrap(page.range(of: "async function postDevice("))
+        let body = page[post.upperBound...].prefix(400)
+        XCTAssertTrue(body.contains(#"api("/api/v1/device", { method: "POST""#))
+        XCTAssertTrue(body.contains(#""X-SimTool-Source": "viewer""#))
+        XCTAssertTrue(body.contains("manualInputAllowed("), "a change during someone else's run asks first")
+        for action in ["appearance", "content-size", "increase-contrast", "debug", "memory-warning", "biometrics", "status-bar", "location", "push"] {
+            XCTAssertTrue(page.contains(#"action: "\#(action)""#), "missing \(action)")
+        }
+        XCTAssertTrue(page.contains("/^Digit[1-7]$/"), "⌥7 opens the Device tab")
     }
 
     // Screenshots and videos come with the device's bezel or as the screen

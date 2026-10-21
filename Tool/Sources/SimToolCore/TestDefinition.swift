@@ -46,6 +46,12 @@ import Yams
 ///   - drag: { from: { label: "Milk" }, to: { label: "Eggs" } }
 ///   - assertVisible: { text: "Welcome", criterion: AC-1 }
 ///   - assertHidden: { label: "Loading" }
+///   - appearance: dark            # the device's settings, as the steps need them
+///   - textSize: accessibility-large
+///   - biometrics: match           # enroll | unenroll | match | nomatch
+///   - push: { aps: { alert: "Hello" } }
+///   - location: "37.3349,-122.0090"
+///   - statusBar: { time: "9:41", batteryLevel: 100 }
 ///   - wait: 2
 /// ```
 ///
@@ -373,13 +379,16 @@ public enum TestStepAction: Equatable, Sendable, CustomStringConvertible {
     case keyboard(visible: Bool)
     /// Folds a foldable (iPhone Duo): closed, book, open or a hinge angle.
     case pose(SimulatorPose)
+    /// Changes a setting of the device or acts on it: appearance, text size,
+    /// biometrics, a push, the location, the status bar.
+    case device(DeviceControlPayload)
     case pause(Double)
 
     /// Whether this action checks a result, and so may carry a `criterion:`.
     public var isAssertion: Bool {
         switch self {
         case .waitFor, .assertHidden: true
-        case .tap, .longPress, .type, .swipe, .scroll, .fling, .drag, .keyboard, .pose, .pause: false
+        case .tap, .longPress, .type, .swipe, .scroll, .fling, .drag, .keyboard, .pose, .device, .pause: false
         }
     }
 
@@ -399,6 +408,7 @@ public enum TestStepAction: Equatable, Sendable, CustomStringConvertible {
         case .assertHidden(let target, _): "Assert hidden \(target)"
         case .keyboard(let visible): visible ? "Show keyboard" : "Hide keyboard"
         case .pose(let pose): "Fold to \(pose)"
+        case .device(let control): DeviceActivityWording.describe(control: control).title
         case .pause(let seconds): "Pause \(seconds.formatted())s"
         }
     }
@@ -903,13 +913,129 @@ public enum TestDefinitionParser {
             }
         case "wait":
             action = .pause(try seconds(value, context: context))
+        case "appearance", "textSize", "contrast", "biometrics", "push", "location", "statusBar":
+            action = .device(try deviceControl(keyword, value, context: context))
         default:
-            throw SimToolError("Step \(index + 1): unknown step `\(keyword)`. Known steps: tap, longPress, type, swipe, scroll, fling, drag, keyboard, pose, waitFor, assertVisible, assertHidden, wait.")
+            throw SimToolError("Step \(index + 1): unknown step `\(keyword)`. Known steps: tap, longPress, type, swipe, scroll, fling, drag, keyboard, pose, appearance, textSize, contrast, biometrics, push, location, statusBar, waitFor, assertVisible, assertHidden, wait.")
         }
         if criterion != nil, !action.isAssertion {
             throw SimToolError("\(context): `criterion:` marks the assertion that checks the claim, so it belongs on assertVisible, assertHidden or waitFor — not on `\(keyword)`.")
         }
         return TestStep(action: action, criterion: criterion)
+    }
+
+    // MARK: - the device's settings
+
+    /// A step that changes the device rather than touching the app — the
+    /// same request `simtool ui`, `simtool biometrics`, `simtool push`,
+    /// `simtool location` and `simtool status-bar` send.
+    private static func deviceControl(_ keyword: String, _ value: Any, context: String) throws -> DeviceControlPayload {
+        let text = scalarString(value).trimmingCharacters(in: .whitespacesAndNewlines)
+        switch keyword {
+        case "appearance":
+            guard let appearance = SimulatorAppearance(rawValue: text.lowercased()) else {
+                throw SimToolError("\(context): `appearance:` takes light or dark.")
+            }
+            return DeviceControlPayload(action: "appearance", value: appearance.rawValue)
+        case "textSize":
+            guard let size = SimulatorContentSize.parse(text) else {
+                throw SimToolError("\(context): `textSize:` takes one of \(SimulatorContentSize.sizes.joined(separator: ", ")), or bigger / smaller.")
+            }
+            return DeviceControlPayload(action: "content-size", value: size)
+        case "contrast":
+            guard let enabled = try boolean(onOff(value), context: context) else { throw SimToolError("\(context): `contrast:` takes on or off.") }
+            return DeviceControlPayload(action: "increase-contrast", enabled: enabled)
+        case "biometrics":
+            guard let action = SimulatorBiometricAction(parsing: text) else {
+                throw SimToolError("\(context): `biometrics:` takes enroll, unenroll, match or nomatch.")
+            }
+            return DeviceControlPayload(action: "biometrics", value: action.rawValue)
+        case "push":
+            guard let mapping = value as? [String: Any] else {
+                throw SimToolError("\(context): `push:` is the payload, like `{ aps: { alert: \"Hello\" } }`, or `{ app: com.example.app, payload: { aps: … } }`.")
+            }
+            let wrapped = mapping["payload"] != nil
+            if wrapped, let unknown = mapping.keys.sorted().first(where: { !["payload", "app"].contains($0) }) {
+                throw SimToolError("\(context): unknown key `\(unknown)` — a wrapped push takes `payload` and `app`.")
+            }
+            let body = wrapped ? mapping["payload"]! : mapping
+            let payload = try decodeJSONValue(jsonText(from: body, context: "\(context).payload"), context: "\(context).payload")
+            guard case .object(let fields) = payload, case .object = fields["aps"] else {
+                throw SimToolError("\(context): a push payload needs an `aps` dictionary.")
+            }
+            return DeviceControlPayload(action: "push", bundleId: wrapped ? mapping["app"].map(scalarString) : nil, payload: payload)
+        case "location":
+            if text.lowercased() == "clear", !(value is [String: Any]) { return DeviceControlPayload(action: "location", value: "clear") }
+            return DeviceControlPayload(action: "location", location: try location(value, context: context))
+        default: // statusBar
+            if let preset = value as? String {
+                switch preset.lowercased() {
+                case "clear": return DeviceControlPayload(action: "status-bar", value: "clear")
+                case "clean": return DeviceControlPayload(action: "status-bar", statusBar: .clean)
+                default: throw SimToolError("\(context): `statusBar:` takes clear, clean, or a mapping of fields to override.")
+                }
+            }
+            guard let mapping = value as? [String: Any] else {
+                throw SimToolError("\(context): `statusBar:` takes clear, clean, or a mapping of fields to override.")
+            }
+            let known: Set<String> = ["time", "dataNetwork", "wifiMode", "wifiBars", "cellularMode", "cellularBars", "operatorName", "batteryState", "batteryLevel"]
+            if let unknown = mapping.keys.sorted().first(where: { !known.contains($0) }) {
+                throw SimToolError("\(context): unknown key `\(unknown)`. Known keys: \(known.sorted().joined(separator: ", ")).")
+            }
+            let bar = SimulatorStatusBar(
+                time: mapping["time"].map(scalarString),
+                dataNetwork: mapping["dataNetwork"].map(scalarString),
+                wifiMode: mapping["wifiMode"].map(scalarString),
+                wifiBars: try integer(mapping["wifiBars"], context: "\(context).wifiBars"),
+                cellularMode: mapping["cellularMode"].map(scalarString),
+                cellularBars: try integer(mapping["cellularBars"], context: "\(context).cellularBars"),
+                operatorName: mapping["operatorName"].map(scalarString),
+                batteryState: mapping["batteryState"].map(scalarString),
+                batteryLevel: try integer(mapping["batteryLevel"], context: "\(context).batteryLevel")
+            )
+            do { _ = try bar.overrideArguments() } catch { throw SimToolError("\(context): \((error as? SimToolError)?.message ?? error.localizedDescription).") }
+            return DeviceControlPayload(action: "status-bar", statusBar: bar)
+        }
+    }
+
+    /// `"37.33,-122.01"`, `{ latitude, longitude }`, or a route:
+    /// `{ route: ["37.33,-122.01", …], speed: 20 }`.
+    private static func location(_ value: Any, context: String) throws -> SimulatorLocation {
+        func coordinate(_ raw: Any) throws -> SimulatorCoordinate {
+            if let mapping = raw as? [String: Any], let latitude = mapping["latitude"], let longitude = mapping["longitude"],
+               let point = SimulatorCoordinate(parsing: scalarString(latitude) + "," + scalarString(longitude)) {
+                return point
+            }
+            guard let point = SimulatorCoordinate(parsing: scalarString(raw)) else {
+                throw SimToolError("\(context): `\(scalarString(raw))` is not a latitude,longitude pair like \"37.3349,-122.0090\".")
+            }
+            return point
+        }
+        guard let mapping = value as? [String: Any], let route = mapping["route"] else {
+            return SimulatorLocation(waypoints: [try coordinate(value)])
+        }
+        if let unknown = mapping.keys.sorted().first(where: { !["route", "speed", "interval", "distance"].contains($0) }) {
+            throw SimToolError("\(context): unknown key `\(unknown)`.")
+        }
+        guard let list = route as? [Any], list.count >= 2 else {
+            throw SimToolError("\(context): `route:` is a list of two or more latitude,longitude points.")
+        }
+        return SimulatorLocation(
+            waypoints: try list.map(coordinate),
+            speed: try mapping["speed"].map { try points($0, key: "speed", context: context) },
+            interval: try mapping["interval"].map { try points($0, key: "interval", context: context) },
+            distance: try mapping["distance"].map { try points($0, key: "distance", context: context) }
+        )
+    }
+
+    /// YAML reads `on`/`off` as text; a switch wants a bool.
+    private static func onOff(_ value: Any) -> Any {
+        guard let text = value as? String else { return value }
+        switch text.lowercased() {
+        case "on", "enabled": return true
+        case "off", "disabled": return false
+        default: return text
+        }
     }
 
     // MARK: - gestures

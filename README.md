@@ -63,7 +63,7 @@ Open `http://127.0.0.1:3200` after starting `serve` (the URL is printed on start
 or pass `--web` to open the browser viewer automatically.
 
 The viewer is one window: the device on the left, the inspector on the right
-(**Network**, **Logs**, **State**, **Accessibility**, **Tests**, **Activity**), with a splitter
+(**Network**, **Logs**, **State**, **Accessibility**, **Tests**, **Activity**, **Device**), with a splitter
 between them that remembers where you leave it; in a narrow pane the inspector
 moves under the device instead of covering it. Under the device are its size in
 points, the frame rate and the pointer's position in points; the status bar at
@@ -74,7 +74,7 @@ in the toolbar pins the other theme for this browser.
 ⇧⌘P opens a command palette with every action and test; the shortcuts follow
 Simulator.app and Xcode — ⇧⌘H Home (a double-click on the Home button or ⌃⇧⌘H opens the
 app switcher), ⌘S screenshot, ⌘R record video, ⌃⌘Z shake, ⌥⌘0 show or hide
-the inspector — and ⌥1–6 switch inspector tabs, `/` filters the current list,
+the inspector — and ⌥1–7 switch inspector tabs, `/` filters the current list,
 ↑/↓ move through it and Shift-F10 opens a row's menu. When the server goes away
 the viewer greys the last frame, says so, stops sending touches and reconnects
 by itself; a restarted server is noticed and its lists are reloaded.
@@ -180,6 +180,32 @@ swift run simtool logs tail --app com.example.MyApp --stdout --seconds 4 --json
 swift run simtool network snapshot --seconds 2 --limit 50 --json
 ```
 
+The simulator's settings and Simulator.app's Debug menu, which Device Hub
+(Xcode 27) left out — each prints the setting without a value, changes it with
+one, and reports the change to the viewers watching the device:
+
+```sh
+swift run simtool settings --json                 # all of them, as the device reports them
+swift run simtool ui appearance dark              # light | dark
+swift run simtool ui text-size ax2                # simctl's sizes, xs…xxxl, ax1…ax5, bigger, smaller
+swift run simtool ui contrast on                  # Increase Contrast
+swift run simtool debug color-blended on          # slow-animations, color-blended, color-copies, color-misaligned, color-offscreen
+swift run simtool debug memory-warning
+swift run simtool biometrics enroll               # enroll | unenroll | match | nomatch
+swift run simtool push --alert "Your order shipped" --app com.example.MyApp
+swift run simtool status-bar clean                # 9:41, full Wi-Fi, charged; or --time, --battery-level…; clear
+swift run simtool location route 37.3349,-122.0090 37.3318,-122.0312 --speed 15   # set <point> | clear
+```
+
+The colours are the guest render server's own debug options, which CoreSimulator
+forwards (`-[SimDevice setCADebugOption:enabled:]`, by number); slow animations
+is the darwin notification UIKit reads; a memory warning reaches every process as
+memory pressure, which UIKit turns into `didReceiveMemoryWarning`. `match` and
+`nomatch` answer a Face ID or Touch ID prompt the app already shows. simctl
+cannot read a location back, so `simtool location` and the viewer show the one
+SimTool last set. Naming any cellular field of the status bar makes simctl fill
+in the rest — 5G, full bars, "Carrier" — so `clean` leaves them out.
+
 Touches are played by SimTool's own HID helper as timed paths, in screen points
 (the space `ax tree` reports frames in) — the same helper the viewer's live
 finger uses:
@@ -223,6 +249,12 @@ stream's `device` topic carry it as `fold` (`hingeDegrees`, `pose`, SpringBoard'
 `posture`, the lit `panel`), the toolbar shows it next to its Closed / Book /
 Open buttons, and the activity feed has a pose's result, or a fold made
 elsewhere, as an entry. YAML tests take a `pose:` step.
+
+YAML tests change the device's settings with steps too — `appearance: dark`,
+`textSize: ax2`, `contrast: on`, `biometrics: match`, `push: { aps: { alert: "…" } }`
+(to the test's app), `location: "37.33,-122.01"` (or a `route:`), `statusBar:
+clean` — where the scenario needs them, so a Face ID prompt is answered after
+the tap that raised it.
 
 Directions are the way the finger moves: `scroll up` drags the content up,
 revealing what is below. A `scroll` (and a `swipe`, unless `--hold 0`) slows
@@ -270,6 +302,19 @@ Photos** and **Add files to Photos…** (images and videos) — both put the med
 in the simulator's Photos library (`simctl addmedia`), where a photo picker
 offers it — **Save** or **Copy screenshot** and **Record video**. While the Accessibility tab
 picks elements, a right-click opens the element's menu instead.
+
+The **Device** tab (⌥7) is what Simulator.app kept in its menus and Device Hub
+dropped, as the device reports it: the appearance, the text size (Dynamic Type)
+and Increase Contrast; the render server's debug colours — Color Blended
+Layers, Copied Images, Misaligned Images, Off-screen Rendered — and Slow
+Animations, each a switch, with Simulate memory warning beside them; Face ID or
+Touch ID (whichever the device has): enrolled or not, and a matching or
+non-matching face or finger for the prompt on screen; status bar overrides (a
+9:41 preset for screenshots, or time, battery and network one by one); the
+simulated location — a point or a route — and a push notification with its JSON
+payload. Each change is an entry in Activity; the tab reads the device again
+after it, every few seconds while it is open, and whenever an agent or a test
+changes a setting. The command palette has them too.
 
 The **Accessibility** tab shows the served accessibility tree, with anonymous
 containers folded away, and picks elements on the screen: the picked element is
@@ -891,6 +936,8 @@ GET /stream.jpeg
 GET /stream.mjpeg
 POST /api/v1/input
 GET /api/v1/input/stream (WebSocket)
+GET /api/v1/device
+POST /api/v1/device
 POST /api/v1/input/paste-image
 POST /api/v1/photos
 GET /api/v1/ax/tree?raw=1&format=flat&labeled=1
@@ -1013,6 +1060,22 @@ Coordinates are screen points. Images go as the raw request body instead:
 `POST /api/v1/input/paste-image` pastes one into the focused field, and
 `POST /api/v1/photos` adds an image or a video to Photos. Both read the type from
 `Content-Type` and an optional percent-encoded `X-SimTool-Filename` header.
+
+`POST /api/v1/device` changes a setting of the device or acts on it, as one
+activity entry, and answers with what the device reports afterwards in
+`stdout`: `{"action": "appearance", "value": "light"|"dark"}`, `content-size`
+(`value`: a size, `increment`, `decrement`), `increase-contrast` (`enabled`),
+`debug` (`option`, `enabled`), `memory-warning`, `biometrics` (`value`:
+`enroll`, `unenroll`, `match`, `nomatch`), `push` (`payload` with `aps`,
+`bundleId` — the server's app by default), `status-bar` (`statusBar` with
+`time`, `dataNetwork`, `wifiMode`, `wifiBars`, `cellularMode`, `cellularBars`,
+`operatorName`, `batteryState`, `batteryLevel`; or `value: "clear"`) and
+`location` (`location` with `waypoints` of `latitude`/`longitude` and, for a
+route, `speed`, `interval` or `distance`; or `value: "clear"`). `GET
+/api/v1/device` reads them all back — `appearance`, `contentSize`,
+`increaseContrast`, `debug`, `biometrics` (`kind` face or touch, `enrolled`),
+`statusBar` (the overrides in force), `location` (the one SimTool last set) —
+and names in `unavailable` whatever the device would not say, and why.
 
 `/api/v1/input/stream` is the viewer's live finger and keyboard: a WebSocket
 taking one JSON frame per touch event, `{"t": "down"|"move"|"up", "x": 0.5,

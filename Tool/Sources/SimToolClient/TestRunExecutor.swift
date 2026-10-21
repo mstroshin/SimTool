@@ -397,7 +397,8 @@ public final class TestRunExecutor: @unchecked Sendable {
         let runner = TestRunner(
             client: client,
             udid: config.udid,
-            defaultTimeout: test.stepTimeout
+            defaultTimeout: test.stepTimeout,
+            app: test.app
         )
         var completedSteps = 0
         var stagingFailed = false

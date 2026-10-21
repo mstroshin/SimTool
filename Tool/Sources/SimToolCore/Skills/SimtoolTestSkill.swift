@@ -209,6 +209,13 @@ extension AgentSkill {
           - drag: { from: { label: "Milk" }, to: { label: "Eggs" } }   # or by: { x: 0, y: 120 }
           - keyboard: hide             # or show — the software keyboard, confirmed on screen
           - pose: book                 # iPhone Duo: closed | book | open | an angle 0–180, confirmed by the device
+          - appearance: dark           # the device's settings, as the scenario needs them
+          - textSize: ax2              # simctl's size names, xs…xxxl, ax1…ax5, default, bigger, smaller
+          - contrast: on               # Increase Contrast
+          - biometrics: match          # enroll | unenroll | match | nomatch — answers a Face ID / Touch ID prompt on screen
+          - push: { aps: { alert: "Shipped" } }   # to the test's app; { app: …, payload: { aps: … } } for another
+          - location: "37.3349,-122.0090"         # or { route: ["lat,lon", …], speed: 20 } or clear
+          - statusBar: clean           # 9:41, full Wi-Fi, charged — or { time: "9:41", batteryLevel: 20 } or clear
           - assertVisible: { text: "Welcome", criterion: AC-1 }   # alias of waitFor
           - assertHidden: { label: "Loading" }
           - wait: 2                    # escape hatch; prefer waitFor / assertHidden
@@ -235,6 +242,14 @@ extension AgentSkill {
         dropping — list reordering, moving items, sliders (`press:`, `speed:`, `hold:`
         tune it). Dropping a list row onto the middle of another row can mean "nest it"
         in apps that support that; aim for the row's edge to reorder.
+
+        **Device settings are steps, not staging.** `appearance`, `textSize`,
+        `contrast`, `biometrics`, `push`, `location` and `statusBar` change the
+        simulator mid-run, where the scenario needs it — a dark-mode screen, a Face ID
+        prompt answered after the tap that raised it, a push the app reacts to. They
+        stay changed after the run: a test that sets one puts it back in its last steps
+        (`appearance: light`, `statusBar: clear`, `location: clear`), or the next test
+        starts in its state.
 
         **Only assertions may carry `criterion:`** (`assertVisible`, `waitFor`,
         `assertHidden`). On a `tap:` it is a parse error. Two more the parser refuses,

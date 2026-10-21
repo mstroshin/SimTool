@@ -13,17 +13,21 @@ public struct TestRunner {
     public let client: SimToolClient
     public let udid: String
     public let defaultTimeout: Double
+    /// The app under test: where a `push:` step without its own `app:` goes.
+    public let app: String?
 
     private static let pollInterval: Duration = .milliseconds(500)
 
     public init(
         client: SimToolClient,
         udid: String,
-        defaultTimeout: Double
+        defaultTimeout: Double,
+        app: String? = nil
     ) {
         self.client = client
         self.udid = udid
         self.defaultTimeout = defaultTimeout
+        self.app = app
     }
 
     /// Flat "type id label" lines of what is currently on screen, for failure
@@ -118,6 +122,9 @@ public struct TestRunner {
             try check(await client.softwareKeyboard(visible: visible), action: visible ? "show keyboard" : "hide keyboard")
         case .pose(let pose):
             try check(await client.pose(pose), action: "fold to \(pose)")
+        case .device(var control):
+            if control.action == "push", control.bundleId == nil { control.bundleId = app }
+            try check(await client.device(control), action: DeviceActivityWording.describe(control: control).title.lowercased())
         case .pause(let seconds):
             try await Task.sleep(for: .milliseconds(Int(seconds * 1000)))
         }

@@ -75,6 +75,17 @@ public struct SimToolClient: Sendable {
         try await input(SimulatorInputPayload(action: "pose", name: pose.name, angle: pose.name == nil ? pose.hingeDegrees : nil))
     }
 
+    /// Changes a setting of the device or acts on it (`DeviceControlPayload`);
+    /// answers once the device reports the result.
+    public func device(_ control: DeviceControlPayload) async throws -> CommandResultPayload {
+        try await sendJSON(CommandResultPayload.self, path: "device", payload: control, method: "POST")
+    }
+
+    /// Every setting as the device reports it.
+    public func deviceSettings() async throws -> SimulatorSettings {
+        try await getJSON(SimulatorSettings.self, path: "device")
+    }
+
     /// Pastes an image (PNG, JPEG, HEIC, …) into the focused field the same way.
     public func pasteImage(_ data: Data, contentType: String) async throws -> CommandResultPayload {
         try await sendFile(path: "input/paste-image", data: data, contentType: contentType, filename: nil)
