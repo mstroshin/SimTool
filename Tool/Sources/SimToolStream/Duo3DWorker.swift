@@ -15,7 +15,9 @@ import SimToolCore
 ///
 /// stdin takes one JSON object per line, every field optional:
 /// `{"panel": "cover"|"inner", "hinge": 130, "dark": true,
-/// "background": "#1b1d20", "keyframe": true}`. End of input stops it.
+/// "background": "#1b1d20", "aspect": 0.8, "keyframe": true}` — `aspect` is
+/// the viewer's stage, width per unit of height, which the frames take. End
+/// of input stops it.
 @available(macOS 15.0, *)
 public enum Duo3DWorker {
     public struct Options: Sendable {
@@ -38,6 +40,7 @@ public enum Duo3DWorker {
         var hinge: Double?
         var dark: Bool?
         var background: String?
+        var aspect: Double?
         var keyframe: Bool?
     }
 
@@ -72,7 +75,7 @@ private final class Duo3DSession {
     private let encoder = H264Encoder(fps: 30, bitrate: 4_000_000, maxDimension: 1280)
     private let output = StandardOutputWriter()
     private var renderer: Duo3DRenderer
-    private var pool: CVPixelBufferPool?
+    private var pool: (pool: CVPixelBufferPool, width: Int, height: Int)?
     private var panel: Duo3DRenderer.Panel = .cover
     private var hinge: Double = 0
     private var dark = true
@@ -134,11 +137,13 @@ private final class Duo3DSession {
         }
         if let hinge = input.hinge, hinge.isFinite { self.hinge = min(180, max(0, hinge)) }
         if let background = input.background.flatMap(Self.color(hex:)) { self.background = background }
+        let size = input.aspect.map { Duo3DRenderer.frameSize(aspect: $0) } ?? (width: renderer.width, height: renderer.height)
         if let dark = input.dark, dark != self.dark {
             self.dark = dark
             // The shell's finish is chosen as the model loads.
-            if let next = try? await Duo3DRenderer(modelURL: options.modelURL, dark: dark) { renderer = next }
+            if let next = try? await Duo3DRenderer(modelURL: options.modelURL, dark: dark, width: size.width, height: size.height) { renderer = next }
         }
+        try? renderer.resize(width: size.width, height: size.height)
         if input.keyframe == true {
             keyframe = true
             lastProjection = Data()
@@ -186,7 +191,8 @@ private final class Duo3DSession {
     }
 
     private func pixelBuffer() throws -> CVPixelBuffer? {
-        if pool == nil {
+        if pool.map({ $0.width != renderer.width || $0.height != renderer.height }) ?? true {
+            pool = nil
             let attributes: [CFString: Any] = [
                 kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
                 kCVPixelBufferWidthKey: renderer.width,
@@ -194,11 +200,13 @@ private final class Duo3DSession {
                 kCVPixelBufferIOSurfacePropertiesKey: [:] as [CFString: Any],
                 kCVPixelBufferMetalCompatibilityKey: true,
             ]
-            CVPixelBufferPoolCreate(nil, nil, attributes as CFDictionary, &pool)
+            var created: CVPixelBufferPool?
+            CVPixelBufferPoolCreate(nil, nil, attributes as CFDictionary, &created)
+            if let created { pool = (created, renderer.width, renderer.height) }
         }
         guard let pool else { throw Duo3DError("Cannot allocate the 3D frames") }
         var buffer: CVPixelBuffer?
-        CVPixelBufferPoolCreatePixelBuffer(nil, pool, &buffer)
+        CVPixelBufferPoolCreatePixelBuffer(nil, pool.pool, &buffer)
         return buffer
     }
 

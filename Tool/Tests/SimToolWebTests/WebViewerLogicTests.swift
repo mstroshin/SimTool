@@ -288,6 +288,11 @@ final class WebViewerLogicTests: XCTestCase {
         XCTAssertEqual(value(context, "JSON.stringify(pictureRatio({ x: 0.75, y: 0.9 }, 180))"), #"{"x":0.25,"y":0.09999999999999998}"#)
         XCTAssertEqual(value(context, "JSON.stringify(pictureRatio({ x: 0.3, y: 0.4 }, 0))"), #"{"x":0.3,"y":0.4}"#)
         XCTAssertEqual(value(context, "cssColorHex('rgb(27, 29, 32)')"), "1b1d20")
+        // A stage that changed shape asks for frames of its new shape; a pixel's worth does not.
+        XCTAssertEqual(value(context, "stageReframes(0.8, 0.81)"), "false")
+        XCTAssertEqual(value(context, "stageReframes(0.8, 1.1)"), "true")
+        XCTAssertEqual(value(context, "stageReframes(0.8, 0.7)"), "true")
+        XCTAssertEqual(value(context, "stageReframes(0, 1.1)"), "false", "no 3D frames asked for yet")
         XCTAssertEqual(value(context, "cssColorHex('transparent')"), "000000")
     }
 

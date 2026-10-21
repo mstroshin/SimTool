@@ -3118,6 +3118,13 @@ enum WebViewerAssets {
           }
         }
 
+        // Whether 3D frames asked for a stage `requested` wide per unit of height
+        // would sit in one `current` wide with more than a sliver of it left empty.
+        function stageReframes(requested, current) {
+          if (!(requested > 0) || !(current > 0)) return false;
+          return Math.abs(current / requested - 1) >= 0.04;
+        }
+
         // `rgb(27, 29, 32)` → `1b1d20`, the stage's colour for the 3D frame's backdrop.
         function cssColorHex(color) {
           const parts = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(color || "");
@@ -4696,6 +4703,7 @@ enum WebViewerAssets {
           view3d: false,    // the stream is the folded device in 3D, not the lit screen
           view3dUnavailable: "",   // why the 3D preview cannot be shown, when it cannot
           projection: null, // where the lit panel lands on the 3D frame (Duo3DProjection)
+          frameAspect: 0,   // the stage shape the 3D frames were asked for, width per unit of height
           connection: "connecting",  // connecting | live | reconnecting | offline
           attempt: 0,
           retryAt: 0,
@@ -4941,7 +4949,10 @@ enum WebViewerAssets {
         function fitDevice() {
           const area = $("deviceArea").getBoundingClientRect();
           const aspect = screenState.width && screenState.height ? screenState.width / screenState.height : 402 / 874;
-          const maxW = Math.max(120, area.width - 64), maxH = Math.max(160, area.height - 48);
+          // The 3D frame is drawn at the stage's shape with its own margin: it takes
+          // the whole stage. The screen leaves room for the rulers.
+          const inset = screenState.view3d ? { x: 0, y: 0 } : { x: 64, y: 48 };
+          const maxW = Math.max(120, area.width - inset.x), maxH = Math.max(160, area.height - inset.y);
           let height = maxH, width = height * aspect;
           if (width > maxW) { width = maxW; height = width / aspect; }
           const device = $("device");
@@ -4961,16 +4972,33 @@ enum WebViewerAssets {
           else if (screenState.width) $("readSize").textContent = screenState.width + " × " + screenState.height + " px";
         }
 
-        new ResizeObserver(fitDevice).observe($("deviceArea"));
+        new ResizeObserver(() => { fitDevice(); reframe3D(); }).observe($("deviceArea"));
 
         // ---- The 3D preview ----
         // A foldable can be shown as the folded device in 3D, rendered on the server
         // from the device model in the user's Xcode, its lit panel live on it. The
         // frame is drawn on the stage's own colour, in the page's theme.
 
+        function stageAspect() {
+          const area = $("deviceArea").getBoundingClientRect();
+          return area.width > 0 && area.height > 0 ? area.width / area.height : 1;
+        }
+
         function streamQuery3D() {
           const stage = getComputedStyle($("stage")).backgroundColor;
-          return "?view=3d&theme=" + shownTheme() + "&bg=" + cssColorHex(stage);
+          screenState.frameAspect = stageAspect();
+          return "?view=3d&theme=" + shownTheme() + "&bg=" + cssColorHex(stage) + "&aspect=" + screenState.frameAspect.toFixed(3);
+        }
+
+        // A stage that changed shape for good — the window or the inspector resized,
+        // and stayed so for a moment — asks for frames of its new shape.
+        let reframeTimer = 0;
+        function reframe3D() {
+          clearTimeout(reframeTimer);
+          if (!screenState.view3d || !stageReframes(screenState.frameAspect, stageAspect())) return;
+          reframeTimer = setTimeout(() => {
+            if (screenState.view3d && stageReframes(screenState.frameAspect, stageAspect())) restartStream();
+          }, 500);
         }
 
         function setView3D(on) {
@@ -5002,13 +5030,22 @@ enum WebViewerAssets {
 
         // The device's screens from /config or the event stream's `device` topic: the
         // lit one sets the points, the corners and how its frames turn.
+        // A server that names no screens (an older one, or a device whose type could
+        // not be read) is a phone with one: no fold to show.
         function applyDisplays(displays, activeDisplay) {
-          if (!Array.isArray(displays) || !displays.length) return;
-          const lit = displays.find((display) => display.id === activeDisplay) || displays.find((display) => display.active) || displays[0];
-          screenState.foldable = displays.length > 1;
+          const list = Array.isArray(displays) ? displays : [];
+          const lit = list.find((display) => display.id === activeDisplay) || list.find((display) => display.active) || list[0] || null;
+          screenState.foldable = list.length > 1;
           screenState.display = lit;
-          if (lit.points && lit.points.width && lit.points.height) screenState.points = { x: 0, y: 0, width: lit.points.width, height: lit.points.height };
+          if (lit && lit.points && lit.points.width && lit.points.height) screenState.points = { x: 0, y: 0, width: lit.points.width, height: lit.points.height };
           touchStream.setDisplay(screenState.foldable ? lit.id : null);
+          // The page was left on a foldable in 3D and the server now runs a phone.
+          if (!screenState.foldable && screenState.view3d) {
+            screenState.view3d = false;
+            screenState.projection = null;
+            app.dataset.view = "screen";
+            restartStream();
+          }
           fitDevice();
           updateReadoutSize();
           if (typeof renderFold === "function") renderFold();
@@ -5798,7 +5835,6 @@ enum WebViewerAssets {
         .app[data-conn="reconnecting"] .conn-dot, .app[data-conn="offline"] .conn-dot { background: var(--err); }
         .app[data-mode="replay"] .conn-dot { background: var(--ink2); }
         .tb-app { padding: 0 4px; color: var(--ink2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 200px; }
-        .tb-fold { display: flex; align-items: center; gap: 2px; flex: none; }
 
         .tb-btn {
           display: inline-grid; place-items: center; width: 28px; height: 28px; flex: none; border: 0; border-radius: var(--r-2);
@@ -5891,11 +5927,12 @@ enum WebViewerAssets {
         .placeholder { position: absolute; inset: 0; display: grid; place-items: center; padding: var(--sp-4); text-align: center; color: var(--screen-ink); pointer-events: none; }
         /* The 3D preview is the whole device on the stage's colour: no bezel line, no
            rulers, no marks drawn in screen points — they would not land on it. */
+        .app[data-view="3d"] .device-area { padding: 0; }
         .app[data-view="3d"] .screen { background: transparent; box-shadow: none; }
         /* The frame's backdrop is the stage's colour, give or take what video coding
            does to a near-black: its edges fade into the stage instead of showing a seam. */
         .app[data-view="3d"] .screen canvas {
-          mask-image: linear-gradient(to right, transparent, currentColor 6%, currentColor 94%, transparent), linear-gradient(to bottom, transparent, currentColor 6%, currentColor 94%, transparent);
+          mask-image: linear-gradient(to right, transparent, currentColor 3%, currentColor 97%, transparent), linear-gradient(to bottom, transparent, currentColor 3%, currentColor 97%, transparent);
           mask-composite: intersect;
         }
         .app[data-view="3d"] .ruler, .app[data-view="3d"] .redlines, .app[data-view="3d"] .redline-labels, .app[data-view="3d"] .activity-layer { display: none; }
@@ -5973,6 +6010,12 @@ enum WebViewerAssets {
         .scrub-tick.fail { width: 3px; background: var(--err); }
         .scrub-head { position: absolute; top: 5px; width: 14px; height: 14px; margin-left: -7px; border-radius: 50%; background: var(--ink1); box-shadow: 0 0 0 3px var(--g1); }
 
+        /* A foldable's fold, on the stage under the device: the pose it rests at and
+           the 3D preview's switch. */
+        .fold-bar { display: flex; align-items: center; justify-content: center; gap: var(--sp-2); height: 36px; padding: 0 var(--sp-3); flex: none; }
+        .app[data-mode="replay"] .fold-bar { display: none; }
+        .seg button:disabled, .pill:disabled { opacity: .45; cursor: default; }
+        .seg button:disabled:hover, .pill:disabled:hover { background: none; color: var(--ink2); }
         .readout { display: flex; align-items: center; gap: var(--sp-3); height: 28px; padding: 0 var(--sp-3); flex: none; overflow: hidden; white-space: nowrap; border-top: 1px solid var(--line-hair); color: var(--ink3); font-size: var(--fs-11); }
         .readout-ptr { margin-left: auto; color: var(--ink2); }
         /* The last thing done to the device and how long ago. */
@@ -6419,13 +6462,6 @@ enum WebViewerAssets {
                 <button class="tb-btn" type="button" id="screenshotButton" aria-label="Save screenshot" data-tip="Save screenshot" data-key="⌘S" aria-keyshortcuts="Meta+S"><svg class="ic" aria-hidden="true"><use href="#i-camera"/></svg></button>
                 <button class="tb-btn" type="button" id="shakeButton" aria-label="Shake" data-tip="Shake" data-key="⌃⌘Z" aria-keyshortcuts="Control+Meta+Z"><svg class="ic" aria-hidden="true"><use href="#i-shake"/></svg></button>
                 <button class="tb-btn" type="button" id="softKeyboardButton" aria-label="Show or hide the software keyboard" data-tip="Software keyboard — ⌘K while typing into the device"><svg class="ic" aria-hidden="true"><use href="#i-keyboard"/></svg></button>
-                <span class="tb-fold" id="foldGroup" role="group" aria-label="Fold" hidden>
-                  <span class="tb-sep" aria-hidden="true"></span>
-                  <button class="tb-btn" type="button" id="foldClosed" data-pose="closed" aria-pressed="false" aria-label="Fold closed" data-tip="Fold closed — the cover lights"><svg class="ic" aria-hidden="true"><use href="#i-fold-closed"/></svg></button>
-                  <button class="tb-btn" type="button" id="foldBook" data-pose="book" aria-pressed="false" aria-label="Fold to book" data-tip="Book, 130° — the inner panel lights"><svg class="ic" aria-hidden="true"><use href="#i-fold-book"/></svg></button>
-                  <button class="tb-btn" type="button" id="foldOpen" data-pose="open" aria-pressed="false" aria-label="Fold open" data-tip="Open flat, 180°"><svg class="ic" aria-hidden="true"><use href="#i-fold-open"/></svg></button>
-                  <button class="tb-btn" type="button" id="view3dButton" aria-pressed="false" aria-label="3D preview" data-tip="Show the device in 3D"><svg class="ic" aria-hidden="true"><use href="#i-cube"/></svg></button>
-                </span>
                 <span class="tb-sep" aria-hidden="true"></span>
                 <span class="tb-app" id="appName" title="App under test">No app</span>
                 <button class="tb-btn" type="button" id="terminateButton" aria-label="Terminate app" data-tip="Terminate app"><svg class="ic" aria-hidden="true"><use href="#i-stop"/></svg></button>
@@ -6485,6 +6521,15 @@ enum WebViewerAssets {
                     <div id="scrubTicks"></div>
                     <span class="scrub-head" id="scrubHead"></span>
                   </div>
+                </div>
+
+                <div class="fold-bar" id="foldGroup" role="toolbar" aria-label="Fold" hidden>
+                  <span class="seg" role="group" aria-label="Pose">
+                    <button type="button" id="foldClosed" data-pose="closed" aria-pressed="false" data-tip="Fold closed — the cover lights"><svg class="ic ic-sm" aria-hidden="true"><use href="#i-fold-closed"/></svg>Closed</button>
+                    <button type="button" id="foldBook" data-pose="book" aria-pressed="false" data-tip="Book, 130° — the inner panel lights"><svg class="ic ic-sm" aria-hidden="true"><use href="#i-fold-book"/></svg>Book</button>
+                    <button type="button" id="foldOpen" data-pose="open" aria-pressed="false" data-tip="Open flat, 180°"><svg class="ic ic-sm" aria-hidden="true"><use href="#i-fold-open"/></svg>Open</button>
+                  </span>
+                  <button class="pill" type="button" id="view3dButton" aria-pressed="false" data-tip="Show the device in 3D"><svg class="ic ic-sm" aria-hidden="true"><use href="#i-cube"/></svg>3D</button>
                 </div>
 
                 <div class="readout mono" id="readout" aria-hidden="true">

@@ -78,9 +78,10 @@ the inspector — and ⌥1–6 switch inspector tabs, `/` filters the current li
 the viewer greys the last frame, says so, stops sending touches and reconnects
 by itself; a restarted server is noticed and its lists are reloaded.
 
-An iPhone Duo adds Closed, Book and Open buttons to the toolbar, the fold under
-the device (`book · 130° · inner`) and a **3D** button: the device itself,
-folded as it is and animated as it folds, its lit panel live on it, rendered on
+An iPhone Duo adds a bar under the device — Closed, Book and Open, and a **3D**
+switch — and the fold beside its size (`book · 130° · inner`). 3D shows the
+device itself, folded as it is and animated as it folds, filling the stage
+whatever its pose, its lit panel live on it, rendered on
 the server with RealityKit from the device model Device Hub draws it with
 (`V68.usdz`, read from the selected Xcode at run time — SimTool ships no Apple
 asset) and streamed like the screen. Clicks and drags on its screen land on
@@ -847,7 +848,7 @@ GET /api/v1/devices
 GET /api/v1/metrics
 GET /api/v1/events (Server-Sent Events)
 GET /stream.avcc
-GET /stream.avcc?view=3d&theme=dark&bg=1b1d20
+GET /stream.avcc?view=3d&theme=dark&bg=1b1d20&aspect=0.8
 GET /stream.jpeg
 GET /stream.mjpeg
 POST /api/v1/input
@@ -906,8 +907,9 @@ waits for the two to meet before its first step — otherwise the app can still 
 answering from the real backend while the test believes it is mocked.
 
 `/stream.avcc?view=3d` is a foldable's 3D preview in the screen stream's
-envelopes, `theme` choosing the shell's finish and `bg` the backdrop's colour;
-before each frame whose map moved it sends an envelope tagged 4 with JSON
+envelopes, `theme` choosing the shell's finish, `bg` the backdrop's colour and
+`aspect` the frame's shape (width per unit of height — the viewer's stage; the
+long side is 1280 px), the device framed to fill it in every pose; before each frame whose map moved it sends an envelope tagged 4 with JSON
 `{"pieces", "panel", "hinge", "width", "height"}` — per leaf of the lit panel
 the frame corners it lands on and the part of the panel's framebuffer it shows.
 It answers 503 with the reason when there is no 3D to show; `/config` says so

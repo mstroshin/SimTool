@@ -102,7 +102,6 @@ code { font: var(--fs-11)/1.4 var(--font-mono); }
 .app[data-conn="reconnecting"] .conn-dot, .app[data-conn="offline"] .conn-dot { background: var(--err); }
 .app[data-mode="replay"] .conn-dot { background: var(--ink2); }
 .tb-app { padding: 0 4px; color: var(--ink2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 200px; }
-.tb-fold { display: flex; align-items: center; gap: 2px; flex: none; }
 
 .tb-btn {
   display: inline-grid; place-items: center; width: 28px; height: 28px; flex: none; border: 0; border-radius: var(--r-2);
@@ -195,11 +194,12 @@ code { font: var(--fs-11)/1.4 var(--font-mono); }
 .placeholder { position: absolute; inset: 0; display: grid; place-items: center; padding: var(--sp-4); text-align: center; color: var(--screen-ink); pointer-events: none; }
 /* The 3D preview is the whole device on the stage's colour: no bezel line, no
    rulers, no marks drawn in screen points — they would not land on it. */
+.app[data-view="3d"] .device-area { padding: 0; }
 .app[data-view="3d"] .screen { background: transparent; box-shadow: none; }
 /* The frame's backdrop is the stage's colour, give or take what video coding
    does to a near-black: its edges fade into the stage instead of showing a seam. */
 .app[data-view="3d"] .screen canvas {
-  mask-image: linear-gradient(to right, transparent, currentColor 6%, currentColor 94%, transparent), linear-gradient(to bottom, transparent, currentColor 6%, currentColor 94%, transparent);
+  mask-image: linear-gradient(to right, transparent, currentColor 3%, currentColor 97%, transparent), linear-gradient(to bottom, transparent, currentColor 3%, currentColor 97%, transparent);
   mask-composite: intersect;
 }
 .app[data-view="3d"] .ruler, .app[data-view="3d"] .redlines, .app[data-view="3d"] .redline-labels, .app[data-view="3d"] .activity-layer { display: none; }
@@ -277,6 +277,12 @@ code { font: var(--fs-11)/1.4 var(--font-mono); }
 .scrub-tick.fail { width: 3px; background: var(--err); }
 .scrub-head { position: absolute; top: 5px; width: 14px; height: 14px; margin-left: -7px; border-radius: 50%; background: var(--ink1); box-shadow: 0 0 0 3px var(--g1); }
 
+/* A foldable's fold, on the stage under the device: the pose it rests at and
+   the 3D preview's switch. */
+.fold-bar { display: flex; align-items: center; justify-content: center; gap: var(--sp-2); height: 36px; padding: 0 var(--sp-3); flex: none; }
+.app[data-mode="replay"] .fold-bar { display: none; }
+.seg button:disabled, .pill:disabled { opacity: .45; cursor: default; }
+.seg button:disabled:hover, .pill:disabled:hover { background: none; color: var(--ink2); }
 .readout { display: flex; align-items: center; gap: var(--sp-3); height: 28px; padding: 0 var(--sp-3); flex: none; overflow: hidden; white-space: nowrap; border-top: 1px solid var(--line-hair); color: var(--ink3); font-size: var(--fs-11); }
 .readout-ptr { margin-left: auto; color: var(--ink2); }
 /* The last thing done to the device and how long ago. */

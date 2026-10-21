@@ -18,6 +18,7 @@ const screenState = {
   view3d: false,    // the stream is the folded device in 3D, not the lit screen
   view3dUnavailable: "",   // why the 3D preview cannot be shown, when it cannot
   projection: null, // where the lit panel lands on the 3D frame (Duo3DProjection)
+  frameAspect: 0,   // the stage shape the 3D frames were asked for, width per unit of height
   connection: "connecting",  // connecting | live | reconnecting | offline
   attempt: 0,
   retryAt: 0,
@@ -263,7 +264,10 @@ document.addEventListener("visibilitychange", () => {
 function fitDevice() {
   const area = $("deviceArea").getBoundingClientRect();
   const aspect = screenState.width && screenState.height ? screenState.width / screenState.height : 402 / 874;
-  const maxW = Math.max(120, area.width - 64), maxH = Math.max(160, area.height - 48);
+  // The 3D frame is drawn at the stage's shape with its own margin: it takes
+  // the whole stage. The screen leaves room for the rulers.
+  const inset = screenState.view3d ? { x: 0, y: 0 } : { x: 64, y: 48 };
+  const maxW = Math.max(120, area.width - inset.x), maxH = Math.max(160, area.height - inset.y);
   let height = maxH, width = height * aspect;
   if (width > maxW) { width = maxW; height = width / aspect; }
   const device = $("device");
@@ -283,16 +287,33 @@ function updateReadoutSize() {
   else if (screenState.width) $("readSize").textContent = screenState.width + " × " + screenState.height + " px";
 }
 
-new ResizeObserver(fitDevice).observe($("deviceArea"));
+new ResizeObserver(() => { fitDevice(); reframe3D(); }).observe($("deviceArea"));
 
 // ---- The 3D preview ----
 // A foldable can be shown as the folded device in 3D, rendered on the server
 // from the device model in the user's Xcode, its lit panel live on it. The
 // frame is drawn on the stage's own colour, in the page's theme.
 
+function stageAspect() {
+  const area = $("deviceArea").getBoundingClientRect();
+  return area.width > 0 && area.height > 0 ? area.width / area.height : 1;
+}
+
 function streamQuery3D() {
   const stage = getComputedStyle($("stage")).backgroundColor;
-  return "?view=3d&theme=" + shownTheme() + "&bg=" + cssColorHex(stage);
+  screenState.frameAspect = stageAspect();
+  return "?view=3d&theme=" + shownTheme() + "&bg=" + cssColorHex(stage) + "&aspect=" + screenState.frameAspect.toFixed(3);
+}
+
+// A stage that changed shape for good — the window or the inspector resized,
+// and stayed so for a moment — asks for frames of its new shape.
+let reframeTimer = 0;
+function reframe3D() {
+  clearTimeout(reframeTimer);
+  if (!screenState.view3d || !stageReframes(screenState.frameAspect, stageAspect())) return;
+  reframeTimer = setTimeout(() => {
+    if (screenState.view3d && stageReframes(screenState.frameAspect, stageAspect())) restartStream();
+  }, 500);
 }
 
 function setView3D(on) {
@@ -324,13 +345,22 @@ function restyle3D() {
 
 // The device's screens from /config or the event stream's `device` topic: the
 // lit one sets the points, the corners and how its frames turn.
+// A server that names no screens (an older one, or a device whose type could
+// not be read) is a phone with one: no fold to show.
 function applyDisplays(displays, activeDisplay) {
-  if (!Array.isArray(displays) || !displays.length) return;
-  const lit = displays.find((display) => display.id === activeDisplay) || displays.find((display) => display.active) || displays[0];
-  screenState.foldable = displays.length > 1;
+  const list = Array.isArray(displays) ? displays : [];
+  const lit = list.find((display) => display.id === activeDisplay) || list.find((display) => display.active) || list[0] || null;
+  screenState.foldable = list.length > 1;
   screenState.display = lit;
-  if (lit.points && lit.points.width && lit.points.height) screenState.points = { x: 0, y: 0, width: lit.points.width, height: lit.points.height };
+  if (lit && lit.points && lit.points.width && lit.points.height) screenState.points = { x: 0, y: 0, width: lit.points.width, height: lit.points.height };
   touchStream.setDisplay(screenState.foldable ? lit.id : null);
+  // The page was left on a foldable in 3D and the server now runs a phone.
+  if (!screenState.foldable && screenState.view3d) {
+    screenState.view3d = false;
+    screenState.projection = null;
+    app.dataset.view = "screen";
+    restartStream();
+  }
   fitDevice();
   updateReadoutSize();
   if (typeof renderFold === "function") renderFold();
