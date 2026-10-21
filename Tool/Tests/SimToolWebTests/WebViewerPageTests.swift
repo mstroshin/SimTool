@@ -107,18 +107,26 @@ final class WebViewerPageTests: XCTestCase {
         XCTAssertTrue(page.contains("patchPane(networkView.detail, event.id + \"|\" + (network.split ? \"split\" : network.detailTab),"), "polling keeps the pane's scroll")
     }
 
-    // Logs' columns move by dragging their names, size by dragging their edges,
-    // show or hide from the header's menu, and stay as a person left them.
-    func testLogColumnsMoveResizeAndAreRemembered() throws {
-        XCTAssertTrue(page.contains(#"let logColumns = logColumnLayout(stored("logs.columns", null));"#), "the layout is read back")
-        XCTAssertTrue(page.contains(#"if (save) store("logs.columns", logColumns);"#), "and kept")
-        XCTAssertTrue(page.contains(#"logsView.list.style.setProperty("--log-cols", logGridTemplate(logColumns, false));"#))
-        XCTAssertTrue(page.contains(".log-grid { grid-template-columns: var(--log-cols,"), "the rows follow the header's widths")
+    // The columns of Logs and Network move by dragging their names, size by
+    // dragging their edges, show or hide from the header's menu, and stay as a
+    // person left them; Network's still sort on a click.
+    func testTableColumnsMoveResizeAndAreRemembered() throws {
+        XCTAssertTrue(page.contains("let layout = columnLayout(spec, stored(options.storeKey, null));"), "the layout is read back")
+        XCTAssertTrue(page.contains("if (save) store(options.storeKey, layout);"), "and kept")
+        XCTAssertTrue(page.contains(#"target.style.setProperty("--cols", gridTemplate(spec, layout, 0));"#))
         XCTAssertTrue(page.contains(#"aria-roledescription="movable column""#))
         XCTAssertTrue(page.contains(#"role="separator" aria-orientation="vertical" tabindex="0" data-resize=""#), "an edge sizes its column, from the keyboard too")
-        XCTAssertTrue(page.contains("setLogColumns(moveLogColumn(logColumns, drag.key, drag.before));"), "a drop moves the column")
-        XCTAssertTrue(page.contains("if (event.altKey) { moveLogColumnBy(cell.dataset.col, step); return; }"), "⌥←/⌥→ moves it without a mouse")
-        XCTAssertTrue(page.contains(#"row.innerHTML = logColumns.filter((column) => !column.hidden).map((column) => LOG_CELLS[column.key](entry, level, query)).join("");"#), "rows draw the cells in the header's order")
+        XCTAssertTrue(page.contains("else if (ending.moved && ending.before != null) set(moveColumn(layout, ending.key, ending.before));"), "a drop moves the column")
+        XCTAssertTrue(page.contains("if (event.altKey) { moveBy(cell.dataset.col, step); return; }"), "⌥←/⌥→ moves it without a mouse")
+        for (table, key) in [("logs", "logs.columns"), ("network", "network.columns")] {
+            XCTAssertTrue(page.contains(#"storeKey: "\#(key)","#), "\(table) keeps its own layout")
+            XCTAssertTrue(page.contains("\(table)Header.attach(\(table)View.list);"), "\(table)'s rows follow its header")
+        }
+        XCTAssertTrue(page.contains(".log-grid { grid-template-columns: var(--cols,"))
+        XCTAssertTrue(page.contains(".net-grid { grid-template-columns: var(--cols,"))
+        XCTAssertTrue(page.contains("row.innerHTML = logsHeader.columns.map((column) => LOG_CELLS[column.key](entry, level, query)).join(\"\");"), "rows draw the header's order")
+        XCTAssertTrue(page.contains("row.innerHTML = networkHeader.columns.map((column) => cells[column.key]()).join(\"\");"))
+        XCTAssertTrue(page.contains("sort: { state: network.sort, dirs: { time: 1, name: 1, status: 1, size: -1, duration: -1 }"), "Network's columns still sort")
         let stored = try XCTUnwrap(page.range(of: "function stored(key, fallback) {"))
         XCTAssertTrue(page[stored.upperBound...].prefix(200).contains("try {"), "storage that throws leaves the default layout")
     }

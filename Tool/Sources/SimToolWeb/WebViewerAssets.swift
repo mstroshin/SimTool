@@ -2663,31 +2663,210 @@ enum WebViewerAssets {
           };
         }
 
-        // Column headers that sort; clicking the sorted column flips the direction.
-        function createSortHeader(className, columns, state, onChange) {
-          const header = el("div", { class: "thead " + className, role: "row" });
+        // A table's header whose columns a person arranges: a column's name dragged
+        // moves it, the line at its right edge sizes it (a double-click resets it),
+        // the header's menu shows or hides columns — ⌥←/⌥→, ←/→ on an edge and ⇧F10
+        // do the same from the keyboard — and the layout is kept per browser under
+        // `storeKey`. With `sort`, a click on a column's name sorts by it; on the
+        // sorted column it flips the direction.
+        //
+        // options: { className, spec (see LOG_COLUMNS), storeKey, classes: { key: "c-size num" },
+        //   sort: { state: { key, dir }, dirs: { key: default direction }, onChange() }, onLayout() }
+        // The rows draw `header.columns`, in that order; `attach(list)` gives the list
+        // the grid templates its rows follow (`--cols`, `--cols-n1`… per narrower step).
+        function createColumnHeader(options) {
+          const spec = options.spec;
+          const sort = options.sort || null;
+          let layout = columnLayout(spec, stored(options.storeKey, null));
+          let target = null;
+          let drag = null;
+          const header = el("div", { class: "thead col-head " + options.className, role: "row" });
+          const columnOf = (key) => layout.find((column) => column.key === key);
+          const shown = () => layout.filter((column) => !column.hidden);
+
           function render() {
-            header.innerHTML = "";
-            for (const column of columns) {
-              const cell = el("span", { class: "cell " + (column.class || ""), role: "columnheader",
-                "aria-sort": state.key === column.key ? (state.dir > 0 ? "ascending" : "descending") : (column.sort ? "none" : null) });
-              if (column.sort) {
-                const button = el("button", { type: "button", class: state.key === column.key ? "sorted" : null }, column.label);
-                if (state.key === column.key) button.insertAdjacentHTML("beforeend", icon(state.dir > 0 ? "chev-u" : "chev-d", "ic-xs"));
-                button.addEventListener("click", () => {
-                  if (state.key === column.key) state.dir = -state.dir; else { state.key = column.key; state.dir = column.defaultDir || 1; }
-                  render();
-                  onChange();
-                });
-                cell.append(button);
-              } else {
-                cell.textContent = column.label;
-              }
-              header.append(cell);
+            const focused = header.contains(document.activeElement) ? document.activeElement : null;
+            const focusCol = focused && focused.dataset.col, focusEdge = focused && focused.dataset.resize;
+            header.innerHTML = shown().map((column, index) => {
+              const label = escapeHTML(spec.labels[column.key]);
+              const sorts = sort && sort.dirs[column.key] != null;
+              const sorted = sorts && sort.state.key === column.key;
+              const name = sorts
+                ? '<button type="button" class="col-sort' + (sorted ? " sorted" : "") + '" tabindex="-1" data-sort="' + column.key + '">' + label + (sorted ? icon(sort.state.dir > 0 ? "chev-u" : "chev-d", "ic-xs") : "") + "</button>"
+                : '<span class="col-label">' + label + "</span>";
+              return '<span class="cell col ' + (options.classes && options.classes[column.key] || "") + '" role="columnheader" data-col="' + column.key + '" tabindex="' + (index === 0 ? 0 : -1) + '"' +
+                (sorts ? ' aria-sort="' + (sorted ? (sort.state.dir > 0 ? "ascending" : "descending") : "none") + '"' : "") +
+                ' aria-roledescription="movable column" title="' + (sorts ? "Click to sort · " : "") + 'drag to move · ⌥← ⌥→ moves it · right-click for the columns">' + name +
+                (column.key === spec.flex ? "" : '<span class="col-resize" role="separator" aria-orientation="vertical" tabindex="0" data-resize="' + column.key + '" aria-label="Resize ' + label +
+                  '" aria-valuemin="' + (spec.min[column.key] || 40) + '" aria-valuemax="640" aria-valuenow="' + column.width + '" title="Drag to resize · double-click resets"></span>') +
+                "</span>";
+            }).join("");
+            const again = focusEdge ? header.querySelector('[data-resize="' + focusEdge + '"]') : focusCol ? header.querySelector('[data-col="' + focusCol + '"]') : null;
+            if (again) {
+              if (focusCol) { header.querySelectorAll("[data-col]").forEach((cell) => { cell.tabIndex = -1; }); again.tabIndex = 0; }
+              again.focus({ preventScroll: true });
             }
           }
+
+          // The widths go to the rows as grid templates; a new order or a column shown re-renders them.
+          function apply({ save, rows } = {}) {
+            if (target) {
+              target.style.setProperty("--cols", gridTemplate(spec, layout, 0));
+              spec.narrow.forEach((_, index) => target.style.setProperty("--cols-n" + (index + 1), gridTemplate(spec, layout, index + 1)));
+            }
+            if (rows !== false) { render(); if (options.onLayout) options.onLayout(); }
+            if (save) store(options.storeKey, layout);
+          }
+
+          function set(next, message) {
+            layout = columnLayout(spec, next);
+            apply({ save: true });
+            if (message) setMessage(message);
+          }
+
+          function moveBy(key, step) {
+            const visible = shown();
+            const target = visible[visible.findIndex((column) => column.key === key) + step];
+            if (!target) return;
+            const before = layout.findIndex((column) => column.key === target.key) + (step > 0 ? 1 : 0);
+            set(moveColumn(layout, key, before), spec.labels[key] + " moved " + (step > 0 ? "right" : "left"));
+          }
+
+          function sortBy(key) {
+            if (!sort || sort.dirs[key] == null) return;
+            if (sort.state.key === key) sort.state.dir = -sort.state.dir; else { sort.state.key = key; sort.state.dir = sort.dirs[key]; }
+            render();
+            sort.onChange();
+          }
+
+          function menu(key) {
+            const visible = shown();
+            const at = visible.findIndex((column) => column.key === key);
+            return [
+              { icon: "chev-r", label: "Move " + spec.labels[key] + " left", kbd: "⌥←", disabled: at <= 0, run: () => moveBy(key, -1) },
+              { icon: "chev-r", label: "Move " + spec.labels[key] + " right", kbd: "⌥→", disabled: at < 0 || at >= visible.length - 1, run: () => moveBy(key, 1) },
+              "-",
+              { caption: "Columns" },
+              ...layout.filter((column) => column.key !== spec.flex).map((column) => ({
+                label: spec.labels[column.key], checked: !column.hidden,
+                run: () => set(layout.map((other) => other.key === column.key ? { ...other, hidden: !other.hidden } : other))
+              })),
+              "-",
+              { icon: "relaunch", label: "Reset the columns", run: () => set(null, "Columns reset") }
+            ];
+          }
+
+          function endDrag(event, cancelled) {
+            const ending = drag;
+            if (!ending) return;
+            drag = null;
+            try { header.releasePointerCapture(event.pointerId); } catch (_) {}
+            header.querySelectorAll(".dragging, .drop-before, .drop-after, .active").forEach((node) => node.classList.remove("dragging", "drop-before", "drop-after", "active"));
+            if (cancelled) apply();
+            else if (ending.kind === "resize") apply({ save: true, rows: false });
+            else if (ending.moved && ending.before != null) set(moveColumn(layout, ending.key, ending.before));
+          }
+
+          // A name moves its column once dragged a few pixels — a plain click sorts —
+          // and the line at its right edge sizes it from the first pixel.
+          header.addEventListener("pointerdown", (event) => {
+            if (event.button !== 0) return;
+            const handle = event.target.closest("[data-resize]");
+            const cell = event.target.closest("[data-col]");
+            if (!handle && !cell) return;
+            event.preventDefault();
+            const key = handle ? handle.dataset.resize : cell.dataset.col;
+            drag = { kind: handle ? "resize" : "move", key, x: event.clientX, width: columnOf(key).width, moved: false, before: null, node: handle || cell, pointerId: event.pointerId };
+            if (handle) {
+              try { header.setPointerCapture(event.pointerId); } catch (_) {}
+              handle.classList.add("active");
+            }
+          });
+          header.addEventListener("pointermove", (event) => {
+            if (!drag) return;
+            if (!event.buttons) { endDrag(event, true); return; }
+            const dx = event.clientX - drag.x;
+            if (drag.kind === "resize") {
+              const column = columnOf(drag.key);
+              column.width = clampColumnWidth(spec, drag.key, drag.width + dx);
+              drag.node.setAttribute("aria-valuenow", String(column.width));
+              apply({ rows: false });
+              return;
+            }
+            if (!drag.moved && Math.abs(dx) < 4) return;
+            if (!drag.moved) {
+              drag.moved = true;
+              drag.node.classList.add("dragging");
+              try { header.setPointerCapture(event.pointerId); } catch (_) {}
+            }
+            const cells = [...header.querySelectorAll("[data-col]")];
+            const over = cells.find((cell) => { const rect = cell.getBoundingClientRect(); return event.clientX < rect.left + rect.width / 2; });
+            drag.before = over ? layout.findIndex((column) => column.key === over.dataset.col) : layout.length;
+            cells.forEach((cell) => cell.classList.remove("drop-before", "drop-after"));
+            if (over) over.classList.add("drop-before"); else cells[cells.length - 1].classList.add("drop-after");
+          });
+          header.addEventListener("pointerup", (event) => endDrag(event, false));
+          header.addEventListener("pointercancel", (event) => endDrag(event, true));
+          header.addEventListener("click", (event) => {
+            const button = event.target.closest("[data-sort]");
+            if (button) sortBy(button.dataset.sort);
+          });
+          header.addEventListener("dblclick", (event) => {
+            const handle = event.target.closest("[data-resize]");
+            if (!handle) return;
+            columnOf(handle.dataset.resize).width = spec.widths[handle.dataset.resize];
+            apply({ save: true });
+          });
+          header.addEventListener("contextmenu", (event) => {
+            const cell = event.target.closest("[data-col]");
+            if (!cell) return;
+            event.preventDefault();
+            event.stopPropagation();
+            openMenu(event.clientX, event.clientY, menu(cell.dataset.col), cell);
+          });
+          header.addEventListener("keydown", (event) => {
+            const handle = event.target.closest("[data-resize]");
+            if (handle) {
+              const step = { ArrowLeft: -1, ArrowRight: 1 }[event.key];
+              if (!step) return;
+              event.preventDefault();
+              event.stopPropagation();
+              const column = columnOf(handle.dataset.resize);
+              column.width = clampColumnWidth(spec, column.key, column.width + step * (event.shiftKey ? 32 : 8));
+              handle.setAttribute("aria-valuenow", String(column.width));
+              apply({ save: true, rows: false });
+              return;
+            }
+            const cell = event.target.closest("[data-col]");
+            if (!cell || event.target !== cell) return;
+            if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+              event.preventDefault();
+              event.stopPropagation();
+              const step = event.key === "ArrowRight" ? 1 : -1;
+              if (event.altKey) { moveBy(cell.dataset.col, step); return; }
+              const cells = [...header.querySelectorAll("[data-col]")];
+              const next = cells[cells.indexOf(cell) + step];
+              if (next) { cells.forEach((other) => { other.tabIndex = -1; }); next.tabIndex = 0; next.focus(); }
+            } else if (event.key === "Enter" || event.key === " ") {
+              if (!sort || sort.dirs[cell.dataset.col] == null) return;
+              event.preventDefault();
+              event.stopPropagation();
+              sortBy(cell.dataset.col);
+            } else if (event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey)) {
+              event.preventDefault();
+              event.stopPropagation();
+              openMenuAt(cell, menu(cell.dataset.col));
+            }
+          });
+
           render();
-          return header;
+          return {
+            element: header,
+            get columns() { return shown(); },
+            attach(list) { target = list; apply({ rows: false }); },
+            set,
+            moveBy
+          };
         }
         """#
 
@@ -3178,42 +3357,59 @@ enum WebViewerAssets {
           return head + ": " + (entry.message || "");
         }
 
-        // ---- Log columns: their order, widths and which are shown, as a person left them ----
+        // ---- Table columns: their order, widths and which are shown, as a person left them ----
+        // A table's spec: its column keys in their default order, their names and
+        // default widths, the one flexible column that takes what is left (and is
+        // never hidden), the columns off until a person shows them, and the columns
+        // each narrower step of the pane drops.
 
-        const LOG_COLUMN_KEYS = ["time", "level", "subsystem", "category", "process", "message"];
-        const LOG_COLUMN_WIDTHS = { time: 86, level: 62, subsystem: 160, category: 120, process: 110 };
-        const LOG_COLUMN_MIN = { time: 60, level: 48, subsystem: 60, category: 60, process: 60 };
-        const LOG_COLUMNS_OFF = ["category", "process"];       // off until a person shows them
-        const LOG_COLUMNS_NARROW_OFF = ["subsystem", "category", "process"];  // a narrow pane keeps time, level, message
+        const LOG_COLUMNS = {
+          keys: ["time", "level", "subsystem", "category", "process", "message"],
+          labels: { time: "Time", level: "Level", subsystem: "Subsystem", category: "Category", process: "Process", message: "Message" },
+          widths: { time: 86, level: 62, subsystem: 160, category: 120, process: 110 },
+          min: { time: 60, level: 48, subsystem: 60, category: 60, process: 60 },
+          flex: "message", flexMin: 120,
+          off: ["category", "process"],
+          narrow: [["subsystem", "category", "process"]]          // ≤ 640 px
+        };
 
-        function clampLogColumnWidth(key, width) {
-          return Math.round(Math.max(LOG_COLUMN_MIN[key] || 48, Math.min(640, Number(width) || LOG_COLUMN_WIDTHS[key] || 100)));
+        const NETWORK_COLUMNS = {
+          keys: ["time", "method", "name", "status", "size", "duration", "wf"],
+          labels: { time: "Finished", method: "Method", name: "Name", status: "Status", size: "Size", duration: "Duration", wf: "Waterfall" },
+          widths: { time: 86, method: 46, status: 118, size: 62, duration: 64, wf: 90 },
+          min: { time: 60, method: 40, status: 48, size: 44, duration: 48, wf: 40 },
+          flex: "name", flexMin: 140,
+          off: [],
+          narrow: [["size", "wf"], ["size", "wf", "method"]]       // ≤ 760 px, ≤ 560 px
+        };
+
+        function clampColumnWidth(spec, key, width) {
+          return Math.round(Math.max(spec.min[key] || 40, Math.min(640, Number(width) || spec.widths[key] || 100)));
         }
 
         // A saved layout made whole: every known column once, unknown ones dropped,
-        // widths in bounds; a column the saved one lacks goes where it goes by default.
-        // The message takes what is left, so it has no width and is never hidden.
-        function logColumnLayout(saved) {
-          const list = Array.isArray(saved) ? saved.filter((column) => column && LOG_COLUMN_KEYS.indexOf(column.key) >= 0) : [];
+        // widths in bounds; a column the saved one lacks goes after the one it
+        // follows by default, else first.
+        function columnLayout(spec, saved) {
+          const list = Array.isArray(saved) ? saved.filter((column) => column && spec.keys.indexOf(column.key) >= 0) : [];
           const byKey = {};
           const order = [];
           for (const column of list) if (!byKey[column.key]) { byKey[column.key] = column; order.push(column.key); }
-          // A missing column goes after the one it follows by default, else first.
-          LOG_COLUMN_KEYS.forEach((key, index) => {
+          spec.keys.forEach((key, index) => {
             if (order.indexOf(key) >= 0) return;
-            const after = LOG_COLUMN_KEYS.slice(0, index).reverse().find((previous) => order.indexOf(previous) >= 0);
+            const after = spec.keys.slice(0, index).reverse().find((previous) => order.indexOf(previous) >= 0);
             order.splice(after ? order.indexOf(after) + 1 : 0, 0, key);
           });
           return order.map((key) => {
             const column = byKey[key];
-            if (key === "message") return { key, width: null, hidden: false };
-            return { key, width: clampLogColumnWidth(key, column && column.width), hidden: column ? !!column.hidden : LOG_COLUMNS_OFF.indexOf(key) >= 0 };
+            if (key === spec.flex) return { key, width: null, hidden: false };
+            return { key, width: clampColumnWidth(spec, key, column && column.width), hidden: column ? !!column.hidden : spec.off.indexOf(key) >= 0 };
           });
         }
 
         // The layout with `key` moved to stand before the column now at `before`
         // (the length of the layout: last).
-        function moveLogColumn(layout, key, before) {
+        function moveColumn(layout, key, before) {
           const from = layout.findIndex((column) => column.key === key);
           if (from < 0) return layout;
           const next = layout.slice();
@@ -3223,13 +3419,14 @@ enum WebViewerAssets {
           return next;
         }
 
-        // The columns a row draws, in order — fewer in a narrow pane.
-        function shownLogColumns(layout, narrow) {
-          return layout.filter((column) => !column.hidden && !(narrow && LOG_COLUMNS_NARROW_OFF.indexOf(column.key) >= 0));
+        // The columns a row draws, in order: at full width (step 0), or at a narrower step of the pane.
+        function shownColumns(spec, layout, step) {
+          const off = step ? spec.narrow[step - 1] || [] : [];
+          return layout.filter((column) => !column.hidden && off.indexOf(column.key) < 0);
         }
 
-        function logGridTemplate(layout, narrow) {
-          return shownLogColumns(layout, narrow).map((column) => column.key === "message" ? "minmax(120px, 1fr)" : column.width + "px").join(" ");
+        function gridTemplate(spec, layout, step) {
+          return shownColumns(spec, layout, step).map((column) => column.key === spec.flex ? "minmax(" + spec.flexMin + "px, 1fr)" : column.width + "px").join(" ");
         }
 
         // The lines after the cursor: a line the page already has is never added twice,
@@ -3718,168 +3915,17 @@ enum WebViewerAssets {
         });
         logsView.listWrap.append(logsNew);
 
-        // ---- Columns: dragged into another order, their edges dragged for width,
-        // shown or hidden from the header's menu — and kept as a person left them.
-
-        const LOG_COLUMN_LABELS = { time: "Time", level: "Level", subsystem: "Subsystem", category: "Category", process: "Process", message: "Message" };
-        let logColumns = logColumnLayout(stored("logs.columns", null));
-        const logsHeader = el("div", { class: "thead log-grid log-head", role: "row" });
-
-        function renderLogHeader() {
-          const focused = logsHeader.contains(document.activeElement) ? document.activeElement : null;
-          const focusKey = focused && (focused.dataset.col || focused.dataset.resize);
-          const focusResize = !!(focused && focused.dataset.resize);
-          logsHeader.innerHTML = logColumns.filter((column) => !column.hidden).map((column, index) => {
-            const label = LOG_COLUMN_LABELS[column.key];
-            const narrowOff = LOG_COLUMNS_NARROW_OFF.indexOf(column.key) >= 0;
-            return '<span class="cell col' + (narrowOff ? " c-opt" : "") + '" role="columnheader" data-col="' + column.key + '" tabindex="' + (index === 0 ? 0 : -1) + '"' +
-              ' aria-roledescription="movable column" title="Drag to move · ⌥← ⌥→ moves it · right-click for the columns">' +
-              '<span class="col-label">' + label + "</span>" +
-              (column.key === "message" ? "" : '<span class="col-resize" role="separator" aria-orientation="vertical" tabindex="0" data-resize="' + column.key + '" aria-label="Resize ' + label +
-                '" aria-valuemin="' + (LOG_COLUMN_MIN[column.key] || 48) + '" aria-valuemax="640" aria-valuenow="' + column.width + '" title="Drag to resize · double-click resets"></span>') +
-              "</span>";
-          }).join("");
-          if (focusKey) {
-            const again = logsHeader.querySelector(focusResize ? '[data-resize="' + focusKey + '"]' : '[data-col="' + focusKey + '"]');
-            if (again) { if (!focusResize) { logsHeader.querySelectorAll("[data-col]").forEach((cell) => { cell.tabIndex = -1; }); again.tabIndex = 0; } again.focus({ preventScroll: true }); }
-          }
-        }
-
-        // The widths go to the rows as a grid template; a new order or a column shown re-renders them.
-        function applyLogColumns({ save, rows } = {}) {
-          logsView.list.style.setProperty("--log-cols", logGridTemplate(logColumns, false));
-          logsView.list.style.setProperty("--log-cols-narrow", logGridTemplate(logColumns, true));
-          if (rows !== false) { renderLogHeader(); logsList.invalidate(); }
-          if (save) store("logs.columns", logColumns);
-        }
-
-        function setLogColumns(next, message) {
-          logColumns = logColumnLayout(next);
-          applyLogColumns({ save: true });
-          if (message) setMessage(message);
-        }
-
-        function moveLogColumnBy(key, step) {
-          const shown = logColumns.filter((column) => !column.hidden);
-          const at = shown.findIndex((column) => column.key === key);
-          const target = shown[at + step];
-          if (!target) return;
-          const before = logColumns.findIndex((column) => column.key === target.key) + (step > 0 ? 1 : 0);
-          setLogColumns(moveLogColumn(logColumns, key, before), LOG_COLUMN_LABELS[key] + " moved " + (step > 0 ? "right" : "left"));
-        }
-
-        function logColumnMenu(key) {
-          const shown = logColumns.filter((column) => !column.hidden);
-          const at = shown.findIndex((column) => column.key === key);
-          return [
-            { icon: "chev-r", label: "Move " + LOG_COLUMN_LABELS[key] + " left", kbd: "⌥←", disabled: at <= 0, run: () => moveLogColumnBy(key, -1) },
-            { icon: "chev-r", label: "Move " + LOG_COLUMN_LABELS[key] + " right", kbd: "⌥→", disabled: at < 0 || at >= shown.length - 1, run: () => moveLogColumnBy(key, 1) },
-            "-",
-            { caption: "Columns" },
-            ...logColumns.filter((column) => column.key !== "message").map((column) => ({
-              label: LOG_COLUMN_LABELS[column.key], checked: !column.hidden,
-              run: () => setLogColumns(logColumns.map((other) => other.key === column.key ? { ...other, hidden: !other.hidden } : other))
-            })),
-            "-",
-            { icon: "relaunch", label: "Reset the columns", run: () => setLogColumns(null, "Log columns reset") }
-          ];
-        }
-
-        // Dragging: a column's name moves it, the line at its right edge sizes it.
-        let logColumnDrag = null;
-        logsHeader.addEventListener("pointerdown", (event) => {
-          if (event.button !== 0) return;
-          const handle = event.target.closest("[data-resize]");
-          const cell = event.target.closest("[data-col]");
-          if (!handle && !cell) return;
-          event.preventDefault();
-          const key = handle ? handle.dataset.resize : cell.dataset.col;
-          const column = logColumns.find((candidate) => candidate.key === key);
-          logColumnDrag = { kind: handle ? "resize" : "move", key, x: event.clientX, width: column.width, moved: false, before: null, node: handle || cell };
-          try { logsHeader.setPointerCapture(event.pointerId); } catch (_) {}
-          if (handle) handle.classList.add("active");
+        // Columns a person moves, sizes, shows and hides; the layout is kept (see createColumnHeader).
+        const logsHeader = createColumnHeader({
+          className: "log-grid",
+          spec: LOG_COLUMNS,
+          storeKey: "logs.columns",
+          classes: { subsystem: "c-opt", category: "c-opt", process: "c-opt" },
+          onLayout: () => logsList.invalidate()
         });
-        logsHeader.addEventListener("pointermove", (event) => {
-          const drag = logColumnDrag;
-          if (!drag) return;
-          const dx = event.clientX - drag.x;
-          if (drag.kind === "resize") {
-            const column = logColumns.find((candidate) => candidate.key === drag.key);
-            column.width = clampLogColumnWidth(drag.key, drag.width + dx);
-            drag.node.setAttribute("aria-valuenow", String(column.width));
-            applyLogColumns({ rows: false });
-            return;
-          }
-          if (!drag.moved && Math.abs(dx) < 4) return;
-          drag.moved = true;
-          drag.node.classList.add("dragging");
-          const cells = [...logsHeader.querySelectorAll("[data-col]")];
-          const target = cells.find((cell) => { const rect = cell.getBoundingClientRect(); return event.clientX < rect.left + rect.width / 2; });
-          drag.before = target ? logColumns.findIndex((column) => column.key === target.dataset.col) : logColumns.length;
-          cells.forEach((cell) => cell.classList.remove("drop-before", "drop-after"));
-          if (target) target.classList.add("drop-before"); else cells[cells.length - 1].classList.add("drop-after");
-        });
-        function endLogColumnDrag(event, cancelled) {
-          const drag = logColumnDrag;
-          if (!drag) return;
-          logColumnDrag = null;
-          try { logsHeader.releasePointerCapture(event.pointerId); } catch (_) {}
-          logsHeader.querySelectorAll(".dragging, .drop-before, .drop-after, .active").forEach((node) => node.classList.remove("dragging", "drop-before", "drop-after", "active"));
-          if (cancelled) { applyLogColumns(); return; }
-          if (drag.kind === "resize") applyLogColumns({ save: true, rows: false });
-          else if (drag.moved && drag.before != null) setLogColumns(moveLogColumn(logColumns, drag.key, drag.before));
-        }
-        logsHeader.addEventListener("pointerup", (event) => endLogColumnDrag(event, false));
-        logsHeader.addEventListener("pointercancel", (event) => endLogColumnDrag(event, true));
-        logsHeader.addEventListener("dblclick", (event) => {
-          const handle = event.target.closest("[data-resize]");
-          if (!handle) return;
-          const column = logColumns.find((candidate) => candidate.key === handle.dataset.resize);
-          column.width = LOG_COLUMN_WIDTHS[column.key];
-          applyLogColumns({ save: true });
-        });
-        logsHeader.addEventListener("contextmenu", (event) => {
-          const cell = event.target.closest("[data-col]");
-          if (!cell) return;
-          event.preventDefault();
-          event.stopPropagation();
-          openMenu(event.clientX, event.clientY, logColumnMenu(cell.dataset.col), cell);
-        });
-        // The keyboard: ←/→ between column names, ⌥←/⌥→ moves one, ⇧F10 its menu; ←/→ on an edge resizes.
-        logsHeader.addEventListener("keydown", (event) => {
-          const handle = event.target.closest("[data-resize]");
-          if (handle) {
-            const step = { ArrowLeft: -1, ArrowRight: 1 }[event.key];
-            if (!step) return;
-            event.preventDefault();
-            event.stopPropagation();
-            const column = logColumns.find((candidate) => candidate.key === handle.dataset.resize);
-            column.width = clampLogColumnWidth(column.key, column.width + step * (event.shiftKey ? 32 : 8));
-            handle.setAttribute("aria-valuenow", String(column.width));
-            applyLogColumns({ save: true, rows: false });
-            return;
-          }
-          const cell = event.target.closest("[data-col]");
-          if (!cell) return;
-          if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
-            event.preventDefault();
-            event.stopPropagation();
-            const step = event.key === "ArrowRight" ? 1 : -1;
-            if (event.altKey) { moveLogColumnBy(cell.dataset.col, step); return; }
-            const cells = [...logsHeader.querySelectorAll("[data-col]")];
-            const next = cells[cells.indexOf(cell) + step];
-            if (next) { cells.forEach((other) => { other.tabIndex = -1; }); next.tabIndex = 0; next.focus(); }
-          } else if (event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey)) {
-            event.preventDefault();
-            event.stopPropagation();
-            openMenuAt(cell, logColumnMenu(cell.dataset.col));
-          }
-        });
-
-        renderLogHeader();
 
         const logsList = createList(logsView.list, {
-          header: logsHeader,
+          header: logsHeader.element,
           key: (entry) => String(entry.sequence),
           version: (entry) => (logsFilter.text || "") + "|" + (entry.launchId === newestLaunchId() ? 1 : 0),
           rowClass: (entry) => "log-grid" + (isLogError(entry) ? " lvl-err" : "") + (!reviewActive() && entry.launchId != null && entry.launchId !== newestLaunchId() ? " retired" : ""),
@@ -3893,8 +3939,7 @@ enum WebViewerAssets {
           onGroupMenu: (id, x, y, button) => openMenu(x, y, launchGroupMenu("logs", id), button),
           follow: () => logs.follow
         });
-        // The header is drawn already, and the rows are not yet: only the widths go out now.
-        applyLogColumns({ rows: false });
+        logsHeader.attach(logsView.list);
 
         function markMatches(text, query) {
           const escaped = escapeHTML(text);
@@ -3916,7 +3961,7 @@ enum WebViewerAssets {
         function renderLogRow(entry, row) {
           const level = logLevel(entry);
           const query = parseFieldTerm(logsFilter.text, LOGS_FILTER_FIELDS);
-          row.innerHTML = logColumns.filter((column) => !column.hidden).map((column) => LOG_CELLS[column.key](entry, level, query)).join("");
+          row.innerHTML = logsHeader.columns.map((column) => LOG_CELLS[column.key](entry, level, query)).join("");
         }
 
         function logsEmpty() {
@@ -4385,19 +4430,20 @@ enum WebViewerAssets {
           toast("Request list cleared", { icon: "trash", duration: 5000, action: { label: "Undo", run: () => { network.cleared = previous; renderNetwork(); } } });
         });
 
-        // The logger stamps a call when it finishes; the waterfall works its start out from the duration.
-        const NETWORK_COLUMNS = [
-          { key: "time", label: "Finished", sort: true },
-          { key: "method", label: "Method", class: "c-method" },
-          { key: "name", label: "Name", sort: true },
-          { key: "status", label: "Status", sort: true },
-          { key: "size", label: "Size", sort: true, class: "num c-size", defaultDir: -1 },
-          { key: "duration", label: "Duration", sort: true, class: "num", defaultDir: -1 },
-          { key: "wf", label: "Waterfall", class: "c-wf" }
-        ];
+        // The logger stamps a call when it finishes; the waterfall works its start out
+        // from the duration. The columns sort on a click and a person moves, sizes,
+        // shows and hides them (see createColumnHeader).
+        const networkHeader = createColumnHeader({
+          className: "net-grid",
+          spec: NETWORK_COLUMNS,
+          storeKey: "network.columns",
+          classes: { method: "c-method", size: "num c-size", duration: "num", wf: "c-wf" },
+          sort: { state: network.sort, dirs: { time: 1, name: 1, status: 1, size: -1, duration: -1 }, onChange: () => renderNetwork() },
+          onLayout: () => networkList.invalidate()
+        });
 
         const networkList = createList(networkView.list, {
-          header: createSortHeader("net-grid", NETWORK_COLUMNS, network.sort, () => renderNetwork()),
+          header: networkHeader.element,
           key: (event) => event.id,
           version: (event) => [event.response ? 1 : 0, event.error ? 1 : 0, event.launchId, event.durationMilliseconds, event._wf, newestLaunchId() === event.launchId, networkFilter.text].join("|"),
           // A reviewed run is one launch's story: no launch groups, nothing reads as earlier.
@@ -4414,6 +4460,7 @@ enum WebViewerAssets {
           onGroupMenu: (id, x, y, button) => openMenu(x, y, launchGroupMenu("network", id), button),
           follow: true
         });
+        networkHeader.attach(networkView.list);
 
         function renderNetworkRow(event, row) {
           const status = networkStatus(event);
@@ -4423,17 +4470,20 @@ enum WebViewerAssets {
           const shown = !query.field || query.field === "url" || query.field === "host" ? query.term : "";
           const hits = query.term ? networkHits(searchFieldsOf(event), query.term, query.field) : [];
           const elsewhere = hits.length && !hits.some((hit) => hit === "url" || hit === "host") ? hits.filter((hit) => /header|body/.test(hit)) : [];
-          row.innerHTML =
-            '<span class="cell time">' + escapeHTML(formatClock(event.timestamp, true)) + "</span>" +
-            '<span class="cell method c-method ' + escapeHTML(event.protocol) + '">' + escapeHTML(event.protocol === "grpc" ? "gRPC" : (event.request && event.request.method) || "") + "</span>" +
-            '<span class="cell name" translate="no"><b>' + markHTML(requestName(event), shown) + "</b>" +
+          const cells = {
+            time: () => '<span class="cell time">' + escapeHTML(formatClock(event.timestamp, true)) + "</span>",
+            method: () => '<span class="cell method c-method ' + escapeHTML(event.protocol) + '">' + escapeHTML(event.protocol === "grpc" ? "gRPC" : (event.request && event.request.method) || "") + "</span>",
+            name: () => '<span class="cell name" translate="no"><b>' + markHTML(requestName(event), shown) + "</b>" +
               (event.mocked ? '<span class="tag tag-course" title="' + escapeHTML(event.mockRuleId ? "Answered by mock " + event.mockRuleId : "Answered by a mock") + '">Mock</span>' : "") +
               (elsewhere.length ? '<span class="tag tag-hit" title="' + escapeHTML("Found in the " + elsewhere.join(", ")) + '">' + escapeHTML(elsewhere[0]) + "</span>" : "") +
-              "<span>" + markHTML(where, shown) + "</span></span>" +
-            '<span class="cell"><span class="st st-' + status.severity + '" title="' + escapeHTML(status.title) + '">' + (status.severity === "err" ? icon("warn") : "") + escapeHTML(status.text) + "</span></span>" +
-            '<span class="cell num c-size">' + escapeHTML(formatBytes(networkSize(event))) + "</span>" +
-            '<span class="cell num">' + escapeHTML(formatDuration(event.durationMilliseconds)) + "</span>" +
-            '<span class="cell c-wf"><span class="wf"><i class="' + status.severity + '" style="' + (event._wf || "") + '"></i></span></span>';
+              "<span>" + markHTML(where, shown) + "</span></span>",
+            status: () => '<span class="cell"><span class="st st-' + status.severity + '" title="' + escapeHTML(status.title) + '">' + (status.severity === "err" ? icon("warn") : "") + escapeHTML(status.text) + "</span></span>",
+            size: () => '<span class="cell num c-size">' + escapeHTML(formatBytes(networkSize(event))) + "</span>",
+            duration: () => '<span class="cell num">' + escapeHTML(formatDuration(event.durationMilliseconds)) + "</span>",
+            wf: () => '<span class="cell c-wf"><span class="wf"><i class="' + status.severity + '" style="' + (event._wf || "") + '"></i></span></span>'
+          };
+          // In the header's order.
+          row.innerHTML = networkHeader.columns.map((column) => cells[column.key]()).join("");
           row.title = (event.request && (event.request.method || "")) + " " + requestPath(event);
         }
 
@@ -6972,10 +7022,11 @@ enum WebViewerAssets {
         .snippet pre.code { flex: 1; }
 
         /* Network */
-        .net-grid { grid-template-columns: 86px 46px minmax(140px, 1fr) 118px 62px 64px 90px; }
+        /* The columns are the person's: their order and widths come as grid templates from the header. */
+        .net-grid { grid-template-columns: var(--cols, 86px 46px minmax(140px, 1fr) 118px 62px 64px 90px); }
         .thead.net-grid { padding-left: 12px; }
-        @container insp (max-width: 760px) { .net-grid { grid-template-columns: 86px 46px minmax(120px, 1fr) 112px 64px; } .net-grid .c-size, .net-grid .c-wf { display: none; } }
-        @container insp (max-width: 560px) { .net-grid { grid-template-columns: 86px minmax(0, 1fr) 124px 60px; } .net-grid .c-method { display: none; } }
+        @container insp (max-width: 760px) { .net-grid { grid-template-columns: var(--cols-n1, 86px 46px minmax(140px, 1fr) 118px 64px); } .net-grid .cell.c-size, .net-grid .cell.c-wf { display: none; } }
+        @container insp (max-width: 560px) { .net-grid { grid-template-columns: var(--cols-n2, 86px minmax(140px, 1fr) 118px 64px); } .net-grid .cell.c-method { display: none; } }
         .method { font: 600 var(--fs-11)/1 var(--font-mono); color: var(--ink2); }
         .method.grpc { font-weight: 500; }
         .name { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
@@ -7040,16 +7091,20 @@ enum WebViewerAssets {
 
         /* Logs */
         /* The columns are the person's: their order and widths come as a grid template from logs.js. */
-        .log-grid { grid-template-columns: var(--log-cols, 86px 62px 160px minmax(120px, 1fr)); }
-        @container insp (max-width: 640px) { .log-grid { grid-template-columns: var(--log-cols-narrow, 86px 62px minmax(120px, 1fr)); } .log-grid .c-opt { display: none; } }
-        .log-head .col { position: relative; display: flex; align-items: center; height: 100%; overflow: visible; cursor: grab; user-select: none; touch-action: none; }
-        .log-head .col-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-        .log-head .col:hover { color: var(--ink1); }
-        .log-head .col:focus-visible { outline-offset: -2px; }
-        .log-head .col.dragging { color: var(--ink1); cursor: grabbing; }
-        .log-head .col.drop-before::before, .log-head .col.drop-after::after { content: ""; position: absolute; top: 3px; bottom: 3px; width: 2px; border-radius: 1px; background: var(--accent); }
-        .log-head .col.drop-before::before { left: -6px; }
-        .log-head .col.drop-after::after { right: -6px; }
+        .log-grid { grid-template-columns: var(--cols, 86px 62px 160px minmax(120px, 1fr)); }
+        @container insp (max-width: 640px) { .log-grid { grid-template-columns: var(--cols-n1, 86px 62px minmax(120px, 1fr)); } .log-grid .cell.c-opt { display: none; } }
+        /* A header a person arranges (Network, Logs): names that drag, edges that size.
+           A narrow pane hides columns with `.cell.c-…` rules, which outrank `.col` here. */
+        .col-head .col { position: relative; display: flex; align-items: center; height: 100%; overflow: visible; cursor: grab; user-select: none; touch-action: none; }
+        .col-head .col.num { justify-content: flex-end; }
+        .col-head .col-label, .col-head .col-sort { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+        .col-head .col:hover { color: var(--ink1); }
+        .col-head .col:focus-visible { outline-offset: -2px; }
+        .col-head .col.dragging { color: var(--ink1); cursor: grabbing; }
+        .col-head .col.dragging .col-sort { cursor: grabbing; }
+        .col-head .col.drop-before::before, .col-head .col.drop-after::after { content: ""; position: absolute; top: 3px; bottom: 3px; width: 2px; border-radius: 1px; background: var(--accent); }
+        .col-head .col.drop-before::before { left: -6px; }
+        .col-head .col.drop-after::after { right: -6px; }
         .col-resize { position: absolute; top: 0; bottom: 0; right: -9px; z-index: 1; width: 9px; cursor: col-resize; touch-action: none; }
         .col-resize::before { content: ""; position: absolute; top: 5px; bottom: 5px; left: 4px; width: 1px; background: var(--line-thin); }
         .col-resize:hover::before, .col-resize:focus-visible::before, .col-resize.active::before { left: 3px; width: 3px; border-radius: 1px; background: var(--accent); }

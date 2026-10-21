@@ -161,35 +161,43 @@ final class WebViewerLogicTests: XCTestCase {
         XCTAssertEqual(value(context, "markHTML('a&b', '')"), "a&amp;b")
     }
 
-    // MARK: - Log columns
+    // MARK: - Table columns (Logs, Network)
 
-    func testASavedLogLayoutIsMadeWholeAndKeptInBounds() throws {
+    func testASavedLayoutIsMadeWholeAndKeptInBounds() throws {
         let context = try makeContext()
-        XCTAssertEqual(value(context, "logColumnLayout(null).map(c => c.key + (c.hidden ? '-' : '') + (c.width ? c.width : '')).join(',')"),
+        context.evaluateScript("var describe = (l) => l.map(c => c.key + (c.hidden ? '-' : '') + (c.width ? c.width : '')).join(',');")
+        XCTAssertEqual(value(context, "describe(columnLayout(LOG_COLUMNS, null))"),
                        "time86,level62,subsystem160,category-120,process-110,message", "by default category and process are off")
-        // Unknown and repeated columns go, widths are bounded, a missing column comes back where it belongs.
+        // Unknown and repeated columns go, widths are bounded, a missing column comes back after the one it follows.
         let saved = #"[{"key":"message"},{"key":"bogus","width":10},{"key":"time","width":5},{"key":"level","width":9999,"hidden":true},{"key":"time","width":300}]"#
-        XCTAssertEqual(value(context, "logColumnLayout(\(saved)).map(c => c.key + (c.hidden ? '-' : '') + (c.width ? c.width : '')).join(',')"),
+        XCTAssertEqual(value(context, "describe(columnLayout(LOG_COLUMNS, \(saved)))"),
                        "message,time60,level-640,subsystem160,category-120,process-110")
-        XCTAssertEqual(value(context, "logColumnLayout([{ key: 'message', hidden: true }])[0].hidden"), "false", "the message is never hidden")
-        XCTAssertEqual(value(context, "logColumnLayout('not a list').length"), "6")
+        XCTAssertEqual(value(context, "columnLayout(LOG_COLUMNS, [{ key: 'message', hidden: true }])[0].hidden"), "false", "the flexible column is never hidden")
+        XCTAssertEqual(value(context, "columnLayout(LOG_COLUMNS, 'not a list').length"), "6")
+        // A column a later viewer adds lands after its neighbour in an older saved order.
+        XCTAssertEqual(value(context, "describe(columnLayout(NETWORK_COLUMNS, ['name', 'time', 'status', 'method', 'size', 'duration'].map(key => ({ key }))))"),
+                       "name,time86,status118,method46,size62,duration64,wf90")
     }
 
     func testAMovedColumnStandsBeforeTheOneItWasDroppedOn() throws {
         let context = try makeContext()
-        context.evaluateScript("var layout = logColumnLayout(null); var keys = (l) => l.map(c => c.key).join(',');")
-        XCTAssertEqual(value(context, "keys(moveLogColumn(layout, 'message', 1))"), "time,message,level,subsystem,category,process")
-        XCTAssertEqual(value(context, "keys(moveLogColumn(layout, 'time', 3))"), "level,subsystem,time,category,process,message", "moving right counts the gap it leaves")
-        XCTAssertEqual(value(context, "keys(moveLogColumn(layout, 'level', layout.length))"), "time,subsystem,category,process,message,level")
-        XCTAssertEqual(value(context, "keys(moveLogColumn(layout, 'nope', 0))"), "time,level,subsystem,category,process,message")
+        context.evaluateScript("var layout = columnLayout(LOG_COLUMNS, null); var keys = (l) => l.map(c => c.key).join(',');")
+        XCTAssertEqual(value(context, "keys(moveColumn(layout, 'message', 1))"), "time,message,level,subsystem,category,process")
+        XCTAssertEqual(value(context, "keys(moveColumn(layout, 'time', 3))"), "level,subsystem,time,category,process,message", "moving right counts the gap it leaves")
+        XCTAssertEqual(value(context, "keys(moveColumn(layout, 'level', layout.length))"), "time,subsystem,category,process,message,level")
+        XCTAssertEqual(value(context, "keys(moveColumn(layout, 'nope', 0))"), "time,level,subsystem,category,process,message")
     }
 
-    func testTheRowsGridFollowsTheShownColumnsAndANarrowPaneDropsTheOptionalOnes() throws {
+    func testTheRowsGridFollowsTheShownColumnsAndEachNarrowerStepDropsItsColumns() throws {
         let context = try makeContext()
-        context.evaluateScript("var layout = moveLogColumn(logColumnLayout([{ key: 'subsystem', width: 200 }, { key: 'process', hidden: false }]), 'message', 0);")
-        XCTAssertEqual(value(context, "logGridTemplate(layout, false)"), "minmax(120px, 1fr) 86px 62px 200px 110px")
-        XCTAssertEqual(value(context, "logGridTemplate(layout, true)"), "minmax(120px, 1fr) 86px 62px")
-        XCTAssertEqual(value(context, "shownLogColumns(layout, true).map(c => c.key).join(',')"), "message,time,level")
+        context.evaluateScript("var logs = moveColumn(columnLayout(LOG_COLUMNS, [{ key: 'subsystem', width: 200 }, { key: 'process', hidden: false }]), 'message', 0);")
+        XCTAssertEqual(value(context, "gridTemplate(LOG_COLUMNS, logs, 0)"), "minmax(120px, 1fr) 86px 62px 200px 110px")
+        XCTAssertEqual(value(context, "gridTemplate(LOG_COLUMNS, logs, 1)"), "minmax(120px, 1fr) 86px 62px")
+        XCTAssertEqual(value(context, "shownColumns(LOG_COLUMNS, logs, 1).map(c => c.key).join(',')"), "message,time,level")
+        context.evaluateScript("var net = moveColumn(columnLayout(NETWORK_COLUMNS, null), 'duration', 0);")
+        XCTAssertEqual(value(context, "gridTemplate(NETWORK_COLUMNS, net, 0)"), "64px 86px 46px minmax(140px, 1fr) 118px 62px 90px")
+        XCTAssertEqual(value(context, "gridTemplate(NETWORK_COLUMNS, net, 1)"), "64px 86px 46px minmax(140px, 1fr) 118px", "≤ 760 px: no size, no waterfall")
+        XCTAssertEqual(value(context, "gridTemplate(NETWORK_COLUMNS, net, 2)"), "64px 86px minmax(140px, 1fr) 118px", "≤ 560 px: no method either")
     }
 
     // MARK: - Filters

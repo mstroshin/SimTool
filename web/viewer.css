@@ -476,10 +476,11 @@ pre.code { margin: 0; padding: var(--sp-2) var(--sp-3); border: 1px solid var(--
 .snippet pre.code { flex: 1; }
 
 /* Network */
-.net-grid { grid-template-columns: 86px 46px minmax(140px, 1fr) 118px 62px 64px 90px; }
+/* The columns are the person's: their order and widths come as grid templates from the header. */
+.net-grid { grid-template-columns: var(--cols, 86px 46px minmax(140px, 1fr) 118px 62px 64px 90px); }
 .thead.net-grid { padding-left: 12px; }
-@container insp (max-width: 760px) { .net-grid { grid-template-columns: 86px 46px minmax(120px, 1fr) 112px 64px; } .net-grid .c-size, .net-grid .c-wf { display: none; } }
-@container insp (max-width: 560px) { .net-grid { grid-template-columns: 86px minmax(0, 1fr) 124px 60px; } .net-grid .c-method { display: none; } }
+@container insp (max-width: 760px) { .net-grid { grid-template-columns: var(--cols-n1, 86px 46px minmax(140px, 1fr) 118px 64px); } .net-grid .cell.c-size, .net-grid .cell.c-wf { display: none; } }
+@container insp (max-width: 560px) { .net-grid { grid-template-columns: var(--cols-n2, 86px minmax(140px, 1fr) 118px 64px); } .net-grid .cell.c-method { display: none; } }
 .method { font: 600 var(--fs-11)/1 var(--font-mono); color: var(--ink2); }
 .method.grpc { font-weight: 500; }
 .name { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
@@ -544,16 +545,20 @@ mark.current { box-shadow: 0 0 0 1.5px var(--accent); }
 
 /* Logs */
 /* The columns are the person's: their order and widths come as a grid template from logs.js. */
-.log-grid { grid-template-columns: var(--log-cols, 86px 62px 160px minmax(120px, 1fr)); }
-@container insp (max-width: 640px) { .log-grid { grid-template-columns: var(--log-cols-narrow, 86px 62px minmax(120px, 1fr)); } .log-grid .c-opt { display: none; } }
-.log-head .col { position: relative; display: flex; align-items: center; height: 100%; overflow: visible; cursor: grab; user-select: none; touch-action: none; }
-.log-head .col-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.log-head .col:hover { color: var(--ink1); }
-.log-head .col:focus-visible { outline-offset: -2px; }
-.log-head .col.dragging { color: var(--ink1); cursor: grabbing; }
-.log-head .col.drop-before::before, .log-head .col.drop-after::after { content: ""; position: absolute; top: 3px; bottom: 3px; width: 2px; border-radius: 1px; background: var(--accent); }
-.log-head .col.drop-before::before { left: -6px; }
-.log-head .col.drop-after::after { right: -6px; }
+.log-grid { grid-template-columns: var(--cols, 86px 62px 160px minmax(120px, 1fr)); }
+@container insp (max-width: 640px) { .log-grid { grid-template-columns: var(--cols-n1, 86px 62px minmax(120px, 1fr)); } .log-grid .cell.c-opt { display: none; } }
+/* A header a person arranges (Network, Logs): names that drag, edges that size.
+   A narrow pane hides columns with `.cell.c-…` rules, which outrank `.col` here. */
+.col-head .col { position: relative; display: flex; align-items: center; height: 100%; overflow: visible; cursor: grab; user-select: none; touch-action: none; }
+.col-head .col.num { justify-content: flex-end; }
+.col-head .col-label, .col-head .col-sort { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.col-head .col:hover { color: var(--ink1); }
+.col-head .col:focus-visible { outline-offset: -2px; }
+.col-head .col.dragging { color: var(--ink1); cursor: grabbing; }
+.col-head .col.dragging .col-sort { cursor: grabbing; }
+.col-head .col.drop-before::before, .col-head .col.drop-after::after { content: ""; position: absolute; top: 3px; bottom: 3px; width: 2px; border-radius: 1px; background: var(--accent); }
+.col-head .col.drop-before::before { left: -6px; }
+.col-head .col.drop-after::after { right: -6px; }
 .col-resize { position: absolute; top: 0; bottom: 0; right: -9px; z-index: 1; width: 9px; cursor: col-resize; touch-action: none; }
 .col-resize::before { content: ""; position: absolute; top: 5px; bottom: 5px; left: 4px; width: 1px; background: var(--line-thin); }
 .col-resize:hover::before, .col-resize:focus-visible::before, .col-resize.active::before { left: 3px; width: 3px; border-radius: 1px; background: var(--accent); }

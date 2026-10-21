@@ -484,42 +484,59 @@ function logLine(entry) {
   return head + ": " + (entry.message || "");
 }
 
-// ---- Log columns: their order, widths and which are shown, as a person left them ----
+// ---- Table columns: their order, widths and which are shown, as a person left them ----
+// A table's spec: its column keys in their default order, their names and
+// default widths, the one flexible column that takes what is left (and is
+// never hidden), the columns off until a person shows them, and the columns
+// each narrower step of the pane drops.
 
-const LOG_COLUMN_KEYS = ["time", "level", "subsystem", "category", "process", "message"];
-const LOG_COLUMN_WIDTHS = { time: 86, level: 62, subsystem: 160, category: 120, process: 110 };
-const LOG_COLUMN_MIN = { time: 60, level: 48, subsystem: 60, category: 60, process: 60 };
-const LOG_COLUMNS_OFF = ["category", "process"];       // off until a person shows them
-const LOG_COLUMNS_NARROW_OFF = ["subsystem", "category", "process"];  // a narrow pane keeps time, level, message
+const LOG_COLUMNS = {
+  keys: ["time", "level", "subsystem", "category", "process", "message"],
+  labels: { time: "Time", level: "Level", subsystem: "Subsystem", category: "Category", process: "Process", message: "Message" },
+  widths: { time: 86, level: 62, subsystem: 160, category: 120, process: 110 },
+  min: { time: 60, level: 48, subsystem: 60, category: 60, process: 60 },
+  flex: "message", flexMin: 120,
+  off: ["category", "process"],
+  narrow: [["subsystem", "category", "process"]]          // ≤ 640 px
+};
 
-function clampLogColumnWidth(key, width) {
-  return Math.round(Math.max(LOG_COLUMN_MIN[key] || 48, Math.min(640, Number(width) || LOG_COLUMN_WIDTHS[key] || 100)));
+const NETWORK_COLUMNS = {
+  keys: ["time", "method", "name", "status", "size", "duration", "wf"],
+  labels: { time: "Finished", method: "Method", name: "Name", status: "Status", size: "Size", duration: "Duration", wf: "Waterfall" },
+  widths: { time: 86, method: 46, status: 118, size: 62, duration: 64, wf: 90 },
+  min: { time: 60, method: 40, status: 48, size: 44, duration: 48, wf: 40 },
+  flex: "name", flexMin: 140,
+  off: [],
+  narrow: [["size", "wf"], ["size", "wf", "method"]]       // ≤ 760 px, ≤ 560 px
+};
+
+function clampColumnWidth(spec, key, width) {
+  return Math.round(Math.max(spec.min[key] || 40, Math.min(640, Number(width) || spec.widths[key] || 100)));
 }
 
 // A saved layout made whole: every known column once, unknown ones dropped,
-// widths in bounds; a column the saved one lacks goes where it goes by default.
-// The message takes what is left, so it has no width and is never hidden.
-function logColumnLayout(saved) {
-  const list = Array.isArray(saved) ? saved.filter((column) => column && LOG_COLUMN_KEYS.indexOf(column.key) >= 0) : [];
+// widths in bounds; a column the saved one lacks goes after the one it
+// follows by default, else first.
+function columnLayout(spec, saved) {
+  const list = Array.isArray(saved) ? saved.filter((column) => column && spec.keys.indexOf(column.key) >= 0) : [];
   const byKey = {};
   const order = [];
   for (const column of list) if (!byKey[column.key]) { byKey[column.key] = column; order.push(column.key); }
-  // A missing column goes after the one it follows by default, else first.
-  LOG_COLUMN_KEYS.forEach((key, index) => {
+  spec.keys.forEach((key, index) => {
     if (order.indexOf(key) >= 0) return;
-    const after = LOG_COLUMN_KEYS.slice(0, index).reverse().find((previous) => order.indexOf(previous) >= 0);
+    const after = spec.keys.slice(0, index).reverse().find((previous) => order.indexOf(previous) >= 0);
     order.splice(after ? order.indexOf(after) + 1 : 0, 0, key);
   });
   return order.map((key) => {
     const column = byKey[key];
-    if (key === "message") return { key, width: null, hidden: false };
-    return { key, width: clampLogColumnWidth(key, column && column.width), hidden: column ? !!column.hidden : LOG_COLUMNS_OFF.indexOf(key) >= 0 };
+    if (key === spec.flex) return { key, width: null, hidden: false };
+    return { key, width: clampColumnWidth(spec, key, column && column.width), hidden: column ? !!column.hidden : spec.off.indexOf(key) >= 0 };
   });
 }
 
 // The layout with `key` moved to stand before the column now at `before`
 // (the length of the layout: last).
-function moveLogColumn(layout, key, before) {
+function moveColumn(layout, key, before) {
   const from = layout.findIndex((column) => column.key === key);
   if (from < 0) return layout;
   const next = layout.slice();
@@ -529,13 +546,14 @@ function moveLogColumn(layout, key, before) {
   return next;
 }
 
-// The columns a row draws, in order — fewer in a narrow pane.
-function shownLogColumns(layout, narrow) {
-  return layout.filter((column) => !column.hidden && !(narrow && LOG_COLUMNS_NARROW_OFF.indexOf(column.key) >= 0));
+// The columns a row draws, in order: at full width (step 0), or at a narrower step of the pane.
+function shownColumns(spec, layout, step) {
+  const off = step ? spec.narrow[step - 1] || [] : [];
+  return layout.filter((column) => !column.hidden && off.indexOf(column.key) < 0);
 }
 
-function logGridTemplate(layout, narrow) {
-  return shownLogColumns(layout, narrow).map((column) => column.key === "message" ? "minmax(120px, 1fr)" : column.width + "px").join(" ");
+function gridTemplate(spec, layout, step) {
+  return shownColumns(spec, layout, step).map((column) => column.key === spec.flex ? "minmax(" + spec.flexMin + "px, 1fr)" : column.width + "px").join(" ");
 }
 
 // The lines after the cursor: a line the page already has is never added twice,

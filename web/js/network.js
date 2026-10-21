@@ -103,19 +103,20 @@ networkClear.addEventListener("click", () => {
   toast("Request list cleared", { icon: "trash", duration: 5000, action: { label: "Undo", run: () => { network.cleared = previous; renderNetwork(); } } });
 });
 
-// The logger stamps a call when it finishes; the waterfall works its start out from the duration.
-const NETWORK_COLUMNS = [
-  { key: "time", label: "Finished", sort: true },
-  { key: "method", label: "Method", class: "c-method" },
-  { key: "name", label: "Name", sort: true },
-  { key: "status", label: "Status", sort: true },
-  { key: "size", label: "Size", sort: true, class: "num c-size", defaultDir: -1 },
-  { key: "duration", label: "Duration", sort: true, class: "num", defaultDir: -1 },
-  { key: "wf", label: "Waterfall", class: "c-wf" }
-];
+// The logger stamps a call when it finishes; the waterfall works its start out
+// from the duration. The columns sort on a click and a person moves, sizes,
+// shows and hides them (see createColumnHeader).
+const networkHeader = createColumnHeader({
+  className: "net-grid",
+  spec: NETWORK_COLUMNS,
+  storeKey: "network.columns",
+  classes: { method: "c-method", size: "num c-size", duration: "num", wf: "c-wf" },
+  sort: { state: network.sort, dirs: { time: 1, name: 1, status: 1, size: -1, duration: -1 }, onChange: () => renderNetwork() },
+  onLayout: () => networkList.invalidate()
+});
 
 const networkList = createList(networkView.list, {
-  header: createSortHeader("net-grid", NETWORK_COLUMNS, network.sort, () => renderNetwork()),
+  header: networkHeader.element,
   key: (event) => event.id,
   version: (event) => [event.response ? 1 : 0, event.error ? 1 : 0, event.launchId, event.durationMilliseconds, event._wf, newestLaunchId() === event.launchId, networkFilter.text].join("|"),
   // A reviewed run is one launch's story: no launch groups, nothing reads as earlier.
@@ -132,6 +133,7 @@ const networkList = createList(networkView.list, {
   onGroupMenu: (id, x, y, button) => openMenu(x, y, launchGroupMenu("network", id), button),
   follow: true
 });
+networkHeader.attach(networkView.list);
 
 function renderNetworkRow(event, row) {
   const status = networkStatus(event);
@@ -141,17 +143,20 @@ function renderNetworkRow(event, row) {
   const shown = !query.field || query.field === "url" || query.field === "host" ? query.term : "";
   const hits = query.term ? networkHits(searchFieldsOf(event), query.term, query.field) : [];
   const elsewhere = hits.length && !hits.some((hit) => hit === "url" || hit === "host") ? hits.filter((hit) => /header|body/.test(hit)) : [];
-  row.innerHTML =
-    '<span class="cell time">' + escapeHTML(formatClock(event.timestamp, true)) + "</span>" +
-    '<span class="cell method c-method ' + escapeHTML(event.protocol) + '">' + escapeHTML(event.protocol === "grpc" ? "gRPC" : (event.request && event.request.method) || "") + "</span>" +
-    '<span class="cell name" translate="no"><b>' + markHTML(requestName(event), shown) + "</b>" +
+  const cells = {
+    time: () => '<span class="cell time">' + escapeHTML(formatClock(event.timestamp, true)) + "</span>",
+    method: () => '<span class="cell method c-method ' + escapeHTML(event.protocol) + '">' + escapeHTML(event.protocol === "grpc" ? "gRPC" : (event.request && event.request.method) || "") + "</span>",
+    name: () => '<span class="cell name" translate="no"><b>' + markHTML(requestName(event), shown) + "</b>" +
       (event.mocked ? '<span class="tag tag-course" title="' + escapeHTML(event.mockRuleId ? "Answered by mock " + event.mockRuleId : "Answered by a mock") + '">Mock</span>' : "") +
       (elsewhere.length ? '<span class="tag tag-hit" title="' + escapeHTML("Found in the " + elsewhere.join(", ")) + '">' + escapeHTML(elsewhere[0]) + "</span>" : "") +
-      "<span>" + markHTML(where, shown) + "</span></span>" +
-    '<span class="cell"><span class="st st-' + status.severity + '" title="' + escapeHTML(status.title) + '">' + (status.severity === "err" ? icon("warn") : "") + escapeHTML(status.text) + "</span></span>" +
-    '<span class="cell num c-size">' + escapeHTML(formatBytes(networkSize(event))) + "</span>" +
-    '<span class="cell num">' + escapeHTML(formatDuration(event.durationMilliseconds)) + "</span>" +
-    '<span class="cell c-wf"><span class="wf"><i class="' + status.severity + '" style="' + (event._wf || "") + '"></i></span></span>';
+      "<span>" + markHTML(where, shown) + "</span></span>",
+    status: () => '<span class="cell"><span class="st st-' + status.severity + '" title="' + escapeHTML(status.title) + '">' + (status.severity === "err" ? icon("warn") : "") + escapeHTML(status.text) + "</span></span>",
+    size: () => '<span class="cell num c-size">' + escapeHTML(formatBytes(networkSize(event))) + "</span>",
+    duration: () => '<span class="cell num">' + escapeHTML(formatDuration(event.durationMilliseconds)) + "</span>",
+    wf: () => '<span class="cell c-wf"><span class="wf"><i class="' + status.severity + '" style="' + (event._wf || "") + '"></i></span></span>'
+  };
+  // In the header's order.
+  row.innerHTML = networkHeader.columns.map((column) => cells[column.key]()).join("");
   row.title = (event.request && (event.request.method || "")) + " " + requestPath(event);
 }
 

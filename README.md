@@ -569,7 +569,9 @@ calling the framework-agnostic API — `resolved()`/`makeFromEnvironment()` then
 request/response bodies.
 
 The viewer's **Network** tab is a Proxyman-style inspector beside the live
-stream: requests with sortable columns, quick filters (HTTP or gRPC, problems —
+stream: requests in columns that sort on a click and that you arrange as in
+Logs (below: drag a name to move, an edge to size, right-click the header to
+show or hide), quick filters (HTTP or gRPC, problems —
 failed calls in red, 4xx and client-side gRPC codes in amber — and mocked
 calls), pause and clear, and a detail pane under the list. Its head says the
 status (`404 Not Found`, gRPC codes by name), the duration, what was sent and
