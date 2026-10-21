@@ -58,6 +58,12 @@ final class DeviceDisplays: @unchecked Sendable {
         return state.flatMap { layout.display(named: $0.active) } ?? layout.displays.first
     }
 
+    /// The screen a screenshot or a recording shows: the lit one of a
+    /// foldable, the only one of a phone. Nil until the device type is read.
+    var shownDisplay: SimulatorDisplay? {
+        activeDisplay ?? current.layout?.displays.first
+    }
+
     var payloads: [ServerDisplayPayload] {
         let (layout, state) = current
         return layout.map { ServerDisplayPayload.all(layout: $0, state: state) } ?? []

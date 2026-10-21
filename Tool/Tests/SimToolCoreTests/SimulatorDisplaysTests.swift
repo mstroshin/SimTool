@@ -58,6 +58,7 @@ final class SimulatorDisplaysTests: XCTestCase {
         XCTAssertEqual(layout.displays.map(\.screenID), [1, 3])
         XCTAssertEqual(layout.displays[0].cornerRadii, [8, 59, 59, 8])
         XCTAssertEqual(layout.displays[1].scale, 3)
+        XCTAssertEqual(layout.displays.map(\.chrome), ["com.apple.dt.devicekit.chrome.phone15", "com.apple.dt.devicekit.chrome.phone14"], "each panel names the bezel drawn around it")
     }
 
     func testEachDuoPanelHasItsOwnTouchTargetAndAPhoneKeepsTheSharedOne() throws {
@@ -153,6 +154,11 @@ final class SimulatorDisplaysTests: XCTestCase {
         XCTAssertEqual(
             SimulatorScreenshotClient.arguments(deviceUDID: "U", display: nil, file: "/tmp/s.png"),
             ["simctl", "io", "U", "screenshot", "--type=png", "/tmp/s.png"]
+        )
+        XCTAssertEqual(
+            SimulatorScreenshotClient.arguments(deviceUDID: "U", display: nil, file: "/tmp/s.png", masked: true),
+            ["simctl", "io", "U", "screenshot", "--type=png", "--mask=black", "/tmp/s.png"],
+            "a screenshot for the bezel shows the glass: corners and the Dynamic Island in black"
         )
     }
 }

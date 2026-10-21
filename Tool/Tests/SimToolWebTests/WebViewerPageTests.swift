@@ -60,13 +60,34 @@ final class WebViewerPageTests: XCTestCase {
         for route in ["/api/v1/input/stream", "/api/v1/input", "/api/v1/screenshot", "/api/v1/photos", "/api/v1/input/paste-image",
                       "/api/v1/network/events", "/api/v1/mocks", "/api/v1/launches", "/api/v1/logs/capture", "/api/v1/state/events",
                       "/api/v1/ax/tree?raw=1", "/api/v1/tests/definitions", "/api/v1/tests/run", "/api/v1/tests/run/stop", "/config",
-                      "/api/v1/events", "/api/v1/activity"] {
+                      "/api/v1/events", "/api/v1/activity", "/api/v1/recording", "/api/v1/recording/stop"] {
             XCTAssertTrue(page.contains(route), "missing \(route)")
         }
         for action in [#"action: "button", name: "home""#, #"action: "shake""#, #"action: "terminate""#, #"action: "launch""#,
                        #"action: "software-keyboard""#, #"action: "hardware-keyboard", enabled: on"#, #"action: "paste", text"#] {
             XCTAssertTrue(page.contains(action), "missing \(action)")
         }
+    }
+
+    // Screenshots and videos come with the device's bezel or as the screen
+    // alone; a recording runs on the server, so every viewer shows it and a
+    // reload keeps it, and the viewer that stops it downloads the video.
+    func testScreenshotsAndRecordingsTakeTheFrameAndARecordingShowsWhileItRuns() throws {
+        XCTAssertTrue(page.contains(#"id="recordButton" aria-label="Record video" data-tip="Record video" data-key="⌘R""#))
+        XCTAssertTrue(page.contains(#"id="captureMenuButton" aria-haspopup="menu""#))
+        XCTAssertTrue(page.contains(#"wireMenuButton($("captureMenuButton"), captureMenuItems);"#))
+        XCTAssertTrue(page.contains(#"api("/api/v1/screenshot" + (capture.bezel ? "?bezel=1" : ""))"#), "a screenshot takes the frame option")
+        XCTAssertTrue(page.contains(#"body: JSON.stringify({ bezel: capture.bezel })"#), "a recording takes it when it starts")
+        XCTAssertTrue(page.contains(#"bezel: stored("capture.bezel", false)"#), "the option is remembered per browser")
+        let items = try XCTUnwrap(page.range(of: "function captureMenuItems()"))
+        let menu = String(page[items.upperBound...].prefix(1800))
+        XCTAssertTrue(menu.contains(#"label: "Screen only", radio: true"#))
+        XCTAssertTrue(menu.contains(#"label: "With the device bezel", radio: true"#))
+        XCTAssertTrue(page.contains(#"on("recording", applyRecordingTopic);"#), "every viewer hears the recording")
+        XCTAssertTrue(page.contains("applyRecordingTopic(snapshot.recording || {});"))
+        XCTAssertTrue(page.contains(#"saveFile("/api/v1/recording/" + encodeURIComponent(recording.id) + "/video", name);"#), "the video is downloaded once saved")
+        XCTAssertTrue(page.contains(#"event.code === "KeyR") { event.preventDefault(); if (!event.repeat) toggleRecording(); return; }"#), "⌘R records and stops, as in Simulator.app")
+        XCTAssertTrue(page.contains(".tb-rec.recording .rec-dot {"), "a running recording is marked")
     }
 
     // A person watching can tell what was done to the device, and by whom,

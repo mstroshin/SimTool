@@ -7,21 +7,25 @@ import Foundation
 public final class SimctlVideoRecorder: TestVideoRecorder, @unchecked Sendable {
     private let lock = NSLock()
     private let display: @Sendable () -> String?
+    private let masked: Bool
     private var process: Process?
     private var stopping = false
     private var errorOutput = Data()
     private var exitFailure: String?
 
     /// `display` names the screen to record when the device has several —
-    /// simctl refuses to choose — read as the recording starts.
-    public init(display: @escaping @Sendable () -> String? = { nil }) {
+    /// simctl refuses to choose — read as the recording starts. `masked`
+    /// blacks out the rounded corners and the Dynamic Island, as the device's
+    /// glass hides them.
+    public init(display: @escaping @Sendable () -> String? = { nil }, masked: Bool = false) {
         self.display = display
+        self.masked = masked
     }
 
     public func start(deviceUDID: String, outputFile: URL) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
-        process.arguments = Self.arguments(deviceUDID: deviceUDID, display: display(), outputFile: outputFile)
+        process.arguments = Self.arguments(deviceUDID: deviceUDID, display: display(), outputFile: outputFile, masked: masked)
         process.standardOutput = FileHandle.nullDevice
         let errors = Pipe()
         process.standardError = errors
@@ -44,8 +48,8 @@ public final class SimctlVideoRecorder: TestVideoRecorder, @unchecked Sendable {
         lock.withLock { self.process = process }
     }
 
-    static func arguments(deviceUDID: String, display: String?, outputFile: URL) -> [String] {
-        ["simctl", "io", deviceUDID, "recordVideo", "--codec", "h264"] + (display.map { ["--display=\($0)"] } ?? []) + ["--force", outputFile.path]
+    static func arguments(deviceUDID: String, display: String?, outputFile: URL, masked: Bool = false) -> [String] {
+        ["simctl", "io", deviceUDID, "recordVideo", "--codec", "h264"] + (display.map { ["--display=\($0)"] } ?? []) + (masked ? ["--mask=black"] : []) + ["--force", outputFile.path]
     }
 
     public var failure: String? {

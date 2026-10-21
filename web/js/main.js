@@ -40,6 +40,7 @@ function forgetServer() {
   resetLogs();
   resetState();
   resetActivity();
+  applyRecordingTopic({});
   ax.tree = null;
   networkLastPayload = "";
   testsLastSessions = "";
@@ -88,6 +89,8 @@ poller.add("ax", AX_CHECK_MS, loadAx, () => activeTab("ax") && app.dataset.mode 
 // Every tab needs it — the marks on the screen and who drives the device — so
 // while the stream is down it is polled quickly.
 poller.add("activity", 500, pollActivity, polling);
+// A recording in progress shows in every viewer; without the stream it is asked for.
+poller.add("recording", 2000, loadRecording, polling);
 
 onReconnect(async () => {
   try { await bootstrap(); } catch (_) {}
@@ -107,6 +110,7 @@ renderTheme();
 setInspectorOpen(inspector.open);
 setTab(inspector.tab);
 updateKeyboardIndicator();
+renderCapture();
 startInspectorEvents();
 runStream();
 bootstrap().catch((error) => setMessage("Could not read the server's configuration: " + error.message, "err")).then(loadScreenPoints);

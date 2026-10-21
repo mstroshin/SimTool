@@ -14,6 +14,9 @@
       <symbol id="i-home" viewBox="0 0 16 16"><path d="M2.5 7.2 8 2.5l5.5 4.7V13a.5.5 0 0 1-.5.5H9.5V10h-3v3.5H3a.5.5 0 0 1-.5-.5Z"/></symbol>
       <symbol id="i-camera" viewBox="0 0 16 16"><path d="M2 5.5A1.5 1.5 0 0 1 3.5 4h1.6l1-1.5h3.8l1 1.5h1.6A1.5 1.5 0 0 1 14 5.5v6a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5Z"/><circle cx="8" cy="8.5" r="2.4"/></symbol>
       <symbol id="i-shake" viewBox="0 0 16 16"><rect x="5" y="2" width="6" height="12" rx="1.2"/><path d="M2.5 5.5v5M13.5 5.5v5M1 7v2M15 7v2"/></symbol>
+      <symbol id="i-record" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5"/><circle cx="8" cy="8" r="2.5" fill="currentColor"/></symbol>
+      <symbol id="i-download" viewBox="0 0 16 16"><path d="M8 2.5v8M4.5 7 8 10.5 11.5 7M3 13.5h10"/></symbol>
+      <symbol id="i-bezel" viewBox="0 0 16 16"><rect x="4" y="1.5" width="8" height="13" rx="2"/><rect x="5.5" y="3" width="5" height="10" rx=".8"/></symbol>
       <symbol id="i-stop" viewBox="0 0 16 16"><rect x="3.5" y="3.5" width="9" height="9" rx="1.5"/></symbol>
       <symbol id="i-relaunch" viewBox="0 0 16 16"><path d="M13 8a5 5 0 1 1-1.6-3.7"/><path d="M13 2.5v3h-3"/></symbol>
       <symbol id="i-laptop" viewBox="0 0 16 16"><path d="M3 11V4.2a.7.7 0 0 1 .7-.7h8.6a.7.7 0 0 1 .7.7V11M1.5 11h13l-.6 1.1a.8.8 0 0 1-.7.4H2.8a.8.8 0 0 1-.7-.4Z"/></symbol>
@@ -63,6 +66,8 @@
       <div class="tb-group" role="toolbar" aria-label="Device">
         <button class="tb-btn" type="button" id="homeButton" aria-label="Home" data-tip="Home" data-key="⇧⌘H" aria-keyshortcuts="Shift+Meta+H"><svg class="ic" aria-hidden="true"><use href="#i-home"/></svg></button>
         <button class="tb-btn" type="button" id="screenshotButton" aria-label="Save screenshot" data-tip="Save screenshot" data-key="⌘S" aria-keyshortcuts="Meta+S"><svg class="ic" aria-hidden="true"><use href="#i-camera"/></svg></button>
+        <button class="tb-btn tb-rec" type="button" id="recordButton" aria-label="Record video" data-tip="Record video" data-key="⌘R" aria-keyshortcuts="Meta+R"><svg class="ic" aria-hidden="true"><use href="#i-record"/></svg><span class="rec-dot" aria-hidden="true"></span><span class="rec-time" id="recordTime"></span></button>
+        <button class="tb-btn tb-menu tb-caret" type="button" id="captureMenuButton" aria-haspopup="menu" aria-expanded="false" aria-label="Screenshot and video options" data-tip="Screenshot and video options — the frame, copy, download"><svg class="ic frame-mark" aria-hidden="true"><use href="#i-bezel"/></svg><svg class="ic caret" aria-hidden="true"><use href="#i-chev-d"/></svg></button>
         <button class="tb-btn" type="button" id="shakeButton" aria-label="Shake" data-tip="Shake" data-key="⌃⌘Z" aria-keyshortcuts="Control+Meta+Z"><svg class="ic" aria-hidden="true"><use href="#i-shake"/></svg></button>
         <button class="tb-btn tb-menu" type="button" id="keyboardButton" aria-haspopup="menu" aria-expanded="false" aria-label="Keyboard" data-tip="Keyboard — the software keyboard and the Mac keyboard"><svg class="ic" aria-hidden="true"><use href="#i-keyboard"/></svg><svg class="ic caret" aria-hidden="true"><use href="#i-chev-d"/></svg></button>
         <span class="tb-sep" aria-hidden="true"></span>

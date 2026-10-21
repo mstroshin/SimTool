@@ -124,8 +124,26 @@ code { font: var(--fs-11)/1.4 var(--font-mono); }
 .tb-menu { width: auto; grid-auto-flow: column; gap: 1px; padding: 0 3px 0 6px; }
 .tb-menu .caret { width: 10px; height: 10px; stroke-width: 2; color: var(--ink3); }
 .tb-menu[aria-expanded="true"] { background: var(--g3); color: var(--ink1); }
-.tb-menu.on { color: var(--course); background: var(--course-bg); box-shadow: inset 0 0 0 1px var(--course-line); }
-.tb-menu.on .caret { color: var(--course); }
+#keyboardButton.on { color: var(--course); background: var(--course-bg); box-shadow: inset 0 0 0 1px var(--course-line); }
+#keyboardButton.on .caret { color: var(--course); }
+/* Screenshot and recording: the caret's menu picks the frame, and while it is the
+   device's bezel the caret carries a small device beside it. Recording, the button grows
+   into the REC mark and its running time — the one red that is not a failure: every
+   recorder marks recording so. */
+.tb-caret { width: 16px; padding: 0; }
+.tb-caret .frame-mark { display: none; width: 12px; height: 12px; }
+.tb-caret.on { width: auto; padding: 0 2px 0 4px; }
+.tb-caret.on .frame-mark { display: block; }
+.tb-rec { grid-auto-flow: column; }
+.tb-rec .rec-dot, .tb-rec .rec-time { display: none; }
+.tb-rec.recording, .tb-rec.saving { width: auto; gap: 6px; padding: 0 8px; color: var(--ink1); box-shadow: inset 0 0 0 1px var(--line-thick); }
+.tb-rec.recording .ic, .tb-rec.saving .ic { display: none; }
+.tb-rec.recording .rec-dot { display: block; width: 10px; height: 10px; border-radius: 50%; background: var(--err); transition: border-radius var(--dur) var(--ease); }
+.tb-rec.recording:hover .rec-dot, .tb-rec.recording:focus-visible .rec-dot { border-radius: 2px; }
+.tb-rec.saving .rec-dot { display: block; width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--line-thick); border-top-color: var(--ink1); animation: spin .8s linear infinite; }
+.tb-rec .rec-time { font: 500 var(--fs-11)/1 var(--font-mono); font-variant-numeric: tabular-nums; }
+.tb-rec.recording .rec-time, .tb-rec.saving .rec-time { display: inline; }
+.tb-rec.saving:disabled { opacity: 1; }
 
 .cmdk {
   display: inline-flex; align-items: center; gap: 8px; min-width: 180px; height: 28px; padding: 0 6px 0 8px;

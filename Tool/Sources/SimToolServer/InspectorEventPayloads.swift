@@ -17,6 +17,7 @@ struct InspectorSnapshotPayload: Encodable {
     var launches: AppLaunchesPayload
     var activity: ActivityTopicPayload
     var device: DeviceTopicPayload
+    var recording: RecordingTopicPayload
 }
 
 /// `device`: the device's screens as they read now — on a foldable, which one

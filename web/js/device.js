@@ -79,27 +79,44 @@ async function relaunchApp() {
   deviceAction("Relaunch", { action: "launch" }, deviceInfo.app + " relaunched");
 }
 
-function screenshotName() {
-  const now = new Date();
-  const date = now.getFullYear() + "-" + pad2(now.getMonth() + 1) + "-" + pad2(now.getDate());
-  const time = pad2(now.getHours()) + "." + pad2(now.getMinutes()) + "." + pad2(now.getSeconds());
+// ---- Screenshots and recordings ----
+// Both show the screen alone or, with the bezel option, inside the device as
+// Simulator draws it; the option is this browser's. A recording runs on the
+// server — it survives a reload, and every viewer shows it — and is saved
+// when stopped, then downloaded by the viewer that stopped it.
+
+const capture = {
+  bezel: stored("capture.bezel", false),
+  recording: null,   // the server's recording in progress: recording | saving
+  last: null,        // the newest one saved
+  stoppingHere: null,
+  clock: null
+};
+
+function captureName(extension, at) {
+  const when = at ? new Date(at) : new Date();
+  const date = when.getFullYear() + "-" + pad2(when.getMonth() + 1) + "-" + pad2(when.getDate());
+  const time = pad2(when.getHours()) + "." + pad2(when.getMinutes()) + "." + pad2(when.getSeconds());
   const device = (deviceInfo.name || "simulator").replace(/[^A-Za-z0-9._-]+/g, "-");
-  return "simtool-" + device + "-" + date + "-" + time + ".png";
+  return "simtool-" + device + "-" + date + "-" + time + "." + extension;
 }
 
 async function screenshotBlob() {
-  return (await api("/api/v1/screenshot")).blob();
+  return (await api("/api/v1/screenshot" + (capture.bezel ? "?bezel=1" : ""))).blob();
+}
+
+function saveFile(href, name) {
+  el("a", { href, download: name }).click();
 }
 
 async function saveScreenshot() {
   try {
     const blob = await screenshotBlob();
     const url = URL.createObjectURL(blob);
-    const name = screenshotName();
-    const link = el("a", { href: url, download: name });
-    link.click();
+    const name = captureName("png");
+    saveFile(url, name);
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-    toast("Saved " + name, { icon: "camera" });
+    toast("Saved " + name + (capture.bezel ? " — with the bezel" : ""), { icon: "camera" });
   } catch (error) {
     fail("Screenshot failed", error);
   }
@@ -113,6 +130,117 @@ async function copyScreenshot() {
   } catch (error) {
     fail("Copy screenshot failed", error);
   }
+}
+
+function setCaptureBezel(on) {
+  capture.bezel = on;
+  store("capture.bezel", on);
+  renderCapture();
+}
+
+function toggleRecording() {
+  if (capture.recording) stopRecording();
+  else startRecording();
+}
+
+async function startRecording() {
+  if (capture.recording) return;
+  try {
+    const recording = await apiJSON("/api/v1/recording", { method: "POST", body: JSON.stringify({ bezel: capture.bezel }) });
+    capture.recording = recording;
+    renderCapture();
+    toast("Recording the screen" + (capture.bezel ? " with the bezel" : "") + " — ⌘R stops and saves it", { icon: "record" });
+  } catch (error) {
+    fail("Recording did not start", error);
+  }
+}
+
+async function stopRecording() {
+  const recording = capture.recording;
+  if (!recording || recording.state !== "recording") return;
+  capture.stoppingHere = recording.id;
+  capture.recording = { ...recording, state: "saving" };
+  renderCapture();
+  try {
+    const saved = await apiJSON("/api/v1/recording/stop", { method: "POST" });
+    capture.recording = null;
+    capture.last = saved;
+    renderCapture();
+    if (saved.state === "ready") downloadRecording(saved);
+    else fail("The video was not saved", { message: saved.error || "unknown error" });
+  } catch (error) {
+    capture.recording = null;
+    renderCapture();
+    fail("Stopping the recording failed", error);
+  }
+}
+
+function downloadRecording(recording) {
+  const name = captureName("mp4", recording.startedAt);
+  saveFile("/api/v1/recording/" + encodeURIComponent(recording.id) + "/video", name);
+  toast("Saved " + name + (recording.bezel ? " — with the bezel" : "") + (recording.byteCount ? " · " + formatBytes(recording.byteCount) : ""), { icon: "download" });
+}
+
+// The server's word on its recording: pushed on the event stream, read at start.
+function applyRecordingTopic(payload) {
+  const previous = capture.recording;
+  capture.recording = payload.current || null;
+  capture.last = payload.last || null;
+  // Saved after a stop from another viewer: offered here too.
+  const last = capture.last;
+  if (previous && !capture.recording && last && last.id === previous.id && capture.stoppingHere !== last.id) {
+    if (last.state === "ready") toast("Another viewer stopped the recording", { icon: "record", duration: 8000, action: { label: "Download", run: () => downloadRecording(last) } });
+    else if (last.state === "failed") fail("The recording was not saved", { message: last.error || "unknown error" });
+  }
+  renderCapture();
+}
+
+async function loadRecording() {
+  applyRecordingTopic(await apiJSON("/api/v1/recording"));
+}
+
+function renderCapture() {
+  const recording = capture.recording;
+  const button = $("recordButton");
+  const live = recording && recording.state === "recording";
+  button.classList.toggle("recording", !!live);
+  button.classList.toggle("saving", !!recording && !live);
+  const label = live ? "Stop recording and save the video" : recording ? "Saving the video…" : "Record video" + (capture.bezel ? " with the bezel" : "");
+  button.setAttribute("aria-label", label);
+  button.dataset.tip = label;
+  $("screenshotButton").dataset.tip = "Save screenshot" + (capture.bezel ? " with the bezel" : "");
+  $("captureMenuButton").classList.toggle("on", capture.bezel);
+  $("captureMenuButton").setAttribute("aria-label", "Screenshot and video options — " + (capture.bezel ? "with the device bezel" : "the screen only"));
+  clearInterval(capture.clock);
+  capture.clock = null;
+  const tick = () => {
+    const seconds = Math.max(0, (Date.now() - Date.parse(recording.startedAt)) / 1000);
+    $("recordTime").textContent = live ? formatOffset(seconds) : "Saving…";
+  };
+  if (recording) {
+    tick();
+    if (live) capture.clock = setInterval(tick, 1000);
+  } else {
+    $("recordTime").textContent = "";
+  }
+  updateDeviceButtons();
+}
+
+function captureMenuItems() {
+  const usable = screenState.connection === "live" && app.dataset.mode !== "replay";
+  const recording = capture.recording;
+  return [
+    { icon: "camera", label: "Save screenshot", kbd: "⌘S", disabled: !usable, run: saveScreenshot },
+    { icon: "copy", label: "Copy screenshot", disabled: !usable, run: copyScreenshot },
+    recording
+      ? { icon: "stop", label: recording.state === "recording" ? "Stop recording and save the video" : "Saving the video…", kbd: "⌘R", disabled: recording.state !== "recording", run: stopRecording }
+      : { icon: "record", label: "Record video", kbd: "⌘R", disabled: !usable, run: startRecording },
+    capture.last && capture.last.state === "ready" ? { icon: "download", label: "Download the last video again", run: () => downloadRecording(capture.last) } : null,
+    "-",
+    { caption: recording ? "Screenshots and videos — this recording is " + (recording.bezel ? "with the bezel" : "the screen only") : "Screenshots and videos" },
+    { label: "Screen only", radio: true, checked: !capture.bezel, run: () => setCaptureBezel(false) },
+    { label: "With the device bezel", radio: true, checked: capture.bezel, run: () => setCaptureBezel(true) }
+  ].filter(Boolean);
 }
 
 // ---- Mac clipboard → simulator ----
@@ -231,7 +359,8 @@ function deviceMenuItems() {
     { icon: "photo", label: "Add files to Photos…", run: () => $("photosFile").click() },
     "-",
     { icon: "camera", label: "Save screenshot", kbd: "⌘S", run: saveScreenshot },
-    { icon: "copy", label: "Copy screenshot", run: copyScreenshot }
+    { icon: "copy", label: "Copy screenshot", run: copyScreenshot },
+    capture.recording ? { icon: "stop", label: "Stop recording and save the video", kbd: "⌘R", disabled: capture.recording.state !== "recording", run: stopRecording } : { icon: "record", label: "Record video", kbd: "⌘R", run: startRecording }
   ];
 }
 
@@ -586,6 +715,8 @@ $("homeButton").addEventListener("click", pressHome);
 for (const button of $("foldGroup").querySelectorAll("[data-pose]")) button.addEventListener("click", () => foldTo(button.dataset.pose));
 $("view3dButton").addEventListener("click", () => setView3D(!screenState.view3d));
 $("screenshotButton").addEventListener("click", saveScreenshot);
+$("recordButton").addEventListener("click", toggleRecording);
+wireMenuButton($("captureMenuButton"), captureMenuItems);
 $("shakeButton").addEventListener("click", pressShake);
 wireMenuButton($("keyboardButton"), keyboardMenuItems);
 $("terminateButton").addEventListener("click", terminateApp);
@@ -596,6 +727,8 @@ $("sbUdid").addEventListener("click", () => { if (deviceInfo.udid) copyText(devi
 function updateDeviceButtons() {
   const usable = screenState.connection === "live" && app.dataset.mode !== "replay";
   for (const id of ["homeButton", "screenshotButton", "shakeButton", "terminateButton", "relaunchButton"]) $(id).disabled = !usable;
+  // A recording in progress can always be stopped; one being saved cannot.
+  $("recordButton").disabled = capture.recording ? capture.recording.state !== "recording" : !usable;
   renderFold();
 }
 

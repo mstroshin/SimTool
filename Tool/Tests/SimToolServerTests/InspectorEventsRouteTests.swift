@@ -38,7 +38,7 @@ final class InspectorEventsRouteTests: XCTestCase {
         XCTAssertEqual(snapshot.name, "snapshot")
         XCTAssertEqual(snapshot.id, "\(instance ?? ""):0")
         XCTAssertEqual(snapshot.json["instance"] as? String, instance)
-        for topic in ["network", "logs", "state", "tests", "launches", "activity"] {
+        for topic in ["network", "logs", "state", "tests", "launches", "activity", "recording"] {
             XCTAssertNotNil(snapshot.json[topic], "the snapshot holds \(topic)")
         }
 

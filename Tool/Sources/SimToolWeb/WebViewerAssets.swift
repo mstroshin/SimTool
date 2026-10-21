@@ -1302,27 +1302,44 @@ enum WebViewerAssets {
           deviceAction("Relaunch", { action: "launch" }, deviceInfo.app + " relaunched");
         }
 
-        function screenshotName() {
-          const now = new Date();
-          const date = now.getFullYear() + "-" + pad2(now.getMonth() + 1) + "-" + pad2(now.getDate());
-          const time = pad2(now.getHours()) + "." + pad2(now.getMinutes()) + "." + pad2(now.getSeconds());
+        // ---- Screenshots and recordings ----
+        // Both show the screen alone or, with the bezel option, inside the device as
+        // Simulator draws it; the option is this browser's. A recording runs on the
+        // server — it survives a reload, and every viewer shows it — and is saved
+        // when stopped, then downloaded by the viewer that stopped it.
+
+        const capture = {
+          bezel: stored("capture.bezel", false),
+          recording: null,   // the server's recording in progress: recording | saving
+          last: null,        // the newest one saved
+          stoppingHere: null,
+          clock: null
+        };
+
+        function captureName(extension, at) {
+          const when = at ? new Date(at) : new Date();
+          const date = when.getFullYear() + "-" + pad2(when.getMonth() + 1) + "-" + pad2(when.getDate());
+          const time = pad2(when.getHours()) + "." + pad2(when.getMinutes()) + "." + pad2(when.getSeconds());
           const device = (deviceInfo.name || "simulator").replace(/[^A-Za-z0-9._-]+/g, "-");
-          return "simtool-" + device + "-" + date + "-" + time + ".png";
+          return "simtool-" + device + "-" + date + "-" + time + "." + extension;
         }
 
         async function screenshotBlob() {
-          return (await api("/api/v1/screenshot")).blob();
+          return (await api("/api/v1/screenshot" + (capture.bezel ? "?bezel=1" : ""))).blob();
+        }
+
+        function saveFile(href, name) {
+          el("a", { href, download: name }).click();
         }
 
         async function saveScreenshot() {
           try {
             const blob = await screenshotBlob();
             const url = URL.createObjectURL(blob);
-            const name = screenshotName();
-            const link = el("a", { href: url, download: name });
-            link.click();
+            const name = captureName("png");
+            saveFile(url, name);
             setTimeout(() => URL.revokeObjectURL(url), 1000);
-            toast("Saved " + name, { icon: "camera" });
+            toast("Saved " + name + (capture.bezel ? " — with the bezel" : ""), { icon: "camera" });
           } catch (error) {
             fail("Screenshot failed", error);
           }
@@ -1336,6 +1353,117 @@ enum WebViewerAssets {
           } catch (error) {
             fail("Copy screenshot failed", error);
           }
+        }
+
+        function setCaptureBezel(on) {
+          capture.bezel = on;
+          store("capture.bezel", on);
+          renderCapture();
+        }
+
+        function toggleRecording() {
+          if (capture.recording) stopRecording();
+          else startRecording();
+        }
+
+        async function startRecording() {
+          if (capture.recording) return;
+          try {
+            const recording = await apiJSON("/api/v1/recording", { method: "POST", body: JSON.stringify({ bezel: capture.bezel }) });
+            capture.recording = recording;
+            renderCapture();
+            toast("Recording the screen" + (capture.bezel ? " with the bezel" : "") + " — ⌘R stops and saves it", { icon: "record" });
+          } catch (error) {
+            fail("Recording did not start", error);
+          }
+        }
+
+        async function stopRecording() {
+          const recording = capture.recording;
+          if (!recording || recording.state !== "recording") return;
+          capture.stoppingHere = recording.id;
+          capture.recording = { ...recording, state: "saving" };
+          renderCapture();
+          try {
+            const saved = await apiJSON("/api/v1/recording/stop", { method: "POST" });
+            capture.recording = null;
+            capture.last = saved;
+            renderCapture();
+            if (saved.state === "ready") downloadRecording(saved);
+            else fail("The video was not saved", { message: saved.error || "unknown error" });
+          } catch (error) {
+            capture.recording = null;
+            renderCapture();
+            fail("Stopping the recording failed", error);
+          }
+        }
+
+        function downloadRecording(recording) {
+          const name = captureName("mp4", recording.startedAt);
+          saveFile("/api/v1/recording/" + encodeURIComponent(recording.id) + "/video", name);
+          toast("Saved " + name + (recording.bezel ? " — with the bezel" : "") + (recording.byteCount ? " · " + formatBytes(recording.byteCount) : ""), { icon: "download" });
+        }
+
+        // The server's word on its recording: pushed on the event stream, read at start.
+        function applyRecordingTopic(payload) {
+          const previous = capture.recording;
+          capture.recording = payload.current || null;
+          capture.last = payload.last || null;
+          // Saved after a stop from another viewer: offered here too.
+          const last = capture.last;
+          if (previous && !capture.recording && last && last.id === previous.id && capture.stoppingHere !== last.id) {
+            if (last.state === "ready") toast("Another viewer stopped the recording", { icon: "record", duration: 8000, action: { label: "Download", run: () => downloadRecording(last) } });
+            else if (last.state === "failed") fail("The recording was not saved", { message: last.error || "unknown error" });
+          }
+          renderCapture();
+        }
+
+        async function loadRecording() {
+          applyRecordingTopic(await apiJSON("/api/v1/recording"));
+        }
+
+        function renderCapture() {
+          const recording = capture.recording;
+          const button = $("recordButton");
+          const live = recording && recording.state === "recording";
+          button.classList.toggle("recording", !!live);
+          button.classList.toggle("saving", !!recording && !live);
+          const label = live ? "Stop recording and save the video" : recording ? "Saving the video…" : "Record video" + (capture.bezel ? " with the bezel" : "");
+          button.setAttribute("aria-label", label);
+          button.dataset.tip = label;
+          $("screenshotButton").dataset.tip = "Save screenshot" + (capture.bezel ? " with the bezel" : "");
+          $("captureMenuButton").classList.toggle("on", capture.bezel);
+          $("captureMenuButton").setAttribute("aria-label", "Screenshot and video options — " + (capture.bezel ? "with the device bezel" : "the screen only"));
+          clearInterval(capture.clock);
+          capture.clock = null;
+          const tick = () => {
+            const seconds = Math.max(0, (Date.now() - Date.parse(recording.startedAt)) / 1000);
+            $("recordTime").textContent = live ? formatOffset(seconds) : "Saving…";
+          };
+          if (recording) {
+            tick();
+            if (live) capture.clock = setInterval(tick, 1000);
+          } else {
+            $("recordTime").textContent = "";
+          }
+          updateDeviceButtons();
+        }
+
+        function captureMenuItems() {
+          const usable = screenState.connection === "live" && app.dataset.mode !== "replay";
+          const recording = capture.recording;
+          return [
+            { icon: "camera", label: "Save screenshot", kbd: "⌘S", disabled: !usable, run: saveScreenshot },
+            { icon: "copy", label: "Copy screenshot", disabled: !usable, run: copyScreenshot },
+            recording
+              ? { icon: "stop", label: recording.state === "recording" ? "Stop recording and save the video" : "Saving the video…", kbd: "⌘R", disabled: recording.state !== "recording", run: stopRecording }
+              : { icon: "record", label: "Record video", kbd: "⌘R", disabled: !usable, run: startRecording },
+            capture.last && capture.last.state === "ready" ? { icon: "download", label: "Download the last video again", run: () => downloadRecording(capture.last) } : null,
+            "-",
+            { caption: recording ? "Screenshots and videos — this recording is " + (recording.bezel ? "with the bezel" : "the screen only") : "Screenshots and videos" },
+            { label: "Screen only", radio: true, checked: !capture.bezel, run: () => setCaptureBezel(false) },
+            { label: "With the device bezel", radio: true, checked: capture.bezel, run: () => setCaptureBezel(true) }
+          ].filter(Boolean);
         }
 
         // ---- Mac clipboard → simulator ----
@@ -1454,7 +1582,8 @@ enum WebViewerAssets {
             { icon: "photo", label: "Add files to Photos…", run: () => $("photosFile").click() },
             "-",
             { icon: "camera", label: "Save screenshot", kbd: "⌘S", run: saveScreenshot },
-            { icon: "copy", label: "Copy screenshot", run: copyScreenshot }
+            { icon: "copy", label: "Copy screenshot", run: copyScreenshot },
+            capture.recording ? { icon: "stop", label: "Stop recording and save the video", kbd: "⌘R", disabled: capture.recording.state !== "recording", run: stopRecording } : { icon: "record", label: "Record video", kbd: "⌘R", run: startRecording }
           ];
         }
 
@@ -1809,6 +1938,8 @@ enum WebViewerAssets {
         for (const button of $("foldGroup").querySelectorAll("[data-pose]")) button.addEventListener("click", () => foldTo(button.dataset.pose));
         $("view3dButton").addEventListener("click", () => setView3D(!screenState.view3d));
         $("screenshotButton").addEventListener("click", saveScreenshot);
+        $("recordButton").addEventListener("click", toggleRecording);
+        wireMenuButton($("captureMenuButton"), captureMenuItems);
         $("shakeButton").addEventListener("click", pressShake);
         wireMenuButton($("keyboardButton"), keyboardMenuItems);
         $("terminateButton").addEventListener("click", terminateApp);
@@ -1819,6 +1950,8 @@ enum WebViewerAssets {
         function updateDeviceButtons() {
           const usable = screenState.connection === "live" && app.dataset.mode !== "replay";
           for (const id of ["homeButton", "screenshotButton", "shakeButton", "terminateButton", "relaunchButton"]) $(id).disabled = !usable;
+          // A recording in progress can always be stopped; one being saved cannot.
+          $("recordButton").disabled = capture.recording ? capture.recording.state !== "recording" : !usable;
           renderFold();
         }
 
@@ -1870,6 +2003,7 @@ enum WebViewerAssets {
           on("launches", (payload) => { applyLaunchesTopic(payload); renderSoon(renderNetwork); renderSoon(renderLogs); });
           on("activity", (payload) => applyActivityTopic(payload, false));
           on("device", applyDeviceTopic);
+          on("recording", applyRecordingTopic);
         }
 
         // The device's screens changed: a foldable folded, or a screen turned.
@@ -1892,6 +2026,7 @@ enum WebViewerAssets {
           applyTestsTopic(snapshot.tests || {}, true);
           applyActivityTopic(snapshot.activity || {}, true);
           applyDeviceTopic(snapshot.device);
+          applyRecordingTopic(snapshot.recording || {});
           // A restarted server captures the app's logs once asked again.
           ensureLogsCapture().catch(() => renderLogs());
         }
@@ -3684,6 +3819,7 @@ enum WebViewerAssets {
           resetLogs();
           resetState();
           resetActivity();
+          applyRecordingTopic({});
           ax.tree = null;
           networkLastPayload = "";
           testsLastSessions = "";
@@ -3732,6 +3868,8 @@ enum WebViewerAssets {
         // Every tab needs it — the marks on the screen and who drives the device — so
         // while the stream is down it is polled quickly.
         poller.add("activity", 500, pollActivity, polling);
+        // A recording in progress shows in every viewer; without the stream it is asked for.
+        poller.add("recording", 2000, loadRecording, polling);
 
         onReconnect(async () => {
           try { await bootstrap(); } catch (_) {}
@@ -3751,6 +3889,7 @@ enum WebViewerAssets {
         setInspectorOpen(inspector.open);
         setTab(inspector.tab);
         updateKeyboardIndicator();
+        renderCapture();
         startInspectorEvents();
         runStream();
         bootstrap().catch((error) => setMessage("Could not read the server's configuration: " + error.message, "err")).then(loadScreenPoints);
@@ -4162,6 +4301,8 @@ enum WebViewerAssets {
             ["Device", "home", "Home", "⇧⌘H", pressHome],
             ["Device", "camera", "Save screenshot", "⌘S", saveScreenshot],
             ["Device", "copy", "Copy screenshot", "", copyScreenshot],
+            capture.recording ? ["Device", "stop", "Stop recording and save the video", "⌘R", stopRecording] : ["Device", "record", "Record video", "⌘R", startRecording],
+            ["Device", "bezel", capture.bezel ? "Screenshots and videos: the screen only" : "Screenshots and videos: with the device bezel", "", () => setCaptureBezel(!capture.bezel)],
             ["Device", "shake", "Shake", "⌃⌘Z", pressShake],
             ["Device", "keyboard", "Show or hide the software keyboard", keyboardBridge.enabled ? "⌘K" : "", toggleSoftwareKeyboard],
             ["Device", "laptop", keyboardBridge.enabled ? "Disconnect the Mac keyboard" : "Connect the Mac keyboard — type into the simulator", "⇧⌘K", () => setKeyboardMode(!keyboardBridge.enabled)],
@@ -4304,7 +4445,7 @@ enum WebViewerAssets {
           openPopover($("paletteButton"),
             "<p><b>⇧⌘P</b> commands · <b>⌥1–5</b> inspector tabs · <b>⌥⌘0</b> show or hide the inspector · <b>/</b> filter</p>" +
             "<p><b>↑ ↓</b> move in a list · <b>Enter</b> open · <b>Esc</b> close · <b>⇧F10</b> the row's menu</p>" +
-            "<p><b>⇧⌘H</b> Home · <b>⌘S</b> screenshot · <b>⌃⌘Z</b> shake · <b>⇧⌘K</b> connect the Mac keyboard (⇧⌘K again releases it) · <b>⌘K</b> software keyboard while typing</p>" +
+            "<p><b>⇧⌘H</b> Home · <b>⌘S</b> screenshot · <b>⌘R</b> record video, again to save it · <b>⌃⌘Z</b> shake · <b>⇧⌘K</b> connect the Mac keyboard (⇧⌘K again releases it) · <b>⌘K</b> software keyboard while typing</p>" +
             "<p><b>⌥-drag</b> pinch or rotate · <b>⌥⇧-drag</b> two-finger pan · the wheel scrolls · <b>P</b> picks elements in Accessibility · <b>⌘↩</b> runs the selected test</p>");
         }
 
@@ -4313,7 +4454,7 @@ enum WebViewerAssets {
         function isViewerChord(event) {
           const meta = event.metaKey || event.ctrlKey;
           return (meta && event.shiftKey && !event.altKey && (event.code === "KeyP" || event.code === "KeyH")) ||
-            (event.metaKey && !event.shiftKey && !event.altKey && !event.ctrlKey && event.code === "KeyS") ||
+            (event.metaKey && !event.shiftKey && !event.altKey && !event.ctrlKey && (event.code === "KeyS" || event.code === "KeyR")) ||
             (event.metaKey && event.ctrlKey && !event.shiftKey && event.code === "KeyZ") ||
             (event.metaKey && event.altKey && event.code === "Digit0");
         }
@@ -4332,6 +4473,7 @@ enum WebViewerAssets {
           }
           if (meta && event.shiftKey && event.code === "KeyH") { event.preventDefault(); pressHome(); return; }
           if (event.metaKey && !event.shiftKey && !event.altKey && !event.ctrlKey && event.code === "KeyS") { event.preventDefault(); saveScreenshot(); return; }
+          if (event.metaKey && !event.shiftKey && !event.altKey && !event.ctrlKey && event.code === "KeyR") { event.preventDefault(); if (!event.repeat) toggleRecording(); return; }
           if (event.metaKey && event.ctrlKey && event.code === "KeyZ") { event.preventDefault(); pressShake(); return; }
           if (event.metaKey && event.altKey && event.code === "Digit0") { event.preventDefault(); setInspectorOpen(!inspector.open); return; }
           if (event.altKey && !meta && /^Digit[1-6]$/.test(event.code)) { event.preventDefault(); openTab(TABS[Number(event.code.slice(5)) - 1]); return; }
@@ -5905,8 +6047,26 @@ enum WebViewerAssets {
         .tb-menu { width: auto; grid-auto-flow: column; gap: 1px; padding: 0 3px 0 6px; }
         .tb-menu .caret { width: 10px; height: 10px; stroke-width: 2; color: var(--ink3); }
         .tb-menu[aria-expanded="true"] { background: var(--g3); color: var(--ink1); }
-        .tb-menu.on { color: var(--course); background: var(--course-bg); box-shadow: inset 0 0 0 1px var(--course-line); }
-        .tb-menu.on .caret { color: var(--course); }
+        #keyboardButton.on { color: var(--course); background: var(--course-bg); box-shadow: inset 0 0 0 1px var(--course-line); }
+        #keyboardButton.on .caret { color: var(--course); }
+        /* Screenshot and recording: the caret's menu picks the frame, and while it is the
+           device's bezel the caret carries a small device beside it. Recording, the button grows
+           into the REC mark and its running time — the one red that is not a failure: every
+           recorder marks recording so. */
+        .tb-caret { width: 16px; padding: 0; }
+        .tb-caret .frame-mark { display: none; width: 12px; height: 12px; }
+        .tb-caret.on { width: auto; padding: 0 2px 0 4px; }
+        .tb-caret.on .frame-mark { display: block; }
+        .tb-rec { grid-auto-flow: column; }
+        .tb-rec .rec-dot, .tb-rec .rec-time { display: none; }
+        .tb-rec.recording, .tb-rec.saving { width: auto; gap: 6px; padding: 0 8px; color: var(--ink1); box-shadow: inset 0 0 0 1px var(--line-thick); }
+        .tb-rec.recording .ic, .tb-rec.saving .ic { display: none; }
+        .tb-rec.recording .rec-dot { display: block; width: 10px; height: 10px; border-radius: 50%; background: var(--err); transition: border-radius var(--dur) var(--ease); }
+        .tb-rec.recording:hover .rec-dot, .tb-rec.recording:focus-visible .rec-dot { border-radius: 2px; }
+        .tb-rec.saving .rec-dot { display: block; width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--line-thick); border-top-color: var(--ink1); animation: spin .8s linear infinite; }
+        .tb-rec .rec-time { font: 500 var(--fs-11)/1 var(--font-mono); font-variant-numeric: tabular-nums; }
+        .tb-rec.recording .rec-time, .tb-rec.saving .rec-time { display: inline; }
+        .tb-rec.saving:disabled { opacity: 1; }
 
         .cmdk {
           display: inline-flex; align-items: center; gap: 8px; min-width: 180px; height: 28px; padding: 0 6px 0 8px;
@@ -6475,6 +6635,9 @@ enum WebViewerAssets {
               <symbol id="i-home" viewBox="0 0 16 16"><path d="M2.5 7.2 8 2.5l5.5 4.7V13a.5.5 0 0 1-.5.5H9.5V10h-3v3.5H3a.5.5 0 0 1-.5-.5Z"/></symbol>
               <symbol id="i-camera" viewBox="0 0 16 16"><path d="M2 5.5A1.5 1.5 0 0 1 3.5 4h1.6l1-1.5h3.8l1 1.5h1.6A1.5 1.5 0 0 1 14 5.5v6a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5Z"/><circle cx="8" cy="8.5" r="2.4"/></symbol>
               <symbol id="i-shake" viewBox="0 0 16 16"><rect x="5" y="2" width="6" height="12" rx="1.2"/><path d="M2.5 5.5v5M13.5 5.5v5M1 7v2M15 7v2"/></symbol>
+              <symbol id="i-record" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5"/><circle cx="8" cy="8" r="2.5" fill="currentColor"/></symbol>
+              <symbol id="i-download" viewBox="0 0 16 16"><path d="M8 2.5v8M4.5 7 8 10.5 11.5 7M3 13.5h10"/></symbol>
+              <symbol id="i-bezel" viewBox="0 0 16 16"><rect x="4" y="1.5" width="8" height="13" rx="2"/><rect x="5.5" y="3" width="5" height="10" rx=".8"/></symbol>
               <symbol id="i-stop" viewBox="0 0 16 16"><rect x="3.5" y="3.5" width="9" height="9" rx="1.5"/></symbol>
               <symbol id="i-relaunch" viewBox="0 0 16 16"><path d="M13 8a5 5 0 1 1-1.6-3.7"/><path d="M13 2.5v3h-3"/></symbol>
               <symbol id="i-laptop" viewBox="0 0 16 16"><path d="M3 11V4.2a.7.7 0 0 1 .7-.7h8.6a.7.7 0 0 1 .7.7V11M1.5 11h13l-.6 1.1a.8.8 0 0 1-.7.4H2.8a.8.8 0 0 1-.7-.4Z"/></symbol>
@@ -6524,6 +6687,8 @@ enum WebViewerAssets {
               <div class="tb-group" role="toolbar" aria-label="Device">
                 <button class="tb-btn" type="button" id="homeButton" aria-label="Home" data-tip="Home" data-key="⇧⌘H" aria-keyshortcuts="Shift+Meta+H"><svg class="ic" aria-hidden="true"><use href="#i-home"/></svg></button>
                 <button class="tb-btn" type="button" id="screenshotButton" aria-label="Save screenshot" data-tip="Save screenshot" data-key="⌘S" aria-keyshortcuts="Meta+S"><svg class="ic" aria-hidden="true"><use href="#i-camera"/></svg></button>
+                <button class="tb-btn tb-rec" type="button" id="recordButton" aria-label="Record video" data-tip="Record video" data-key="⌘R" aria-keyshortcuts="Meta+R"><svg class="ic" aria-hidden="true"><use href="#i-record"/></svg><span class="rec-dot" aria-hidden="true"></span><span class="rec-time" id="recordTime"></span></button>
+                <button class="tb-btn tb-menu tb-caret" type="button" id="captureMenuButton" aria-haspopup="menu" aria-expanded="false" aria-label="Screenshot and video options" data-tip="Screenshot and video options — the frame, copy, download"><svg class="ic frame-mark" aria-hidden="true"><use href="#i-bezel"/></svg><svg class="ic caret" aria-hidden="true"><use href="#i-chev-d"/></svg></button>
                 <button class="tb-btn" type="button" id="shakeButton" aria-label="Shake" data-tip="Shake" data-key="⌃⌘Z" aria-keyshortcuts="Control+Meta+Z"><svg class="ic" aria-hidden="true"><use href="#i-shake"/></svg></button>
                 <button class="tb-btn tb-menu" type="button" id="keyboardButton" aria-haspopup="menu" aria-expanded="false" aria-label="Keyboard" data-tip="Keyboard — the software keyboard and the Mac keyboard"><svg class="ic" aria-hidden="true"><use href="#i-keyboard"/></svg><svg class="ic caret" aria-hidden="true"><use href="#i-chev-d"/></svg></button>
                 <span class="tb-sep" aria-hidden="true"></span>

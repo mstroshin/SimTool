@@ -72,11 +72,23 @@ the bottom holds the session's facts — connection, device and runtime, UDID
 The viewer follows the system's light or dark appearance; the sun / moon button
 in the toolbar pins the other theme for this browser.
 ⇧⌘P opens a command palette with every action and test; the shortcuts follow
-Simulator.app and Xcode — ⇧⌘H Home, ⌘S screenshot, ⌃⌘Z shake, ⌥⌘0 show or hide
+Simulator.app and Xcode — ⇧⌘H Home, ⌘S screenshot, ⌘R record video, ⌃⌘Z shake, ⌥⌘0 show or hide
 the inspector — and ⌥1–6 switch inspector tabs, `/` filters the current list,
 ↑/↓ move through it and Shift-F10 opens a row's menu. When the server goes away
 the viewer greys the last frame, says so, stops sending touches and reconnects
 by itself; a restarted server is noticed and its lists are reloaded.
+
+The toolbar saves a screenshot (⌘S) and records the screen (⌘R): recording, the
+button turns into a red REC mark with the running time, and a click or ⌘R again
+stops it and downloads the video (H.264 `.mp4`). The caret beside them picks the
+frame for both — **Screen only**, or **With the device bezel**: the device drawn
+around the screen as Simulator draws it, side buttons, rounded corners and the
+Dynamic Island included, from the DeviceKit chrome Xcode installed on the Mac
+(SimTool ships no Apple artwork; a device without one gets a plain drawn frame).
+A screenshot with the bezel is a PNG with a clear background, a video one has a
+white background. The recording runs on the server, so a reload keeps it and
+every viewer shows it; the server keeps only the newest video. The caret's menu
+also copies the screenshot and downloads the last video again.
 
 An iPhone Duo adds a bar under the device — Closed, Book and Open, and a **3D**
 switch — and the fold beside its size (`book · 130° · inner`). 3D shows the
@@ -254,7 +266,7 @@ simulator. Right-clicking the device screen opens a menu with the same
 **Paste** (it asks the browser for clipboard access), **Add clipboard image to
 Photos** and **Add files to Photos…** (images and videos) — both put the media
 in the simulator's Photos library (`simctl addmedia`), where a photo picker
-offers it — and **Save** or **Copy screenshot**. While the Accessibility tab
+offers it — **Save** or **Copy screenshot** and **Record video**. While the Accessibility tab
 picks elements, a right-click opens the element's menu instead.
 
 The **Accessibility** tab shows the served accessibility tree, with anonymous
@@ -875,7 +887,11 @@ GET /api/v1/mocks/ack
 GET /api/v1/activity?since=<revision>&limit=200
 POST /api/v1/activity
 GET /api/v1/tests/<session-id>/evidence/<file>
-GET /api/v1/screenshot?maxDim=800&display=<screen>
+GET /api/v1/screenshot?maxDim=800&display=<screen>&bezel=1
+GET /api/v1/recording
+POST /api/v1/recording
+POST /api/v1/recording/stop
+GET /api/v1/recording/<id>/video
 ```
 
 The API answers the viewer's own page and clients that are not browsers — the
@@ -925,6 +941,17 @@ ahead in `view3d` (`available`, `reason`).
 `screenshot` returns the full-resolution PNG by default; `maxDim` scales it so
 the longest edge fits the given pixel size — agents reading the screen pay for
 image pixels, and an 800px screenshot is still perfectly legible.
+`bezel=1` draws the device around the screen (`simctl … --mask=black` for the
+glass, the device type's DeviceKit chrome for the body and buttons).
+
+`recording` records the screen the stream shows, one recording at a time:
+`POST` (`{"bezel": true}` for the device around it) starts `simctl io
+recordVideo`, `recording/stop` finalizes it and answers once it is saved —
+`state` `ready` with `durationSeconds` and `byteCount`, or `failed` with the
+`error` — and `recording/<id>/video` serves the mp4 (byte ranges included).
+`GET` answers `{"current", "last"}`, which the event stream's `recording` topic
+pushes whenever it changes. Only the newest video is kept, in a temporary
+folder the server removes when it stops.
 
 A device with more than one screen — the iPhone Duo, a cover panel and an inner
 one that opens like a book — streams, screenshots and records the screen that is
