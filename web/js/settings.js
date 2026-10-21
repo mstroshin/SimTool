@@ -29,6 +29,8 @@ const PERMISSIONS = [
   ["user-tracking", "Tracking (ATT)"], ["pasteboard", "Paste from Other Apps"]
 ];
 const appCard = { data: null, error: "", shown: "" };
+// The sections a person unfolded, by name; every section starts folded.
+const deviceSections = stored("device.sections", {});
 const DEBUG_OPTIONS = [
   ["slow-animations", "Slow Animations", "Every app's animations run ten times slower"],
   ["color-blended", "Color Blended Layers", "Green where layers are opaque, red where they blend"],
@@ -230,8 +232,18 @@ function select(options, label) {
   return node;
 }
 
-function devSection(title, ...children) {
-  return el("section", { class: "dev-sec", "aria-label": title }, el("h3", { text: title }), ...children);
+// A section that folds; it starts folded and stays as a person leaves it.
+// `title` is its heading's words, or the heading itself when they change.
+function devSection(name, title, ...children) {
+  const heading = typeof title === "string" ? el("h3", { text: title }) : title;
+  return el("details", { class: "dev-sec", "data-sec": name, open: deviceSections[name] === true }, el("summary", {}, heading), ...children);
+}
+
+// Unfolds a section, for a command that leads into it.
+function openDeviceSection(name) {
+  const section = deviceBody.querySelector('details.dev-sec[data-sec="' + name + '"]');
+  if (section) section.open = true;
+  return section;
 }
 
 const devicePanel = $("panel-device");
@@ -353,49 +365,55 @@ pushSend.addEventListener("click", () => {
 
 const deviceBody = el("div", { class: "dev-body" },
   deviceProblem,
-  devSection("Appearance and text",
+  devSection("appearance", "Appearance and text",
     settingRow("Appearance", appearanceSeg),
     settingRow("Text size", el("span", { class: "dev-inline" }, textSmaller, textSizeSelect, textLarger)),
     settingRow("Increase Contrast", contrastSwitch)),
-  devSection("Accessibility",
+  devSection("accessibility", "Accessibility",
     ...AX_SWITCHES.map(([, key, title]) => settingRow(title, axSwitches[key])),
     settingRow("Color filter", colorFilterSelect),
     el("div", { class: "dev-now", text: "Apps read the filter; the simulator's screen shows none." }),
     glassRow),
-  devSection("Orientation",
+  devSection("orientation", "Orientation",
     el("div", { class: "dev-row" }, orientationSeg)),
-  devSection("Rendering",
+  devSection("rendering", "Rendering",
     ...DEBUG_OPTIONS.map(([option, title]) => settingRow(title, debugSwitches[option])),
     el("div", { class: "dev-actions" }, memoryButton)),
-  el("section", { class: "dev-sec", "aria-label": "Biometrics" }, biometryTitle,
+  devSection("biometrics", biometryTitle,
     settingRow("Enrolled", enrolledSwitch),
     el("div", { class: "dev-actions" }, matchButton, noMatchButton)),
-  devSection("Status bar",
+  devSection("status-bar", "Status bar",
     el("div", { class: "dev-row" }, statusNow),
     el("div", { class: "dev-grid" },
       field("Time", statusTime), field("Battery %", statusBattery), field("Battery", statusBatteryState),
       field("Data network", statusNetwork), field("Wi-Fi bars", statusWifi), field("Cellular bars", statusCell), field("Operator", statusOperator)),
     el("div", { class: "dev-actions" }, statusApply, statusClean, statusClear)),
-  devSection("Location",
+  devSection("location", "Location",
     el("div", { class: "dev-row" }, locationNow),
     el("div", { class: "dev-inline" }, locationPoint, locationSet),
     field("Route", locationRoute),
     el("div", { class: "dev-actions" }, field("Speed, m/s", locationSpeed), locationStart, locationClear)),
-  devSection("Camera",
+  devSection("camera", "Camera",
     cameraNow,
     cameraApps,
     el("div", { class: "dev-actions" }, cameraPick, cameraOffButton, cameraRelaunch, cameraFile),
     el("div", { class: "dev-inline" }, cameraMac, cameraWebcam)),
-  devSection("Push notification",
+  devSection("push", "Push notification",
     field("App", pushApp),
     field("Payload", pushPayload),
     el("div", { class: "dev-actions" }, pushSend)),
-  devSection("App", appBody),
-  devSection("Permissions", permissionRows),
-  devSection("Keychain",
+  devSection("app", "App", appBody),
+  devSection("permissions", "Permissions", permissionRows),
+  devSection("keychain", "Keychain",
     el("div", { class: "dev-actions" }, certificateAdd, keychainReset, certificateFile))
 );
 devicePanel.append(el("div", { class: "ptool" }, deviceRead, el("span", { class: "ptool-spacer" }), deviceRefresh), deviceBody);
+deviceBody.addEventListener("toggle", (event) => {
+  const section = event.target;
+  if (!section.matches || !section.matches("details.dev-sec")) return;
+  deviceSections[section.dataset.sec] = section.open;
+  store("device.sections", deviceSections);
+}, true);
 
 function parseCoordinate(text) {
   const parts = String(text).split(",").map((part) => Number(part.trim()));

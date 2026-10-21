@@ -5219,7 +5219,7 @@ enum WebViewerAssets {
             ["Settings", "battery", "Status bar: 9:41 for screenshots", "", () => statusBarPreset("clean")],
             ["Settings", "battery", "Status bar: clear the overrides", "", () => statusBarPreset("clear")],
             ["Settings", "pin", "Clear the simulated location", "", clearLocation],
-            ["Settings", "bell", "Send a push notification…", "", () => { openTab("device"); pushPayload.focus(); }],
+            ["Settings", "bell", "Send a push notification…", "", () => { openTab("device"); openDeviceSection("push"); pushPayload.focus(); }],
             ["Settings", "camera", "Camera: show an image or a video…", "", () => cameraFile.click()],
             ["Settings", "camera", "Camera: the Mac's camera", "", () => useMacCamera("")],
             ...(camera.data && camera.data.source !== "none" ? [["Settings", "camera", "Camera: turn off", "", cameraOff]] : []),
@@ -5230,7 +5230,7 @@ enum WebViewerAssets {
           for (const [option, key, title] of AX_SWITCHES) {
             commands.push(["Accessibility", "pick", (ax[key] ? "Turn off " : "Turn on ") + title, "", () => setAccessibility(option, ax[key] ? "off" : "on", title + (ax[key] ? " off" : " on"))]);
           }
-          commands.push(["Accessibility", "filter", "Color filters…", "", () => { openTab("device"); colorFilterSelect.focus(); }]);
+          commands.push(["Accessibility", "filter", "Color filters…", "", () => { openTab("device"); openDeviceSection("accessibility"); colorFilterSelect.focus(); }]);
           if (ax.liquidGlass) {
             const other = ax.liquidGlass === "tinted" ? "clear" : "tinted";
             commands.push(["Accessibility", "layers", "Liquid Glass: " + other, "", () => setAccessibility("liquid-glass", other, "Liquid Glass " + other)]);
@@ -5239,7 +5239,7 @@ enum WebViewerAssets {
             commands.push(
               ["App", "panel", "Show " + deviceInfo.app + " in the Finder", "", () => revealApp("bundle")],
               ["App", "panel", "Show " + deviceInfo.app + "'s data container in the Finder", "", () => revealApp("data")],
-              ["App", "check", "Permissions of " + deviceInfo.app + "…", "", () => { openTab("device"); permissionRows.scrollIntoView({ block: "start" }); }]
+              ["App", "check", "Permissions of " + deviceInfo.app + "…", "", () => { openTab("device"); openDeviceSection("permissions").scrollIntoView({ block: "start" }); }]
             );
           }
           for (const [option, title] of DEBUG_OPTIONS) {
@@ -5614,6 +5614,8 @@ enum WebViewerAssets {
           ["user-tracking", "Tracking (ATT)"], ["pasteboard", "Paste from Other Apps"]
         ];
         const appCard = { data: null, error: "", shown: "" };
+        // The sections a person unfolded, by name; every section starts folded.
+        const deviceSections = stored("device.sections", {});
         const DEBUG_OPTIONS = [
           ["slow-animations", "Slow Animations", "Every app's animations run ten times slower"],
           ["color-blended", "Color Blended Layers", "Green where layers are opaque, red where they blend"],
@@ -5815,8 +5817,18 @@ enum WebViewerAssets {
           return node;
         }
 
-        function devSection(title, ...children) {
-          return el("section", { class: "dev-sec", "aria-label": title }, el("h3", { text: title }), ...children);
+        // A section that folds; it starts folded and stays as a person leaves it.
+        // `title` is its heading's words, or the heading itself when they change.
+        function devSection(name, title, ...children) {
+          const heading = typeof title === "string" ? el("h3", { text: title }) : title;
+          return el("details", { class: "dev-sec", "data-sec": name, open: deviceSections[name] === true }, el("summary", {}, heading), ...children);
+        }
+
+        // Unfolds a section, for a command that leads into it.
+        function openDeviceSection(name) {
+          const section = deviceBody.querySelector('details.dev-sec[data-sec="' + name + '"]');
+          if (section) section.open = true;
+          return section;
         }
 
         const devicePanel = $("panel-device");
@@ -5938,49 +5950,55 @@ enum WebViewerAssets {
 
         const deviceBody = el("div", { class: "dev-body" },
           deviceProblem,
-          devSection("Appearance and text",
+          devSection("appearance", "Appearance and text",
             settingRow("Appearance", appearanceSeg),
             settingRow("Text size", el("span", { class: "dev-inline" }, textSmaller, textSizeSelect, textLarger)),
             settingRow("Increase Contrast", contrastSwitch)),
-          devSection("Accessibility",
+          devSection("accessibility", "Accessibility",
             ...AX_SWITCHES.map(([, key, title]) => settingRow(title, axSwitches[key])),
             settingRow("Color filter", colorFilterSelect),
             el("div", { class: "dev-now", text: "Apps read the filter; the simulator's screen shows none." }),
             glassRow),
-          devSection("Orientation",
+          devSection("orientation", "Orientation",
             el("div", { class: "dev-row" }, orientationSeg)),
-          devSection("Rendering",
+          devSection("rendering", "Rendering",
             ...DEBUG_OPTIONS.map(([option, title]) => settingRow(title, debugSwitches[option])),
             el("div", { class: "dev-actions" }, memoryButton)),
-          el("section", { class: "dev-sec", "aria-label": "Biometrics" }, biometryTitle,
+          devSection("biometrics", biometryTitle,
             settingRow("Enrolled", enrolledSwitch),
             el("div", { class: "dev-actions" }, matchButton, noMatchButton)),
-          devSection("Status bar",
+          devSection("status-bar", "Status bar",
             el("div", { class: "dev-row" }, statusNow),
             el("div", { class: "dev-grid" },
               field("Time", statusTime), field("Battery %", statusBattery), field("Battery", statusBatteryState),
               field("Data network", statusNetwork), field("Wi-Fi bars", statusWifi), field("Cellular bars", statusCell), field("Operator", statusOperator)),
             el("div", { class: "dev-actions" }, statusApply, statusClean, statusClear)),
-          devSection("Location",
+          devSection("location", "Location",
             el("div", { class: "dev-row" }, locationNow),
             el("div", { class: "dev-inline" }, locationPoint, locationSet),
             field("Route", locationRoute),
             el("div", { class: "dev-actions" }, field("Speed, m/s", locationSpeed), locationStart, locationClear)),
-          devSection("Camera",
+          devSection("camera", "Camera",
             cameraNow,
             cameraApps,
             el("div", { class: "dev-actions" }, cameraPick, cameraOffButton, cameraRelaunch, cameraFile),
             el("div", { class: "dev-inline" }, cameraMac, cameraWebcam)),
-          devSection("Push notification",
+          devSection("push", "Push notification",
             field("App", pushApp),
             field("Payload", pushPayload),
             el("div", { class: "dev-actions" }, pushSend)),
-          devSection("App", appBody),
-          devSection("Permissions", permissionRows),
-          devSection("Keychain",
+          devSection("app", "App", appBody),
+          devSection("permissions", "Permissions", permissionRows),
+          devSection("keychain", "Keychain",
             el("div", { class: "dev-actions" }, certificateAdd, keychainReset, certificateFile))
         );
         devicePanel.append(el("div", { class: "ptool" }, deviceRead, el("span", { class: "ptool-spacer" }), deviceRefresh), deviceBody);
+        deviceBody.addEventListener("toggle", (event) => {
+          const section = event.target;
+          if (!section.matches || !section.matches("details.dev-sec")) return;
+          deviceSections[section.dataset.sec] = section.open;
+          store("device.sections", deviceSections);
+        }, true);
 
         function parseCoordinate(text) {
           const parts = String(text).split(",").map((part) => Number(part.trim()));
@@ -7883,8 +7901,8 @@ enum WebViewerAssets {
         .dsec { margin: 0 0 var(--sp-2); }
         .dsec > summary { display: flex; align-items: center; gap: 6px; padding: 4px 0; color: var(--ink2); font-size: var(--fs-11); font-weight: 600; list-style: none; cursor: pointer; }
         .dsec > summary::-webkit-details-marker { display: none; }
-        .dsec > summary::before { content: ""; border-left: 4px solid currentColor; border-top: 3.5px solid transparent; border-bottom: 3.5px solid transparent; transition: transform var(--dur) var(--ease); }
-        .dsec[open] > summary::before { transform: rotate(90deg); }
+        .dsec > summary::before, .dev-sec > summary::before { content: ""; border-left: 4px solid currentColor; border-top: 3.5px solid transparent; border-bottom: 3.5px solid transparent; transition: transform var(--dur) var(--ease); }
+        .dsec[open] > summary::before, .dev-sec[open] > summary::before { transform: rotate(90deg); }
         .dsec > summary:hover { color: var(--ink1); }
         .hdr { width: 100%; margin: 0 0 var(--sp-1); border-collapse: collapse; font: var(--fs-11)/1.5 var(--font-mono); }
         .hdr th { width: 1%; min-width: 96px; max-width: 280px; padding: 1px var(--sp-4) 1px 0; color: var(--ink2); font-weight: 400; text-align: left; vertical-align: top; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -8059,9 +8077,13 @@ enum WebViewerAssets {
         /* Device: the simulator's settings and debug switches, a section per subject */
         .dev-body { flex: 1; overflow: auto; overscroll-behavior: contain; padding: 0 var(--sp-3) var(--sp-5); }
         .dev-body > .callout { margin-top: var(--sp-2); }
-        .dev-sec { padding: var(--sp-2) 0 var(--sp-3); border-bottom: 1px solid var(--line-hair); }
+        .dev-sec { border-bottom: 1px solid var(--line-hair); }
         .dev-sec:last-child { border-bottom: 0; }
-        .dev-sec h3 { margin: var(--sp-1) 0 var(--sp-1); color: var(--ink2); font-size: var(--fs-11); font-weight: 600; }
+        .dev-sec[open] { padding-bottom: var(--sp-3); }
+        .dev-sec > summary { display: flex; align-items: center; gap: 6px; padding: var(--sp-2) 0; color: var(--ink2); list-style: none; cursor: pointer; }
+        .dev-sec > summary::-webkit-details-marker { display: none; }
+        .dev-sec > summary:hover { color: var(--ink1); }
+        .dev-sec h3 { margin: 0; color: inherit; font-size: var(--fs-11); font-weight: 600; }
         .dev-row { display: flex; align-items: center; gap: var(--sp-2); min-height: 30px; }
         .dev-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .dev-now { color: var(--ink3); font: var(--fs-11)/1.5 var(--font-mono); overflow-wrap: anywhere; }

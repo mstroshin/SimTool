@@ -101,9 +101,24 @@ final class WebViewerPageTests: XCTestCase {
         XCTAssertTrue(page.contains(#""X-SimTool-Filename": encodeURIComponent(file.name)"#))
         XCTAssertTrue(page.contains(#""/api/v1/camera/webcam", { method: "POST""#))
         XCTAssertTrue(page.contains(#""/api/v1/camera", { method: "DELETE" }"#))
-        XCTAssertTrue(page.contains(#"devSection("Camera","#))
+        XCTAssertTrue(page.contains(#"devSection("camera", "Camera","#))
         XCTAssertTrue(page.contains(#"cameraRelaunch.hidden = !on || !deviceInfo.app"#))
         XCTAssertTrue(page.contains(#""Camera: the Mac's camera", "", () => useMacCamera("")"#), "the palette has it")
+    }
+
+    // Every section of the Device tab folds and starts folded; what a person
+    // unfolds stays unfolded, and a command that leads into a section unfolds it.
+    func testTheDeviceSectionsStartFolded() throws {
+        let section = try XCTUnwrap(page.range(of: "function devSection(name, title, ...children) {"))
+        XCTAssertTrue(page[section.upperBound...].prefix(400).contains(#"el("details", { class: "dev-sec", "data-sec": name, open: deviceSections[name] === true }"#))
+        XCTAssertTrue(page.contains(#"const deviceSections = stored("device.sections", {});"#))
+        XCTAssertTrue(page.contains(#"store("device.sections", deviceSections);"#))
+        XCTAssertFalse(page.contains(#"el("section", { class: "dev-sec""#), "no section that does not fold")
+        for name in ["appearance", "accessibility", "orientation", "rendering", "biometrics", "status-bar", "location", "camera", "push", "app", "permissions", "keychain"] {
+            XCTAssertTrue(page.contains(#"devSection("\#(name)", "#), "missing section \(name)")
+        }
+        XCTAssertTrue(page.contains(#"openDeviceSection("push"); pushPayload.focus();"#))
+        XCTAssertTrue(page.contains(#"openDeviceSection("permissions").scrollIntoView"#))
     }
 
     // Device sits after Accessibility; the ⌥ keys stay each tab's own, so

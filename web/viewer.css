@@ -510,8 +510,8 @@ pre.code { margin: 0; padding: var(--sp-2) var(--sp-3); border: 1px solid var(--
 .dsec { margin: 0 0 var(--sp-2); }
 .dsec > summary { display: flex; align-items: center; gap: 6px; padding: 4px 0; color: var(--ink2); font-size: var(--fs-11); font-weight: 600; list-style: none; cursor: pointer; }
 .dsec > summary::-webkit-details-marker { display: none; }
-.dsec > summary::before { content: ""; border-left: 4px solid currentColor; border-top: 3.5px solid transparent; border-bottom: 3.5px solid transparent; transition: transform var(--dur) var(--ease); }
-.dsec[open] > summary::before { transform: rotate(90deg); }
+.dsec > summary::before, .dev-sec > summary::before { content: ""; border-left: 4px solid currentColor; border-top: 3.5px solid transparent; border-bottom: 3.5px solid transparent; transition: transform var(--dur) var(--ease); }
+.dsec[open] > summary::before, .dev-sec[open] > summary::before { transform: rotate(90deg); }
 .dsec > summary:hover { color: var(--ink1); }
 .hdr { width: 100%; margin: 0 0 var(--sp-1); border-collapse: collapse; font: var(--fs-11)/1.5 var(--font-mono); }
 .hdr th { width: 1%; min-width: 96px; max-width: 280px; padding: 1px var(--sp-4) 1px 0; color: var(--ink2); font-weight: 400; text-align: left; vertical-align: top; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -686,9 +686,13 @@ mark { border-radius: 2px; background: var(--mark-bg); color: inherit; }
 /* Device: the simulator's settings and debug switches, a section per subject */
 .dev-body { flex: 1; overflow: auto; overscroll-behavior: contain; padding: 0 var(--sp-3) var(--sp-5); }
 .dev-body > .callout { margin-top: var(--sp-2); }
-.dev-sec { padding: var(--sp-2) 0 var(--sp-3); border-bottom: 1px solid var(--line-hair); }
+.dev-sec { border-bottom: 1px solid var(--line-hair); }
 .dev-sec:last-child { border-bottom: 0; }
-.dev-sec h3 { margin: var(--sp-1) 0 var(--sp-1); color: var(--ink2); font-size: var(--fs-11); font-weight: 600; }
+.dev-sec[open] { padding-bottom: var(--sp-3); }
+.dev-sec > summary { display: flex; align-items: center; gap: 6px; padding: var(--sp-2) 0; color: var(--ink2); list-style: none; cursor: pointer; }
+.dev-sec > summary::-webkit-details-marker { display: none; }
+.dev-sec > summary:hover { color: var(--ink1); }
+.dev-sec h3 { margin: 0; color: inherit; font-size: var(--fs-11); font-weight: 600; }
 .dev-row { display: flex; align-items: center; gap: var(--sp-2); min-height: 30px; }
 .dev-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dev-now { color: var(--ink3); font: var(--fs-11)/1.5 var(--font-mono); overflow-wrap: anywhere; }

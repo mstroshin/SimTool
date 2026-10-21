@@ -330,8 +330,9 @@ in the simulator's Photos library (`simctl addmedia`), where a photo picker
 offers it — **Save** or **Copy screenshot** and **Record video**. While the Accessibility tab
 picks elements, a right-click opens the element's menu instead.
 
-The **Device** tab (⌥7) is what Simulator.app kept in its menus and Device Hub
-dropped, as the device reports it: the appearance, the text size (Dynamic Type)
+The **Device** tab (⌥7) — its sections start folded and stay as you leave them —
+is what Simulator.app kept in its menus and Device Hub dropped, as the device
+reports it: the appearance, the text size (Dynamic Type)
 and Increase Contrast; the render server's debug colours — Color Blended
 Layers, Copied Images, Misaligned Images, Off-screen Rendered — and Slow
 Animations, each a switch, with Simulate memory warning beside them; Face ID or

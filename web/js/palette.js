@@ -72,7 +72,7 @@ function deviceSettingCommands() {
     ["Settings", "battery", "Status bar: 9:41 for screenshots", "", () => statusBarPreset("clean")],
     ["Settings", "battery", "Status bar: clear the overrides", "", () => statusBarPreset("clear")],
     ["Settings", "pin", "Clear the simulated location", "", clearLocation],
-    ["Settings", "bell", "Send a push notification…", "", () => { openTab("device"); pushPayload.focus(); }],
+    ["Settings", "bell", "Send a push notification…", "", () => { openTab("device"); openDeviceSection("push"); pushPayload.focus(); }],
     ["Settings", "camera", "Camera: show an image or a video…", "", () => cameraFile.click()],
     ["Settings", "camera", "Camera: the Mac's camera", "", () => useMacCamera("")],
     ...(camera.data && camera.data.source !== "none" ? [["Settings", "camera", "Camera: turn off", "", cameraOff]] : []),
@@ -83,7 +83,7 @@ function deviceSettingCommands() {
   for (const [option, key, title] of AX_SWITCHES) {
     commands.push(["Accessibility", "pick", (ax[key] ? "Turn off " : "Turn on ") + title, "", () => setAccessibility(option, ax[key] ? "off" : "on", title + (ax[key] ? " off" : " on"))]);
   }
-  commands.push(["Accessibility", "filter", "Color filters…", "", () => { openTab("device"); colorFilterSelect.focus(); }]);
+  commands.push(["Accessibility", "filter", "Color filters…", "", () => { openTab("device"); openDeviceSection("accessibility"); colorFilterSelect.focus(); }]);
   if (ax.liquidGlass) {
     const other = ax.liquidGlass === "tinted" ? "clear" : "tinted";
     commands.push(["Accessibility", "layers", "Liquid Glass: " + other, "", () => setAccessibility("liquid-glass", other, "Liquid Glass " + other)]);
@@ -92,7 +92,7 @@ function deviceSettingCommands() {
     commands.push(
       ["App", "panel", "Show " + deviceInfo.app + " in the Finder", "", () => revealApp("bundle")],
       ["App", "panel", "Show " + deviceInfo.app + "'s data container in the Finder", "", () => revealApp("data")],
-      ["App", "check", "Permissions of " + deviceInfo.app + "…", "", () => { openTab("device"); permissionRows.scrollIntoView({ block: "start" }); }]
+      ["App", "check", "Permissions of " + deviceInfo.app + "…", "", () => { openTab("device"); openDeviceSection("permissions").scrollIntoView({ block: "start" }); }]
     );
   }
   for (const [option, title] of DEBUG_OPTIONS) {
