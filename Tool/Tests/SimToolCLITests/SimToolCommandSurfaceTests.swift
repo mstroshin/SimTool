@@ -201,6 +201,26 @@ final class SimToolCommandSurfaceTests: XCTestCase {
         XCTAssertTrue(try Serve.parse(["--no-open"]).noOpen)
     }
 
+    // `serve --app` launches the app itself — the stdout-capture relaunch, the
+    // viewer's Launch — so it arms the loggers to report to it, as `run` does.
+    func testServeArmsTheLoggersOfTheAppItLaunches() throws {
+        let armed = try Serve.parse(["--app", "com.example.app"]).appLoggers(host: "127.0.0.1", port: 3315, config: nil)
+        XCTAssertEqual(armed, [
+            "SIMCTL_CHILD_SIMTOOL_NETWORK_LOGGER": "1",
+            "SIMCTL_CHILD_SIMTOOL_STATE_LOGGER": "1",
+            "SIMCTL_CHILD_SIMTOOL_SERVER_URL": "http://127.0.0.1:3315",
+        ])
+        XCTAssertEqual(try Serve.parse(["--app", "com.example.app", "--no-network"]).appLoggers(host: "0.0.0.0", port: 3200, config: nil), [
+            "SIMCTL_CHILD_SIMTOOL_STATE_LOGGER": "1",
+            "SIMCTL_CHILD_SIMTOOL_SERVER_URL": "http://127.0.0.1:3200",
+        ], "a server on every interface is reached on loopback")
+        XCTAssertEqual(try Serve.parse(["--app", "com.example.app", "--no-network", "--no-state"]).appLoggers(host: "127.0.0.1", port: 3200, config: nil), [:])
+        let quiet = ProjectConfig(simulator: "booted", bundleId: "com.example.app", build: .init(scheme: "App"), networkLogger: false)
+        XCTAssertEqual(try Serve.parse(["--app", "com.example.app"]).appLoggers(host: "127.0.0.1", port: 3200, config: quiet).keys.sorted(),
+                       ["SIMCTL_CHILD_SIMTOOL_SERVER_URL", "SIMCTL_CHILD_SIMTOOL_STATE_LOGGER"], "the config's networkLogger: false holds")
+        XCTAssertEqual(try Serve.parse([]).appLoggers(host: "127.0.0.1", port: 3200, config: nil), [:], "no app, nothing to arm")
+    }
+
     func testOpenParserAcceptsOptionalNameAndConfig() throws {
         let withName = try Open.parse(["details", "--config", "custom.yml"])
         XCTAssertEqual(withName.name, "details")

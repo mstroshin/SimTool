@@ -137,7 +137,7 @@ function networkEmpty() {
     node.append(el("button", { class: "btn btn-sm", type: "button", text: "Clear filters", onclick: clearNetworkFilters }));
     return node;
   }
-  return el("div", { class: "empty", html: "<b>No requests yet</b>The app's network logger reports each call here as it finishes. Apps launched by <code>simtool run</code> or <code>simtool app launch</code> have it armed; apps that link <code>SimToolNetworkLogger</code> keep reporting after a relaunch." });
+  return el("div", { class: "empty", html: "<b>No requests yet</b>The app's network logger reports each call here as it finishes. Apps launched by <code>simtool run</code>, by a <code>simtool serve --app</code> server or by <code>simtool app launch</code> with its <code>--env</code> have it armed; apps that link <code>SimToolNetworkLogger</code> keep reporting after a relaunch." });
 }
 
 // The requests the list is about: the live ones not cleared, or the reviewed run's in its window.

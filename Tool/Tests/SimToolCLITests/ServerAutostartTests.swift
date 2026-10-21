@@ -77,6 +77,24 @@ final class ServerAutostartTests: XCTestCase {
         XCTAssertEqual(Array(args.suffix(2)), ["--config", "/Users/x/Workspace/app/.simtool/config.yml"])
     }
 
+    // A detached server arms its app's loggers itself: what the caller left
+    // off reaches it, or `run --no-network --detach` would get them back.
+    func testDetachedServerArgumentsForwardTheLoggersLeftOff() {
+        let args = detachedServerArguments(
+            parameters: ServeParameters(device: nil, host: "127.0.0.1", port: 3200),
+            sessionId: "abc",
+            app: "com.example.app",
+            verbose: false,
+            reclaimPort: true,
+            noNetwork: true,
+            config: nil
+        )
+
+        XCTAssertTrue(args.contains("--no-network"))
+        XCTAssertFalse(args.contains("--no-state"))
+        XCTAssertEqual(try Serve.parse(args.dropFirst().map { $0 }).noNetwork, true, "the child parses it")
+    }
+
     func testDetachedServerArgumentsOmitConfigWhenNoneWasGiven() {
         let args = detachedServerArguments(
             parameters: ServeParameters(device: nil, host: "127.0.0.1", port: 3200),
