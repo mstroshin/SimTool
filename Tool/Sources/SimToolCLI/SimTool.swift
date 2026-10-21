@@ -6,6 +6,7 @@ import SimToolClient
 import SimToolCore
 import SimToolNetworkLogger
 import SimToolServer
+import SimToolStream
 
 /// Core owns the model; the CLI-only ability to parse one from a flag is added
 /// here so SimToolCore stays free of an ArgumentParser dependency.
@@ -36,6 +37,7 @@ struct SimTool: AsyncParsableCommand {
             Checksum.self,
             Open.self,
             Interactive.self,
+            DuoRender.self,
         ],
         defaultSubcommand: Interactive.self
     )
@@ -171,7 +173,8 @@ struct Doctor: AsyncParsableCommand {
             framework(named: "SimulatorKit", developerDir: developerDir),
         ]
         // Foldables: a runtime that runs one, and Device Hub's hold on each booted one's input.
-        var foldable = [await FoldableReadiness.runtimeCheck()]
+        let executable = Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])
+        var foldable = [await FoldableReadiness.runtimeCheck(), await FoldableReadiness.previewCheck(executable: executable, developerDir: developerDir)]
         foldable += await FoldableReadiness.inputChecks(for: (try? await SimulatorDeviceClient.listDevices()) ?? [])
         checks += foldable.map { ToolCheck(name: $0.name, available: $0.available, detail: $0.detail) }
         if common.json {
@@ -2046,6 +2049,52 @@ struct TestCommand: AsyncParsableCommand {
                 )
             }
         }
+    }
+}
+
+/// The 3D preview's renderer, a process of its own that the server starts
+/// (`Duo3DWorker`); `--check` only loads the model, for `simtool doctor`.
+struct DuoRender: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "duo-render",
+        abstract: "Render an iPhone Duo's 3D preview (started by the server).",
+        shouldDisplay: false
+    )
+
+    @Option var device: String?
+    @Option var model: String
+    @Option(help: "The cover's framebuffer, WxH.") var cover: String?
+    @Option(help: "The inner panel's framebuffer, WxH.") var inner: String?
+    @Flag var check = false
+
+    func run() async throws {
+        guard #available(macOS 15.0, *) else {
+            FileHandle.standardError.write(Data("the 3D preview renders with RealityKit, which needs macOS 15 or newer\n".utf8))
+            throw ExitCode(4)
+        }
+        let modelURL = URL(fileURLWithPath: model)
+        if check {
+            if let failure = await Duo3DWorker.check(modelURL: modelURL) {
+                FileHandle.standardError.write(Data((failure + "\n").utf8))
+                throw ExitCode(3)
+            }
+            print("ok")
+            return
+        }
+        guard let device, let cover = Self.size(cover), let inner = Self.size(inner) else {
+            throw ValidationError("duo-render needs --device, --cover and --inner")
+        }
+        do {
+            try await Duo3DWorker.run(Duo3DWorker.Options(deviceUDID: device, modelURL: modelURL, cover: cover, inner: inner))
+        } catch {
+            FileHandle.standardError.write(Data((error.localizedDescription + "\n").utf8))
+            throw ExitCode(2)
+        }
+    }
+
+    static func size(_ text: String?) -> (width: Int, height: Int)? {
+        let parts = (text ?? "").split(separator: "x").compactMap { Int($0) }
+        return parts.count == 2 && parts[0] > 0 && parts[1] > 0 ? (parts[0], parts[1]) : nil
     }
 }
 

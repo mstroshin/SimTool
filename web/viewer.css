@@ -193,6 +193,16 @@ code { font: var(--fs-11)/1.4 var(--font-mono); }
 .app.keys-on .screen { box-shadow: 0 0 0 1px var(--device-line), 0 0 0 4px var(--g0), 0 0 0 6px var(--course); }
 .app.keys-on.keys-paused .screen { box-shadow: 0 0 0 1px var(--device-line), 0 0 0 5px var(--g0), 0 0 0 6px var(--line-thin); outline: 2px dashed var(--course); outline-offset: 5px; }
 .placeholder { position: absolute; inset: 0; display: grid; place-items: center; padding: var(--sp-4); text-align: center; color: var(--screen-ink); pointer-events: none; }
+/* The 3D preview is the whole device on the stage's colour: no bezel line, no
+   rulers, no marks drawn in screen points — they would not land on it. */
+.app[data-view="3d"] .screen { background: transparent; box-shadow: none; }
+/* The frame's backdrop is the stage's colour, give or take what video coding
+   does to a near-black: its edges fade into the stage instead of showing a seam. */
+.app[data-view="3d"] .screen canvas {
+  mask-image: linear-gradient(to right, transparent, currentColor 6%, currentColor 94%, transparent), linear-gradient(to bottom, transparent, currentColor 6%, currentColor 94%, transparent);
+  mask-composite: intersect;
+}
+.app[data-view="3d"] .ruler, .app[data-view="3d"] .redlines, .app[data-view="3d"] .redline-labels, .app[data-view="3d"] .activity-layer { display: none; }
 
 /* Where the finger is, drawn at once, ahead of the video — in course ink. */
 .touch-layer { position: absolute; inset: 0; z-index: 3; overflow: hidden; pointer-events: none; }

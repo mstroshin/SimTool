@@ -432,7 +432,10 @@ extension AgentSkill {
         a live finger — hold, drag, wheel-scroll, Option for pinch; the Accessibility tab
         picks elements and copies them as YAML steps. Scoping `--app <bundle>` captures
         that app's OSLog **and** stdout from the start. `simtool run` reads `.simtool/config.yml` and does build → launch → viewer
-        in one step. Flags: `simtool serve --help` / `simtool run --help`.
+        in one step. Flags: `simtool serve --help` / `simtool run --help`. On an iPhone
+        Duo the toolbar folds it (Closed / Book / Open) and its 3D button shows the
+        folded device with the lit panel live on it — clicks on that screen land on the
+        panel; `simtool doctor` says when 3D is unavailable, and why.
 
         ## Workflow
 

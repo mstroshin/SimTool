@@ -49,6 +49,7 @@ function renderTheme() {
   button.querySelector("use").setAttribute("href", next === "light" ? "#i-sun" : "#i-moon");
   // The browser's own chrome takes the toolbar's colour.
   document.querySelector('meta[name="theme-color"]').content = getComputedStyle(document.querySelector(".toolbar")).backgroundColor;
+  if (typeof restyle3D === "function") restyle3D();
 }
 
 // A system that changes its appearance moves an unpinned page by itself (CSS);

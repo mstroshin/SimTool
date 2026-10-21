@@ -42,6 +42,24 @@ public enum FoldableReadiness {
         return value != 0
     }
 
+    /// The 3D preview: the device model in the selected Xcode, loaded the way
+    /// the preview loads it (`simtool duo-render --check`, run as
+    /// `executable`) — its fold animation and screens present.
+    public static func previewCheck(executable: URL, developerDir: String) async -> Check {
+        let name = "iPhone Duo 3D preview"
+        let layout = await SimulatorDisplayLayout.load(deviceType: duoDeviceType)
+        let located = Duo3DModel.locate(layout: layout, developerDir: developerDir)
+        guard let model = located.url else {
+            return Check(name: name, available: false, detail: (located.reason ?? "no device model") + " — the viewer shows the flat screen")
+        }
+        let output = try? await ProcessRunner.run(executable: executable, arguments: ["duo-render", "--check", "--model", model.path], timeoutSeconds: 60)
+        guard let output, output.status == 0 else {
+            let said = output?.stderrString.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return Check(name: name, available: false, detail: "\(model.path) does not render: \(said.isEmpty ? "the renderer failed" : said) — the viewer shows the flat screen")
+        }
+        return Check(name: name, available: true, detail: model.path)
+    }
+
     public static func runtimeCheck() async -> Check {
         let name = "iPhone Duo runtime"
         guard let output = try? await ProcessRunner.runXcrun(["simctl", "list", "runtimes", "--json"]), output.status == 0 else {
@@ -73,5 +91,37 @@ public enum FoldableReadiness {
             }
         }
         return checks
+    }
+}
+
+/// Where the 3D preview of a foldable gets its model: the device model Xcode's
+/// Device Hub draws it with, read from the user's own Xcode at run time —
+/// never shipped with SimTool.
+public enum Duo3DModel {
+    /// `<Xcode>/Contents/SharedFrameworks/DeviceKit.framework/…/PlugIns/*.devicekitplugin/Contents/Resources/<product class>.usdz`.
+    public static func url(productClass: String, developerDir: String) -> URL? {
+        let plugins = URL(fileURLWithPath: developerDir)
+            .deletingLastPathComponent()
+            .appendingPathComponent("SharedFrameworks/DeviceKit.framework/Versions/A/PlugIns")
+        let fileManager = FileManager.default
+        for plugin in (try? fileManager.contentsOfDirectory(atPath: plugins.path))?.sorted() ?? [] where plugin.hasSuffix(".devicekitplugin") {
+            let model = plugins.appendingPathComponent(plugin).appendingPathComponent("Contents/Resources/\(productClass).usdz")
+            if fileManager.fileExists(atPath: model.path) { return model }
+        }
+        return nil
+    }
+
+    /// The model for `layout`, or why there is none. RealityKit renders
+    /// offscreen from macOS 15.
+    public static func locate(layout: SimulatorDisplayLayout?, developerDir: String) -> (url: URL?, reason: String?) {
+        guard let layout, layout.isFoldable else { return (nil, "only a foldable device has a 3D preview") }
+        guard ProcessInfo.processInfo.isOperatingSystemAtLeast(OperatingSystemVersion(majorVersion: 15, minorVersion: 0, patchVersion: 0)) else {
+            return (nil, "the 3D preview renders with RealityKit, which needs macOS 15 or newer")
+        }
+        guard let productClass = layout.productClass else { return (nil, "the device type names no product class to find its model by") }
+        guard let url = url(productClass: productClass, developerDir: developerDir) else {
+            return (nil, "the selected Xcode (\(developerDir)) has no \(productClass).usdz device model — the iPhone Duo's ships with Xcode 27.1 and later")
+        }
+        return (url, nil)
     }
 }

@@ -431,8 +431,9 @@ enum WebViewerAssets {
         }
 
         // Picking happens on the live screen, with the Accessibility tab in view.
+        // Picking reads the screen in points: not on the 3D device.
         function axPickActive() {
-          return ax.pick && inspector.open && inspector.tab === "ax" && app.dataset.mode !== "replay" && !!ax.tree;
+          return ax.pick && inspector.open && inspector.tab === "ax" && app.dataset.mode !== "replay" && !!ax.tree && !screenState.view3d;
         }
 
         function updateAxMode() {
@@ -1226,9 +1227,14 @@ enum WebViewerAssets {
           }
         }
 
-        // Shown only for a foldable: the pose it rests at pressed, the hinge beside it.
+        // Shown only for a foldable: the pose it rests at pressed, the hinge beside it,
+        // and the 3D preview's switch — off, with the reason, when there is none.
         function renderFold() {
           $("foldGroup").hidden = !screenState.foldable;
+          const view = $("view3dButton");
+          view.setAttribute("aria-pressed", String(screenState.view3d));
+          view.disabled = !!screenState.view3dUnavailable || app.dataset.mode === "replay";
+          view.dataset.tip = screenState.view3dUnavailable ? "3D preview unavailable — " + screenState.view3dUnavailable : (screenState.view3d ? "Show the screen" : "Show the device in 3D");
           const fold = screenState.fold || {};
           for (const button of $("foldGroup").querySelectorAll("[data-pose]")) {
             button.setAttribute("aria-pressed", String(fold.pose === button.dataset.pose));
@@ -1241,6 +1247,12 @@ enum WebViewerAssets {
 
         function applyFold(fold) {
           screenState.fold = fold || null;
+          renderFold();
+        }
+
+        function applyView3D(view) {
+          screenState.view3dUnavailable = view && !view.available ? (view.reason || "unavailable") : "";
+          if (screenState.view3dUnavailable && screenState.view3d) leave3D(screenState.view3dUnavailable);
           renderFold();
         }
         function pressShake() { deviceAction("Shake", { action: "shake" }, "Shake sent"); }
@@ -1446,6 +1458,18 @@ enum WebViewerAssets {
           return { x: clamp01((event.clientX - rect.left) / rect.width), y: clamp01((event.clientY - rect.top) / rect.height) };
         }
 
+        // The finger(s) as the device takes them: the canvas point itself, or in 3D
+        // the point of the lit panel's picture under it — null off its screen.
+        function deviceFingers(point, second) {
+          if (!screenState.view3d) return { first: point, second: second || null };
+          const map = (at) => {
+            const raw = at && pointOnDuoScreen(screenState.projection, at.x, at.y);
+            return raw && screenState.display ? pictureRatio(raw, screenState.display.rotation || 0) : null;
+          };
+          const first = map(point);
+          return first ? { first, second: second ? map(second) : null } : null;
+        }
+
         // Alt adds a second finger mirrored through the screen center, so spreading
         // or circling the pointer pinches or rotates. Alt+Shift keeps the pair's
         // offset instead: a two-finger pan.
@@ -1490,7 +1514,8 @@ enum WebViewerAssets {
           const ending = touch;
           touch = null;
           clearTimeout(ending.holdTimer);
-          touchStream.up(ending.point, ending.second);
+          const sent = deviceFingers(ending.point, ending.second) || ending.sent;
+          touchStream.up(sent.first, sent.second);
           hideDots();
         }
 
@@ -1515,12 +1540,15 @@ enum WebViewerAssets {
           const point = canvasRatio(event);
           const mode = event.altKey ? (event.shiftKey ? "pan2" : "pinch") : "one";
           const second = mode === "one" ? null : { x: clamp01(1 - point.x), y: clamp01(1 - point.y) };
+          // In 3D a press beside the device's screen touches nothing.
+          const sent = deviceFingers(point, second);
+          if (!sent) return;
           touch = {
-            pointerId: event.pointerId, mode, point, second,
+            pointerId: event.pointerId, mode, point, second, sent,
             offset: second ? { x: second.x - point.x, y: second.y - point.y } : null,
             startX: event.clientX, startY: event.clientY, held: false, holdTimer: null
           };
-          touchStream.down(point, second);
+          touchStream.down(sent.first, sent.second);
           showDots(point, second, "");
           touch.holdTimer = setTimeout(() => {
             if (!touch) return;
@@ -1549,7 +1577,9 @@ enum WebViewerAssets {
             clearTimeout(touch.holdTimer);
             touch.holdTimer = null;
           }
-          touchStream.move(touch.point, touch.second);
+          // A finger dragged off the 3D screen stays where it last touched it.
+          touch.sent = deviceFingers(touch.point, touch.second) || touch.sent;
+          touchStream.move(touch.sent.first, touch.sent.second);
           showDots(touch.point, touch.second, touch.held ? "held" : "");
         });
 
@@ -1598,20 +1628,28 @@ enum WebViewerAssets {
             const point = canvasRatio(event);
             return { x: Math.min(1 - WHEEL_INSET, Math.max(WHEEL_INSET, point.x)), y: Math.min(1 - WHEEL_INSET, Math.max(WHEEL_INSET, point.y)) };
           };
+          // Each wheel finger position goes to the device as the canvas maps it (3D: onto the lit panel).
+          const send = (kind, at) => {
+            const sent = deviceFingers(at);
+            if (sent) wheel.sent = sent.first;
+            if (sent || kind !== "down") touchStream[kind](wheel.sent);
+          };
           if (!wheel) {
-            wheel = { point: anchor(), timer: null };
-            touchStream.down(wheel.point);
+            const start = anchor();
+            if (!deviceFingers(start)) return;
+            wheel = { point: start, timer: null, sent: null };
+            send("down", wheel.point);
           }
           let next = { x: wheel.point.x + dx, y: wheel.point.y + dy };
           const inside = (value) => value >= WHEEL_INSET / 2 && value <= 1 - WHEEL_INSET / 2;
           if (!inside(next.x) || !inside(next.y)) {
-            touchStream.up(wheel.point);
+            send("up", wheel.point);
             const start = anchor();
-            touchStream.down(start);
+            send("down", start);
             next = { x: clamp01(start.x + dx), y: clamp01(start.y + dy) };
           }
           wheel.point = next;
-          touchStream.move(next);
+          send("move", next);
           showDots(next, null, "wheel");
           clearTimeout(wheel.timer);
           wheel.timer = setTimeout(endWheelDrag, WHEEL_IDLE_MS);
@@ -1622,7 +1660,8 @@ enum WebViewerAssets {
           const ending = wheel;
           wheel = null;
           clearTimeout(ending.timer);
-          touchStream.up(ending.point);
+          const sent = deviceFingers(ending.point);
+          touchStream.up(sent ? sent.first : ending.sent);
           if (!touch) hideDots();
         }
 
@@ -1720,6 +1759,7 @@ enum WebViewerAssets {
 
         $("homeButton").addEventListener("click", pressHome);
         for (const button of $("foldGroup").querySelectorAll("[data-pose]")) button.addEventListener("click", () => foldTo(button.dataset.pose));
+        $("view3dButton").addEventListener("click", () => setView3D(!screenState.view3d));
         $("screenshotButton").addEventListener("click", saveScreenshot);
         $("shakeButton").addEventListener("click", pressShake);
         $("softKeyboardButton").addEventListener("click", toggleSoftwareKeyboard);
@@ -3036,6 +3076,55 @@ enum WebViewerAssets {
           return [fold.pose, degrees, fold.panel].filter(Boolean).join(" · ");
         }
 
+        // ---- The 3D preview ----
+
+        // A point of a 3D frame (fractions, top-left origin) on the lit panel's
+        // framebuffer, or null off its screen: each projected leaf of the panel is
+        // inverted as a square-to-quad homography and its framebuffer region applied.
+        // Follows serve-sim's pointOnDuoScreen (Apache-2.0); see THIRD_PARTY_NOTICES.md.
+        function pointOnDuoScreen(projection, x, y) {
+          if (!projection || !Array.isArray(projection.pieces)) return null;
+          for (const piece of projection.pieces) {
+            if (!Array.isArray(piece) || piece.length !== 5) continue;
+            const [p0, p1, p2, p3, region] = piece;
+            if ([...p0, ...p1, ...p2, ...p3, ...region].some((n) => !Number.isFinite(n))) continue;
+            const dx1 = p1[0] - p2[0], dx2 = p3[0] - p2[0], dy1 = p1[1] - p2[1], dy2 = p3[1] - p2[1];
+            const sx = p0[0] - p1[0] + p2[0] - p3[0], sy = p0[1] - p1[1] + p2[1] - p3[1];
+            const denominator = dx1 * dy2 - dx2 * dy1;
+            if (Math.abs(denominator) < 1e-10) continue;
+            const g = (sx * dy2 - dx2 * sy) / denominator, h = (dx1 * sy - sx * dy1) / denominator;
+            const a = p1[0] - p0[0] + g * p1[0], b = p3[0] - p0[0] + h * p3[0];
+            const d = p1[1] - p0[1] + g * p1[1], e = p3[1] - p0[1] + h * p3[1];
+            const aa = a - x * g, bb = b - x * h, dd = d - y * g, ee = e - y * h;
+            const determinant = aa * ee - bb * dd;
+            if (Math.abs(determinant) < 1e-10) continue;
+            const u = ((x - p0[0]) * ee - bb * (y - p0[1])) / determinant;
+            const v = (aa * (y - p0[1]) - (x - p0[0]) * dd) / determinant;
+            if (u < -0.001 || v < -0.001 || u > 1.001 || v > 1.001) continue;
+            return { x: region[0] + Math.max(0, Math.min(1, u)) * region[2], y: region[1] + Math.max(0, Math.min(1, v)) * region[3] };
+          }
+          return null;
+        }
+
+        // A framebuffer point as the screen's picture reads it, the picture turned
+        // `rotation` degrees clockwise — the inverse of the server's turn, so a touch
+        // sent as a picture fraction lands on the framebuffer point.
+        function pictureRatio(raw, rotation) {
+          switch (((rotation % 360) + 360) % 360) {
+            case 90: return { x: 1 - raw.y, y: raw.x };
+            case 180: return { x: 1 - raw.x, y: 1 - raw.y };
+            case 270: return { x: raw.y, y: 1 - raw.x };
+            default: return { x: raw.x, y: raw.y };
+          }
+        }
+
+        // `rgb(27, 29, 32)` → `1b1d20`, the stage's colour for the 3D frame's backdrop.
+        function cssColorHex(color) {
+          const parts = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(color || "");
+          if (!parts) return "000000";
+          return parts.slice(1, 4).map((part) => Number(part).toString(16).padStart(2, "0")).join("");
+        }
+
         // ---- Theme ----
 
         // The theme a click on the theme button pins: the other one — or none, so the page
@@ -3530,6 +3619,9 @@ enum WebViewerAssets {
           $("sbVersion").textContent = config.version ? "simtool " + config.version : "";
           applyDisplays(config.displays, config.activeDisplay);
           applyFold(config.fold);
+          applyView3D(config.view3d);
+          // A viewer that left a foldable in 3D finds it in 3D again.
+          if (screenState.foldable && !screenState.view3d && stored("view3d", "0") === "1") setView3D(true);
         }
 
         // A new server: everything numbered by the old one is stale.
@@ -4028,6 +4120,7 @@ enum WebViewerAssets {
               ["Device", "fold-book", "Fold to book, 130°", "", () => foldTo("book")],
               ["Device", "fold-open", "Fold open flat, 180°", "", () => foldTo("open")]
             );
+            if (!screenState.view3dUnavailable) commands.push(["View", "cube", screenState.view3d ? "Show the screen instead of the 3D device" : "Show the device in 3D", "", () => setView3D(!screenState.view3d)]);
           }
           if (deviceInfo.app) {
             commands.push(["App", "stop", "Terminate " + deviceInfo.app, "", terminateApp], ["App", "relaunch", "Relaunch " + deviceInfo.app, "", relaunchApp]);
@@ -4600,6 +4693,9 @@ enum WebViewerAssets {
           fold: null,       // a foldable's fold as the device reports it: hingeDegrees, posture, panel, pose
           foldable: false,  // more than one screen: touches name the one shown
           rotation: 0,      // degrees the frame on the canvas is turned (the lit screen's, once frames match it)
+          view3d: false,    // the stream is the folded device in 3D, not the lit screen
+          view3dUnavailable: "",   // why the 3D preview cannot be shown, when it cannot
+          projection: null, // where the lit panel lands on the 3D frame (Duo3DProjection)
           connection: "connecting",  // connecting | live | reconnecting | offline
           attempt: 0,
           retryAt: 0,
@@ -4631,7 +4727,7 @@ enum WebViewerAssets {
 
         // ---- AVCC envelopes ----
 
-        const avccTags = { 1: "description", 2: "keyframe", 3: "delta" };
+        const avccTags = { 1: "description", 2: "keyframe", 3: "delta", 4: "projection" };
         class Demuxer {
           constructor() { this.buffer = new Uint8Array(0); }
           push(bytes) {
@@ -4678,7 +4774,7 @@ enum WebViewerAssets {
         function paint(frame) {
           // The stream carries the lit screen's framebuffer; a picture turned on it
           // (the open inner panel of an iPhone Duo) is turned back upright here.
-          const rotation = frameRotation(frame.displayWidth, frame.displayHeight, screenState.display);
+          const rotation = screenState.view3d ? 0 : frameRotation(frame.displayWidth, frame.displayHeight, screenState.display);
           const quarter = rotation % 180 !== 0;
           const width = quarter ? frame.displayHeight : frame.displayWidth, height = quarter ? frame.displayWidth : frame.displayHeight;
           if (width !== screenState.width || height !== screenState.height || rotation !== screenState.rotation) {
@@ -4758,7 +4854,16 @@ enum WebViewerAssets {
           let decoder = null;
           try {
             const controller = streamAbort;
-            const response = await fetch("/stream.avcc", { signal: controller.signal, cache: "no-store" });
+            const view3d = screenState.view3d;
+            // The screen, or the folded device in 3D (`?view=3d…`).
+            const response = await fetch("/stream.avcc" + (view3d ? streamQuery3D() : ""), { signal: controller.signal, cache: "no-store" });
+            // No 3D to show (no model, the renderer failed): the flat screen, and why.
+            if (view3d && response.status === 503) {
+              let reason = "the 3D preview is unavailable";
+              try { reason = (await response.json()).error || reason; } catch (_) {}
+              leave3D(reason);
+              return;
+            }
             if (!response.ok || !response.body) throw new Error("the server answered " + response.status);
             const demuxer = new Demuxer();
             screenState.stillBytes = Infinity;
@@ -4777,7 +4882,9 @@ enum WebViewerAssets {
               if (done) break;
               if (!value) continue;
               for (const chunk of demuxer.push(value)) {
-                if (chunk.type === "description") {
+                if (chunk.type === "projection") {
+                  try { screenState.projection = JSON.parse(new TextDecoder().decode(chunk.payload)); } catch (_) {}
+                } else if (chunk.type === "description") {
                   if (decoder.state === "closed") throw new Error("the decoder closed");
                   decoder.configure({ codec: avcCodecString(chunk.payload), description: chunk.payload, optimizeForLatency: true, hardwareAcceleration: "prefer-hardware" });
                 } else if (decoder.state === "configured") {
@@ -4842,7 +4949,7 @@ enum WebViewerAssets {
           device.style.setProperty("--dev-h", Math.floor(height) + "px");
           // The screen's own corner radii from its device type, in proportion — the
           // Duo's cover is tight on the hinge side; else ~55 pt on a 402 pt wide phone.
-          device.style.setProperty("--dev-radius", screenRadius(screenState.display, width) || Math.round(width * 0.137) + "px");
+          device.style.setProperty("--dev-radius", screenState.view3d ? "0px" : screenRadius(screenState.display, width) || Math.round(width * 0.137) + "px");
           updateBacking();
           updateReadoutSize();
           if (typeof drawRulers === "function") drawRulers();
@@ -4855,6 +4962,43 @@ enum WebViewerAssets {
         }
 
         new ResizeObserver(fitDevice).observe($("deviceArea"));
+
+        // ---- The 3D preview ----
+        // A foldable can be shown as the folded device in 3D, rendered on the server
+        // from the device model in the user's Xcode, its lit panel live on it. The
+        // frame is drawn on the stage's own colour, in the page's theme.
+
+        function streamQuery3D() {
+          const stage = getComputedStyle($("stage")).backgroundColor;
+          return "?view=3d&theme=" + shownTheme() + "&bg=" + cssColorHex(stage);
+        }
+
+        function setView3D(on) {
+          if (on && (!screenState.foldable || screenState.view3dUnavailable)) return;
+          if (screenState.view3d === on) return;
+          screenState.view3d = on;
+          screenState.projection = null;
+          app.dataset.view = on ? "3d" : "screen";
+          store("view3d", on ? "1" : "0");
+          if (typeof renderFold === "function") renderFold();
+          restartStream();
+        }
+
+        // The 3D stream refused or ended for good: back to the flat screen, saying why.
+        function leave3D(reason) {
+          screenState.view3dUnavailable = reason;
+          screenState.view3d = false;
+          screenState.projection = null;
+          app.dataset.view = "screen";
+          if (typeof renderFold === "function") renderFold();
+          toast("3D preview unavailable — " + reason, { error: true });
+          restartStream();
+        }
+
+        // A theme switch redraws the 3D frame on the new stage colour.
+        function restyle3D() {
+          if (screenState.view3d) restartStream();
+        }
 
         // The device's screens from /config or the event stream's `device` topic: the
         // lit one sets the points, the corners and how its frames turn.
@@ -4873,8 +5017,15 @@ enum WebViewerAssets {
         // Pointer position in points (or pixels until the point size is known).
         function pointerReadout(clientX, clientY) {
           const rect = canvas.getBoundingClientRect();
-          const fx = (clientX - rect.left) / rect.width, fy = (clientY - rect.top) / rect.height;
+          let fx = (clientX - rect.left) / rect.width, fy = (clientY - rect.top) / rect.height;
           if (fx < 0 || fy < 0 || fx > 1 || fy > 1) return "";
+          // On the 3D device: the point of the lit panel under the pointer, if any.
+          if (screenState.view3d) {
+            const fingers = deviceFingers({ x: fx, y: fy });
+            if (!fingers) return "";
+            fx = fingers.first.x;
+            fy = fingers.first.y;
+          }
           if (screenState.points) return "x " + Math.round(fx * screenState.points.width) + "  y " + Math.round(fy * screenState.points.height) + " pt";
           if (screenState.width) return "x " + Math.round(fx * screenState.width) + "  y " + Math.round(fy * screenState.height) + " px";
           return "";
@@ -5441,6 +5592,7 @@ enum WebViewerAssets {
           button.querySelector("use").setAttribute("href", next === "light" ? "#i-sun" : "#i-moon");
           // The browser's own chrome takes the toolbar's colour.
           document.querySelector('meta[name="theme-color"]').content = getComputedStyle(document.querySelector(".toolbar")).backgroundColor;
+          if (typeof restyle3D === "function") restyle3D();
         }
 
         // A system that changes its appearance moves an unpinned page by itself (CSS);
@@ -5737,6 +5889,16 @@ enum WebViewerAssets {
         .app.keys-on .screen { box-shadow: 0 0 0 1px var(--device-line), 0 0 0 4px var(--g0), 0 0 0 6px var(--course); }
         .app.keys-on.keys-paused .screen { box-shadow: 0 0 0 1px var(--device-line), 0 0 0 5px var(--g0), 0 0 0 6px var(--line-thin); outline: 2px dashed var(--course); outline-offset: 5px; }
         .placeholder { position: absolute; inset: 0; display: grid; place-items: center; padding: var(--sp-4); text-align: center; color: var(--screen-ink); pointer-events: none; }
+        /* The 3D preview is the whole device on the stage's colour: no bezel line, no
+           rulers, no marks drawn in screen points — they would not land on it. */
+        .app[data-view="3d"] .screen { background: transparent; box-shadow: none; }
+        /* The frame's backdrop is the stage's colour, give or take what video coding
+           does to a near-black: its edges fade into the stage instead of showing a seam. */
+        .app[data-view="3d"] .screen canvas {
+          mask-image: linear-gradient(to right, transparent, currentColor 6%, currentColor 94%, transparent), linear-gradient(to bottom, transparent, currentColor 6%, currentColor 94%, transparent);
+          mask-composite: intersect;
+        }
+        .app[data-view="3d"] .ruler, .app[data-view="3d"] .redlines, .app[data-view="3d"] .redline-labels, .app[data-view="3d"] .activity-layer { display: none; }
 
         /* Where the finger is, drawn at once, ahead of the video — in course ink. */
         .touch-layer { position: absolute; inset: 0; z-index: 3; overflow: hidden; pointer-events: none; }
@@ -6239,6 +6401,7 @@ enum WebViewerAssets {
               <symbol id="i-filter" viewBox="0 0 16 16"><path d="M2.5 3.5h11l-4.2 5v4l-2.6 1v-5Z"/></symbol>
               <symbol id="i-fold-closed" viewBox="0 0 16 16"><rect x="4.5" y="2.5" width="7" height="11" rx="1.2"/><path d="M6.2 2.5v11"/></symbol>
               <symbol id="i-fold-book" viewBox="0 0 16 16"><path d="M8 4v9.5M8 4 2.5 2.5v9.5L8 13.5M8 4l5.5-1.5v9.5L8 13.5"/></symbol>
+              <symbol id="i-cube" viewBox="0 0 16 16"><path d="M8 1.8 13.5 5v6L8 14.2 2.5 11V5Z"/><path d="M2.5 5 8 8.2 13.5 5M8 8.2v6"/></symbol>
               <symbol id="i-fold-open" viewBox="0 0 16 16"><rect x="1.5" y="3.5" width="13" height="9" rx="1.2"/><path d="M8 3.5v9" stroke-dasharray="1.2 1.8"/></symbol>
             </defs>
           </svg>
@@ -6261,6 +6424,7 @@ enum WebViewerAssets {
                   <button class="tb-btn" type="button" id="foldClosed" data-pose="closed" aria-pressed="false" aria-label="Fold closed" data-tip="Fold closed — the cover lights"><svg class="ic" aria-hidden="true"><use href="#i-fold-closed"/></svg></button>
                   <button class="tb-btn" type="button" id="foldBook" data-pose="book" aria-pressed="false" aria-label="Fold to book" data-tip="Book, 130° — the inner panel lights"><svg class="ic" aria-hidden="true"><use href="#i-fold-book"/></svg></button>
                   <button class="tb-btn" type="button" id="foldOpen" data-pose="open" aria-pressed="false" aria-label="Fold open" data-tip="Open flat, 180°"><svg class="ic" aria-hidden="true"><use href="#i-fold-open"/></svg></button>
+                  <button class="tb-btn" type="button" id="view3dButton" aria-pressed="false" aria-label="3D preview" data-tip="Show the device in 3D"><svg class="ic" aria-hidden="true"><use href="#i-cube"/></svg></button>
                 </span>
                 <span class="tb-sep" aria-hidden="true"></span>
                 <span class="tb-app" id="appName" title="App under test">No app</span>

@@ -268,6 +268,29 @@ final class WebViewerLogicTests: XCTestCase {
         XCTAssertEqual(value(context, "place(0, 10, 20)"), "10,20")
     }
 
+    // A click on the 3D device lands on the panel's framebuffer through the
+    // projected quad of the leaf it hit, and goes out as a picture fraction.
+    func testA3DClickLandsOnThePanelUnderIt() throws {
+        let context = try makeContext()
+        context.evaluateScript("""
+        var flat = { pieces: [[[0.1, 0.2], [0.5, 0.2], [0.5, 0.8], [0.1, 0.8], [0, 0.5, 1, 0.5]],
+                              [[0.5, 0.2], [0.9, 0.2], [0.9, 0.8], [0.5, 0.8], [0, 0, 1, 0.5]]] };
+        function at(x, y) { var p = pointOnDuoScreen(flat, x, y); return p ? p.x.toFixed(3) + "," + p.y.toFixed(3) : "none"; }
+        """)
+        XCTAssertEqual(value(context, "at(0.1, 0.2)"), "0.000,0.500", "the first leaf's top-left is its region's top-left")
+        XCTAssertEqual(value(context, "at(0.3, 0.5)"), "0.500,0.750")
+        XCTAssertEqual(value(context, "at(0.7, 0.5)"), "0.500,0.250")
+        XCTAssertEqual(value(context, "at(0.05, 0.5)"), "none", "beside the screen touches nothing")
+        XCTAssertEqual(value(context, "pointOnDuoScreen(null, 0.5, 0.5)"), "null")
+        // The inverse of the server's turn (SimulatorDisplayRotation.framebufferRatio).
+        XCTAssertEqual(value(context, "JSON.stringify(pictureRatio({ x: 0.496, y: 0.832 }, 90))"), #"{"x":0.16800000000000004,"y":0.496}"#)
+        XCTAssertEqual(value(context, "JSON.stringify(pictureRatio({ x: 0.9, y: 0.25 }, 270))"), #"{"x":0.25,"y":0.09999999999999998}"#)
+        XCTAssertEqual(value(context, "JSON.stringify(pictureRatio({ x: 0.75, y: 0.9 }, 180))"), #"{"x":0.25,"y":0.09999999999999998}"#)
+        XCTAssertEqual(value(context, "JSON.stringify(pictureRatio({ x: 0.3, y: 0.4 }, 0))"), #"{"x":0.3,"y":0.4}"#)
+        XCTAssertEqual(value(context, "cssColorHex('rgb(27, 29, 32)')"), "1b1d20")
+        XCTAssertEqual(value(context, "cssColorHex('transparent')"), "000000")
+    }
+
     func testTheToolbarSaysHowTheDeviceIsFolded() throws {
         let context = try makeContext()
         XCTAssertEqual(value(context, "foldReadout({ hingeDegrees: 130, pose: 'book', panel: 'inner' })"), "book · 130° · inner")

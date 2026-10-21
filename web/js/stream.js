@@ -15,6 +15,9 @@ const screenState = {
   fold: null,       // a foldable's fold as the device reports it: hingeDegrees, posture, panel, pose
   foldable: false,  // more than one screen: touches name the one shown
   rotation: 0,      // degrees the frame on the canvas is turned (the lit screen's, once frames match it)
+  view3d: false,    // the stream is the folded device in 3D, not the lit screen
+  view3dUnavailable: "",   // why the 3D preview cannot be shown, when it cannot
+  projection: null, // where the lit panel lands on the 3D frame (Duo3DProjection)
   connection: "connecting",  // connecting | live | reconnecting | offline
   attempt: 0,
   retryAt: 0,
@@ -46,7 +49,7 @@ function renderConnectionLabel() {
 
 // ---- AVCC envelopes ----
 
-const avccTags = { 1: "description", 2: "keyframe", 3: "delta" };
+const avccTags = { 1: "description", 2: "keyframe", 3: "delta", 4: "projection" };
 class Demuxer {
   constructor() { this.buffer = new Uint8Array(0); }
   push(bytes) {
@@ -93,7 +96,7 @@ function updateBacking() {
 function paint(frame) {
   // The stream carries the lit screen's framebuffer; a picture turned on it
   // (the open inner panel of an iPhone Duo) is turned back upright here.
-  const rotation = frameRotation(frame.displayWidth, frame.displayHeight, screenState.display);
+  const rotation = screenState.view3d ? 0 : frameRotation(frame.displayWidth, frame.displayHeight, screenState.display);
   const quarter = rotation % 180 !== 0;
   const width = quarter ? frame.displayHeight : frame.displayWidth, height = quarter ? frame.displayWidth : frame.displayHeight;
   if (width !== screenState.width || height !== screenState.height || rotation !== screenState.rotation) {
@@ -173,7 +176,16 @@ async function runStream() {
   let decoder = null;
   try {
     const controller = streamAbort;
-    const response = await fetch("/stream.avcc", { signal: controller.signal, cache: "no-store" });
+    const view3d = screenState.view3d;
+    // The screen, or the folded device in 3D (`?view=3d…`).
+    const response = await fetch("/stream.avcc" + (view3d ? streamQuery3D() : ""), { signal: controller.signal, cache: "no-store" });
+    // No 3D to show (no model, the renderer failed): the flat screen, and why.
+    if (view3d && response.status === 503) {
+      let reason = "the 3D preview is unavailable";
+      try { reason = (await response.json()).error || reason; } catch (_) {}
+      leave3D(reason);
+      return;
+    }
     if (!response.ok || !response.body) throw new Error("the server answered " + response.status);
     const demuxer = new Demuxer();
     screenState.stillBytes = Infinity;
@@ -192,7 +204,9 @@ async function runStream() {
       if (done) break;
       if (!value) continue;
       for (const chunk of demuxer.push(value)) {
-        if (chunk.type === "description") {
+        if (chunk.type === "projection") {
+          try { screenState.projection = JSON.parse(new TextDecoder().decode(chunk.payload)); } catch (_) {}
+        } else if (chunk.type === "description") {
           if (decoder.state === "closed") throw new Error("the decoder closed");
           decoder.configure({ codec: avcCodecString(chunk.payload), description: chunk.payload, optimizeForLatency: true, hardwareAcceleration: "prefer-hardware" });
         } else if (decoder.state === "configured") {
@@ -257,7 +271,7 @@ function fitDevice() {
   device.style.setProperty("--dev-h", Math.floor(height) + "px");
   // The screen's own corner radii from its device type, in proportion — the
   // Duo's cover is tight on the hinge side; else ~55 pt on a 402 pt wide phone.
-  device.style.setProperty("--dev-radius", screenRadius(screenState.display, width) || Math.round(width * 0.137) + "px");
+  device.style.setProperty("--dev-radius", screenState.view3d ? "0px" : screenRadius(screenState.display, width) || Math.round(width * 0.137) + "px");
   updateBacking();
   updateReadoutSize();
   if (typeof drawRulers === "function") drawRulers();
@@ -270,6 +284,43 @@ function updateReadoutSize() {
 }
 
 new ResizeObserver(fitDevice).observe($("deviceArea"));
+
+// ---- The 3D preview ----
+// A foldable can be shown as the folded device in 3D, rendered on the server
+// from the device model in the user's Xcode, its lit panel live on it. The
+// frame is drawn on the stage's own colour, in the page's theme.
+
+function streamQuery3D() {
+  const stage = getComputedStyle($("stage")).backgroundColor;
+  return "?view=3d&theme=" + shownTheme() + "&bg=" + cssColorHex(stage);
+}
+
+function setView3D(on) {
+  if (on && (!screenState.foldable || screenState.view3dUnavailable)) return;
+  if (screenState.view3d === on) return;
+  screenState.view3d = on;
+  screenState.projection = null;
+  app.dataset.view = on ? "3d" : "screen";
+  store("view3d", on ? "1" : "0");
+  if (typeof renderFold === "function") renderFold();
+  restartStream();
+}
+
+// The 3D stream refused or ended for good: back to the flat screen, saying why.
+function leave3D(reason) {
+  screenState.view3dUnavailable = reason;
+  screenState.view3d = false;
+  screenState.projection = null;
+  app.dataset.view = "screen";
+  if (typeof renderFold === "function") renderFold();
+  toast("3D preview unavailable — " + reason, { error: true });
+  restartStream();
+}
+
+// A theme switch redraws the 3D frame on the new stage colour.
+function restyle3D() {
+  if (screenState.view3d) restartStream();
+}
 
 // The device's screens from /config or the event stream's `device` topic: the
 // lit one sets the points, the corners and how its frames turn.
@@ -288,8 +339,15 @@ function applyDisplays(displays, activeDisplay) {
 // Pointer position in points (or pixels until the point size is known).
 function pointerReadout(clientX, clientY) {
   const rect = canvas.getBoundingClientRect();
-  const fx = (clientX - rect.left) / rect.width, fy = (clientY - rect.top) / rect.height;
+  let fx = (clientX - rect.left) / rect.width, fy = (clientY - rect.top) / rect.height;
   if (fx < 0 || fy < 0 || fx > 1 || fy > 1) return "";
+  // On the 3D device: the point of the lit panel under the pointer, if any.
+  if (screenState.view3d) {
+    const fingers = deviceFingers({ x: fx, y: fy });
+    if (!fingers) return "";
+    fx = fingers.first.x;
+    fy = fingers.first.y;
+  }
   if (screenState.points) return "x " + Math.round(fx * screenState.points.width) + "  y " + Math.round(fy * screenState.points.height) + " pt";
   if (screenState.width) return "x " + Math.round(fx * screenState.width) + "  y " + Math.round(fy * screenState.height) + " px";
   return "";

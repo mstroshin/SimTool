@@ -78,6 +78,16 @@ the inspector — and ⌥1–6 switch inspector tabs, `/` filters the current li
 the viewer greys the last frame, says so, stops sending touches and reconnects
 by itself; a restarted server is noticed and its lists are reloaded.
 
+An iPhone Duo adds Closed, Book and Open buttons to the toolbar, the fold under
+the device (`book · 130° · inner`) and a **3D** button: the device itself,
+folded as it is and animated as it folds, its lit panel live on it, rendered on
+the server with RealityKit from the device model Device Hub draws it with
+(`V68.usdz`, read from the selected Xcode at run time — SimTool ships no Apple
+asset) and streamed like the screen. Clicks and drags on its screen land on
+that panel. Without the model — or with RealityKit's offscreen renderer
+missing (macOS 14) or failing — the button says why and the viewer stays on
+the flat screen; `simtool doctor` reports it as "iPhone Duo 3D preview".
+
 What an agent or a test run does to the device shows as it happens. Every touch
 from `simtool input`, the HTTP API or a YAML step is drawn on the screen in
 course ink — a ring where the finger went down, a stroke to where it lifted, a
@@ -837,6 +847,7 @@ GET /api/v1/devices
 GET /api/v1/metrics
 GET /api/v1/events (Server-Sent Events)
 GET /stream.avcc
+GET /stream.avcc?view=3d&theme=dark&bg=1b1d20
 GET /stream.jpeg
 GET /stream.mjpeg
 POST /api/v1/input
@@ -893,6 +904,14 @@ element) is called by it in the feed, never aimed by it.
 has confirmed applying (learned from its poll). A run that declares `mocks:`
 waits for the two to meet before its first step — otherwise the app can still be
 answering from the real backend while the test believes it is mocked.
+
+`/stream.avcc?view=3d` is a foldable's 3D preview in the screen stream's
+envelopes, `theme` choosing the shell's finish and `bg` the backdrop's colour;
+before each frame whose map moved it sends an envelope tagged 4 with JSON
+`{"pieces", "panel", "hinge", "width", "height"}` — per leaf of the lit panel
+the frame corners it lands on and the part of the panel's framebuffer it shows.
+It answers 503 with the reason when there is no 3D to show; `/config` says so
+ahead in `view3d` (`available`, `reason`).
 
 `screenshot` returns the full-resolution PNG by default; `maxDim` scales it so
 the longest edge fits the given pixel size — agents reading the screen pay for

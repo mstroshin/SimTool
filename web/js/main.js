@@ -29,6 +29,9 @@ function applyConfig(config) {
   $("sbVersion").textContent = config.version ? "simtool " + config.version : "";
   applyDisplays(config.displays, config.activeDisplay);
   applyFold(config.fold);
+  applyView3D(config.view3d);
+  // A viewer that left a foldable in 3D finds it in 3D again.
+  if (screenState.foldable && !screenState.view3d && stored("view3d", "0") === "1") setView3D(true);
 }
 
 // A new server: everything numbered by the old one is stale.

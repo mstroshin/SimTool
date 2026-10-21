@@ -48,6 +48,20 @@ final class InputRouteTests: XCTestCase {
         }
     }
 
+    // A device without a fold has no 3D preview: 503 and why, not an empty stream.
+    func testThe3DStreamOfADeviceThatDoesNotFoldIsRefusedWithTheReason() async throws {
+        let port = try availablePort()
+        let device = SimulatorDevice(udid: "TEST-UDID", name: "iPhone", runtime: "iOS", state: "Booted", isAvailable: true)
+        let server = StreamServer(config: StreamServerConfig(host: "127.0.0.1", port: port, device: device, captureEnabled: false))
+        try server.start()
+        defer { server.stop() }
+        let (data, response) = try await URLSession.shared.data(from: URL(string: "http://127.0.0.1:\(port)/stream.avcc?view=3d")!)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 503)
+        XCTAssertTrue(String(decoding: data, as: UTF8.self).contains("only a foldable device has a 3D preview"))
+        let config = try JSONDecoder().decode(ServerConfigPayload.self, from: try await URLSession.shared.data(from: URL(string: "http://127.0.0.1:\(port)/config")!).0)
+        XCTAssertNil(config.view3d, "a phone says nothing about 3D")
+    }
+
     func testPasteActionWithoutTextFailsBeforeTouchingTheSimulator() async throws {
         let port = try availablePort()
         let device = SimulatorDevice(udid: "TEST-UDID", name: "iPhone", runtime: "iOS", state: "Booted", isAvailable: true)

@@ -182,3 +182,55 @@ final class FoldableReadinessTests: XCTestCase {
         XCTAssertNil(FoldableReadiness.isInputShadowed(notifyutil: ""))
     }
 }
+
+final class Duo3DModelTests: XCTestCase {
+    private let duo = SimulatorDisplayLayout(displays: [
+        SimulatorDisplay(id: "primary", screenID: 1, role: "cover", width: 1398, height: 2034, scale: 3),
+        SimulatorDisplay(id: "primary-1", screenID: 3, role: "inner", width: 2007, height: 2853, scale: 3),
+    ], productClass: "V68")
+
+    /// A stand-in for an Xcode: `Contents/Developer` beside `Contents/SharedFrameworks`.
+    private func xcode(withModel model: String?) throws -> String {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("Xcode-\(UUID().uuidString).app/Contents")
+        addTeardownBlock { try? FileManager.default.removeItem(at: root.deletingLastPathComponent()) }
+        let developer = root.appendingPathComponent("Developer")
+        try FileManager.default.createDirectory(at: developer, withIntermediateDirectories: true)
+        let resources = root.appendingPathComponent("SharedFrameworks/DeviceKit.framework/Versions/A/PlugIns/CoreDevicePopDeviceKitExtension.devicekitplugin/Contents/Resources")
+        try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
+        if let model { try Data("usdz".utf8).write(to: resources.appendingPathComponent(model)) }
+        return developer.path
+    }
+
+    func testTheModelIsFoundInTheSelectedXcodeByProductClass() throws {
+        let developer = try xcode(withModel: "V68.usdz")
+        let located = Duo3DModel.locate(layout: duo, developerDir: developer)
+        XCTAssertEqual(located.url?.lastPathComponent, "V68.usdz")
+        XCTAssertNil(located.reason)
+    }
+
+    func testWithoutAModelThePreviewSaysWhy() throws {
+        let developer = try xcode(withModel: nil)
+        let missing = Duo3DModel.locate(layout: duo, developerDir: developer)
+        XCTAssertNil(missing.url)
+        XCTAssertTrue(missing.reason?.contains("has no V68.usdz device model") == true, missing.reason ?? "")
+        let phone = SimulatorDisplayLayout(displays: [SimulatorDisplay(id: "primary", screenID: 1, width: 1206, height: 2622, scale: 3)])
+        XCTAssertEqual(Duo3DModel.locate(layout: phone, developerDir: developer).reason, "only a foldable device has a 3D preview")
+        var unnamed = duo
+        unnamed.productClass = nil
+        XCTAssertTrue(Duo3DModel.locate(layout: unnamed, developerDir: developer).reason?.contains("no product class") == true)
+    }
+
+    func testTheDeviceTypeBundleNamesItsProductClass() throws {
+        let bundle = FileManager.default.temporaryDirectory.appendingPathComponent("Duo-\(UUID().uuidString).simdevicetype")
+        addTeardownBlock { try? FileManager.default.removeItem(at: bundle) }
+        let resources = bundle.appendingPathComponent("Contents/Resources")
+        try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
+        try SimulatorDisplaysTests.duoCapabilities.write(to: resources.appendingPathComponent("capabilities.plist"))
+        let profile = try PropertyListSerialization.data(fromPropertyList: ["productClass": "V68", "modelIdentifier": "iPhone19,4"], format: .xml, options: 0)
+        try profile.write(to: resources.appendingPathComponent("profile.plist"))
+        let layout = try XCTUnwrap(SimulatorDisplayLayout.load(bundlePath: bundle.path, deviceType: FoldableReadiness.duoDeviceType))
+        XCTAssertEqual(layout.productClass, "V68")
+        XCTAssertEqual(layout.bundlePath, bundle.path)
+        XCTAssertTrue(layout.isFoldable)
+    }
+}

@@ -58,10 +58,17 @@ public struct SimulatorDisplay: Codable, Equatable, Sendable {
 public struct SimulatorDisplayLayout: Codable, Equatable, Sendable {
     public var deviceType: String?
     public var displays: [SimulatorDisplay]
+    /// The device type's product class (`V68` for the iPhone Duo): what Xcode
+    /// names its 3D device model after.
+    public var productClass: String?
+    /// The device type's bundle (`….simdevicetype`).
+    public var bundlePath: String?
 
-    public init(deviceType: String? = nil, displays: [SimulatorDisplay]) {
+    public init(deviceType: String? = nil, displays: [SimulatorDisplay], productClass: String? = nil, bundlePath: String? = nil) {
         self.deviceType = deviceType
         self.displays = displays
+        self.productClass = productClass
+        self.bundlePath = bundlePath
     }
 
     /// More than one screen: a foldable. Everything that names a screen, turns
@@ -133,10 +140,16 @@ public struct SimulatorDisplayLayout: Codable, Equatable, Sendable {
     /// The screens of a device type bundle (`….simdevicetype`), or nil when it
     /// declares none.
     public static func load(bundlePath: String, deviceType: String? = nil) -> SimulatorDisplayLayout? {
-        let file = URL(fileURLWithPath: bundlePath).appendingPathComponent("Contents/Resources/capabilities.plist")
-        guard let data = try? Data(contentsOf: file) else { return nil }
-        let layout = parse(capabilities: data, deviceType: deviceType)
-        return layout.displays.isEmpty ? nil : layout
+        let resources = URL(fileURLWithPath: bundlePath).appendingPathComponent("Contents/Resources")
+        guard let data = try? Data(contentsOf: resources.appendingPathComponent("capabilities.plist")) else { return nil }
+        var layout = parse(capabilities: data, deviceType: deviceType)
+        guard !layout.displays.isEmpty else { return nil }
+        layout.bundlePath = bundlePath
+        if let profile = try? Data(contentsOf: resources.appendingPathComponent("profile.plist")),
+           let plist = try? PropertyListSerialization.propertyList(from: profile, format: nil) as? [String: Any] {
+            layout.productClass = plist["productClass"] as? String
+        }
+        return layout
     }
 
     /// The screens of a device type, found through `simctl list devicetypes`.

@@ -144,6 +144,8 @@ public struct ServerConfigPayload: Codable, Equatable, Sendable {
     public var activeDisplay: String?
     /// How a foldable is folded, as the device reports it.
     public var fold: SimulatorFoldState?
+    /// Whether the 3D preview (`/stream.avcc?view=3d`) can be shown, and why not.
+    public var view3d: ServerView3DPayload?
 
     public init(
         device: String,
@@ -160,7 +162,8 @@ public struct ServerConfigPayload: Codable, Equatable, Sendable {
         deviceType: String? = nil,
         displays: [ServerDisplayPayload]? = nil,
         activeDisplay: String? = nil,
-        fold: SimulatorFoldState? = nil
+        fold: SimulatorFoldState? = nil,
+        view3d: ServerView3DPayload? = nil
     ) {
         self.device = device
         self.udid = udid
@@ -177,6 +180,18 @@ public struct ServerConfigPayload: Codable, Equatable, Sendable {
         self.displays = displays
         self.activeDisplay = activeDisplay
         self.fold = fold
+        self.view3d = view3d
+    }
+}
+
+/// The 3D preview of a foldable: available, or why not.
+public struct ServerView3DPayload: Codable, Equatable, Sendable {
+    public var available: Bool
+    public var reason: String?
+
+    public init(available: Bool, reason: String? = nil) {
+        self.available = available
+        self.reason = reason
     }
 }
 

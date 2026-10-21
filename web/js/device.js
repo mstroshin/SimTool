@@ -38,9 +38,14 @@ async function foldTo(pose) {
   }
 }
 
-// Shown only for a foldable: the pose it rests at pressed, the hinge beside it.
+// Shown only for a foldable: the pose it rests at pressed, the hinge beside it,
+// and the 3D preview's switch — off, with the reason, when there is none.
 function renderFold() {
   $("foldGroup").hidden = !screenState.foldable;
+  const view = $("view3dButton");
+  view.setAttribute("aria-pressed", String(screenState.view3d));
+  view.disabled = !!screenState.view3dUnavailable || app.dataset.mode === "replay";
+  view.dataset.tip = screenState.view3dUnavailable ? "3D preview unavailable — " + screenState.view3dUnavailable : (screenState.view3d ? "Show the screen" : "Show the device in 3D");
   const fold = screenState.fold || {};
   for (const button of $("foldGroup").querySelectorAll("[data-pose]")) {
     button.setAttribute("aria-pressed", String(fold.pose === button.dataset.pose));
@@ -53,6 +58,12 @@ function renderFold() {
 
 function applyFold(fold) {
   screenState.fold = fold || null;
+  renderFold();
+}
+
+function applyView3D(view) {
+  screenState.view3dUnavailable = view && !view.available ? (view.reason || "unavailable") : "";
+  if (screenState.view3dUnavailable && screenState.view3d) leave3D(screenState.view3dUnavailable);
   renderFold();
 }
 function pressShake() { deviceAction("Shake", { action: "shake" }, "Shake sent"); }
@@ -258,6 +269,18 @@ function canvasRatio(event) {
   return { x: clamp01((event.clientX - rect.left) / rect.width), y: clamp01((event.clientY - rect.top) / rect.height) };
 }
 
+// The finger(s) as the device takes them: the canvas point itself, or in 3D
+// the point of the lit panel's picture under it — null off its screen.
+function deviceFingers(point, second) {
+  if (!screenState.view3d) return { first: point, second: second || null };
+  const map = (at) => {
+    const raw = at && pointOnDuoScreen(screenState.projection, at.x, at.y);
+    return raw && screenState.display ? pictureRatio(raw, screenState.display.rotation || 0) : null;
+  };
+  const first = map(point);
+  return first ? { first, second: second ? map(second) : null } : null;
+}
+
 // Alt adds a second finger mirrored through the screen center, so spreading
 // or circling the pointer pinches or rotates. Alt+Shift keeps the pair's
 // offset instead: a two-finger pan.
@@ -302,7 +325,8 @@ function endTouch() {
   const ending = touch;
   touch = null;
   clearTimeout(ending.holdTimer);
-  touchStream.up(ending.point, ending.second);
+  const sent = deviceFingers(ending.point, ending.second) || ending.sent;
+  touchStream.up(sent.first, sent.second);
   hideDots();
 }
 
@@ -327,12 +351,15 @@ canvas.addEventListener("pointerdown", (event) => {
   const point = canvasRatio(event);
   const mode = event.altKey ? (event.shiftKey ? "pan2" : "pinch") : "one";
   const second = mode === "one" ? null : { x: clamp01(1 - point.x), y: clamp01(1 - point.y) };
+  // In 3D a press beside the device's screen touches nothing.
+  const sent = deviceFingers(point, second);
+  if (!sent) return;
   touch = {
-    pointerId: event.pointerId, mode, point, second,
+    pointerId: event.pointerId, mode, point, second, sent,
     offset: second ? { x: second.x - point.x, y: second.y - point.y } : null,
     startX: event.clientX, startY: event.clientY, held: false, holdTimer: null
   };
-  touchStream.down(point, second);
+  touchStream.down(sent.first, sent.second);
   showDots(point, second, "");
   touch.holdTimer = setTimeout(() => {
     if (!touch) return;
@@ -361,7 +388,9 @@ canvas.addEventListener("pointermove", (event) => {
     clearTimeout(touch.holdTimer);
     touch.holdTimer = null;
   }
-  touchStream.move(touch.point, touch.second);
+  // A finger dragged off the 3D screen stays where it last touched it.
+  touch.sent = deviceFingers(touch.point, touch.second) || touch.sent;
+  touchStream.move(touch.sent.first, touch.sent.second);
   showDots(touch.point, touch.second, touch.held ? "held" : "");
 });
 
@@ -410,20 +439,28 @@ canvas.addEventListener("wheel", (event) => {
     const point = canvasRatio(event);
     return { x: Math.min(1 - WHEEL_INSET, Math.max(WHEEL_INSET, point.x)), y: Math.min(1 - WHEEL_INSET, Math.max(WHEEL_INSET, point.y)) };
   };
+  // Each wheel finger position goes to the device as the canvas maps it (3D: onto the lit panel).
+  const send = (kind, at) => {
+    const sent = deviceFingers(at);
+    if (sent) wheel.sent = sent.first;
+    if (sent || kind !== "down") touchStream[kind](wheel.sent);
+  };
   if (!wheel) {
-    wheel = { point: anchor(), timer: null };
-    touchStream.down(wheel.point);
+    const start = anchor();
+    if (!deviceFingers(start)) return;
+    wheel = { point: start, timer: null, sent: null };
+    send("down", wheel.point);
   }
   let next = { x: wheel.point.x + dx, y: wheel.point.y + dy };
   const inside = (value) => value >= WHEEL_INSET / 2 && value <= 1 - WHEEL_INSET / 2;
   if (!inside(next.x) || !inside(next.y)) {
-    touchStream.up(wheel.point);
+    send("up", wheel.point);
     const start = anchor();
-    touchStream.down(start);
+    send("down", start);
     next = { x: clamp01(start.x + dx), y: clamp01(start.y + dy) };
   }
   wheel.point = next;
-  touchStream.move(next);
+  send("move", next);
   showDots(next, null, "wheel");
   clearTimeout(wheel.timer);
   wheel.timer = setTimeout(endWheelDrag, WHEEL_IDLE_MS);
@@ -434,7 +471,8 @@ function endWheelDrag() {
   const ending = wheel;
   wheel = null;
   clearTimeout(ending.timer);
-  touchStream.up(ending.point);
+  const sent = deviceFingers(ending.point);
+  touchStream.up(sent ? sent.first : ending.sent);
   if (!touch) hideDots();
 }
 
@@ -532,6 +570,7 @@ document.addEventListener("focusout", () => setTimeout(updateKeyboardIndicator, 
 
 $("homeButton").addEventListener("click", pressHome);
 for (const button of $("foldGroup").querySelectorAll("[data-pose]")) button.addEventListener("click", () => foldTo(button.dataset.pose));
+$("view3dButton").addEventListener("click", () => setView3D(!screenState.view3d));
 $("screenshotButton").addEventListener("click", saveScreenshot);
 $("shakeButton").addEventListener("click", pressShake);
 $("softKeyboardButton").addEventListener("click", toggleSoftwareKeyboard);

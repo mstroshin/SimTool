@@ -89,6 +89,14 @@ final class SimToolCommandSurfaceTests: XCTestCase {
         XCTAssertNil(drag.velocity)
     }
 
+    func testThe3DRendererTakesEachPanelsFramebuffer() throws {
+        XCTAssertTrue(SimTool.configuration.subcommands.contains { $0 == DuoRender.self })
+        XCTAssertFalse(DuoRender.configuration.shouldDisplay, "the server starts it; nobody types it")
+        XCTAssertEqual(DuoRender.size("2007x2853")?.width, 2007)
+        XCTAssertNil(DuoRender.size("2007"))
+        XCTAssertNil(DuoRender.size(nil))
+    }
+
     func testInputFoldsAFoldableOrReadsItsFold() throws {
         let names = Input.configuration.subcommands.map { commandName(for: $0) }
         XCTAssertTrue(names.contains("pose"))

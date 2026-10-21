@@ -85,6 +85,8 @@ public final class StreamServer: @unchecked Sendable {
     private let displays = DeviceDisplays()
     private var displayMonitor: DisplayStateMonitor?
     private var foldMonitor: FoldMonitor?
+    /// A foldable's 3D preview, rendered while a viewer watches it.
+    private var duo3D: Duo3DStream?
     /// The fold last told to the activity feed, and a viewer update or a
     /// settle check already on its way.
     private var recordedFold: SimulatorFoldState?
@@ -164,6 +166,8 @@ public final class StreamServer: @unchecked Sendable {
         let monitor = DisplayStateMonitor(deviceUDID: config.device.udid, layout: layout) { [weak self] state in
             self?.displayStateChanged(state)
         }
+        let executable = Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])
+        stateLock.withLock { duo3D = Duo3DStream(deviceUDID: config.device.udid, executable: executable) }
         let fold = FoldMonitor(deviceUDID: config.device.udid) { [weak self] state, panelSwitched in
             self?.foldChanged(state, panelSwitched: panelSwitched)
         }
@@ -180,6 +184,7 @@ public final class StreamServer: @unchecked Sendable {
     /// where the fold comes to rest goes to the activity feed.
     private func foldChanged(_ fold: SimulatorFoldState, panelSwitched: Bool) {
         guard displays.set(fold: fold) else { return }
+        update3D()
         if panelSwitched, let monitor = stateLock.withLock({ displayMonitor }) {
             Task { await monitor.refresh() }
         }
@@ -231,7 +236,22 @@ public final class StreamServer: @unchecked Sendable {
         activity.record(actor: .viewer, via: "device", kind: "pose", title: "Folded to " + (fold.pose ?? fold.hingeDegrees.map(SimulatorFoldState.degrees) ?? "an unknown pose"), detail: fold.summary)
     }
 
+    /// Whether the 3D preview can be shown, with the model it renders, or why not.
+    private func view3D() -> (url: URL?, reason: String?) {
+        let located = Duo3DModel.locate(layout: displays.current.layout, developerDir: DeveloperFrameworks.developerDir())
+        if located.url != nil, let failure = stateLock.withLock({ duo3D })?.recentFailure { return (nil, failure) }
+        return located
+    }
+
+    /// Where the 3D preview's hinge and lit panel stand.
+    private func update3D() {
+        guard let stream = stateLock.withLock({ duo3D }) else { return }
+        let role = displays.activeDisplay?.role ?? "cover"
+        stream.update(panel: role, hinge: displays.fold?.hingeDegrees ?? (role == "cover" ? 0 : 180))
+    }
+
     private func displayStateChanged(_ state: SimulatorDisplayState) {
+        defer { update3D() }
         guard displays.set(state: state), let layout = displays.current.layout else { return }
         // Touches follow the panel without asking CoreDevice each time.
         let directInput = directInput, udid = config.device.udid
@@ -244,6 +264,7 @@ public final class StreamServer: @unchecked Sendable {
     public func stop() {
         stateLock.withLock { displayMonitor }?.stop()
         stateLock.withLock { foldMonitor }?.stop()
+        stateLock.withLock { duo3D }?.stop()
         inspectorEvents.closeAll()
         testDefinitionsWatcher?.stop()
         testDefinitionsWatcher = nil
@@ -747,7 +768,8 @@ public final class StreamServer: @unchecked Sendable {
             }
         }
 
-        server["/stream.avcc"] = { _ in
+        server["/stream.avcc"] = { request in
+            if request.queryValue("view") == "3d" { return self.stream3DResponse(request) }
             let client = self.clientManager.addAvccClient()
             return .raw(200, "OK", [
                 "Content-Type": "application/octet-stream",
@@ -768,6 +790,35 @@ public final class StreamServer: @unchecked Sendable {
                 semaphore.wait()
                 self.clientManager.removeAvccClient(client)
             }
+        }
+    }
+
+    /// `/stream.avcc?view=3d&theme=dark&bg=1b1d20`: the 3D preview, in the
+    /// same envelopes as the screen plus each frame's projection. 503 with the
+    /// reason when there is none to show.
+    private func stream3DResponse(_ request: HttpRequest) -> HttpResponse {
+        let view = view3D()
+        guard let model = view.url, let layout = displays.current.layout, let stream = stateLock.withLock({ duo3D }) else {
+            return errorResponse(SimToolError(view.reason ?? "the 3D preview is not running"), statusCode: 503, reason: "Service Unavailable")
+        }
+        let background = request.queryValue("bg").flatMap { $0.count == 6 && Int($0, radix: 16) != nil ? "#" + $0 : nil } ?? "#000000"
+        let look = Duo3DStream.Look(dark: request.queryValue("theme") != "light", background: background)
+        let role = displays.activeDisplay?.role ?? "cover"
+        let hinge = displays.fold?.hingeDegrees ?? (role == "cover" ? 0 : 180)
+        return .raw(200, "OK", [
+            "Content-Type": "application/octet-stream",
+            "Cache-Control": "no-cache, no-store",
+            "Connection": "keep-alive",
+        ]) { writer in
+            let client = Duo3DStream.Client { data in (try? writer.write(data)) != nil }
+            do {
+                try stream.attach(client, model: model, layout: layout, panel: role, hinge: hinge, look: look)
+            } catch {
+                DebugLog.write("duo3d", "cannot start the renderer: \(error.localizedDescription)")
+                return
+            }
+            client.ended.wait()
+            stream.detach(client)
         }
     }
 
@@ -919,7 +970,8 @@ public final class StreamServer: @unchecked Sendable {
             deviceType: displays.current.layout?.deviceType ?? config.device.deviceTypeIdentifier,
             displays: displays.current.layout == nil ? nil : displays.payloads,
             activeDisplay: displays.activeDisplay?.id,
-            fold: displays.fold
+            fold: displays.fold,
+            view3d: displays.isFoldable ? { let view = view3D(); return ServerView3DPayload(available: view.url != nil, reason: view.reason) }() : nil
         )
     }
 

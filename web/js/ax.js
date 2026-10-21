@@ -40,8 +40,9 @@ function setAxPick(on) {
 }
 
 // Picking happens on the live screen, with the Accessibility tab in view.
+// Picking reads the screen in points: not on the 3D device.
 function axPickActive() {
-  return ax.pick && inspector.open && inspector.tab === "ax" && app.dataset.mode !== "replay" && !!ax.tree;
+  return ax.pick && inspector.open && inspector.tab === "ax" && app.dataset.mode !== "replay" && !!ax.tree && !screenState.view3d;
 }
 
 function updateAxMode() {
