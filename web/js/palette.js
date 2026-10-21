@@ -11,6 +11,7 @@ function paletteCommands() {
     capture.recording ? ["Device", "stop", "Stop recording and save the video", "⌘R", stopRecording] : ["Device", "record", "Record video", "⌘R", startRecording],
     ["Device", "bezel", capture.bezel ? "Screenshots and videos: the screen only" : "Screenshots and videos: with the device bezel", "", () => setCaptureBezel(!capture.bezel)],
     ["Device", "shake", "Shake", "⌃⌘Z", pressShake],
+    ...(screenState.foldable ? [] : [["Device", "rotate", "Rotate left", "⌘←", () => rotateDevice("left")], ["Device", "rotate", "Rotate right", "⌘→", () => rotateDevice("right")]]),
     ["Device", "keyboard", "Show or hide the software keyboard", keyboardBridge.enabled ? "⌘K" : "", toggleSoftwareKeyboard],
     ["Device", "laptop", keyboardBridge.enabled ? "Disconnect the Mac keyboard" : "Connect the Mac keyboard — type into the simulator", "⇧⌘K", () => setKeyboardMode(!keyboardBridge.enabled)],
     ["Device", "paste", "Paste the Mac clipboard", "⌘V", pasteFromClipboard],
@@ -71,8 +72,26 @@ function deviceSettingCommands() {
     ["Settings", "battery", "Status bar: 9:41 for screenshots", "", () => statusBarPreset("clean")],
     ["Settings", "battery", "Status bar: clear the overrides", "", () => statusBarPreset("clear")],
     ["Settings", "pin", "Clear the simulated location", "", clearLocation],
-    ["Settings", "bell", "Send a push notification…", "", () => { openTab("device"); pushPayload.focus(); }]
+    ["Settings", "bell", "Send a push notification…", "", () => { openTab("device"); pushPayload.focus(); }],
+    ["Settings", "key", "Keychain: add a root certificate…", "", () => certificateFile.click()],
+    ["Settings", "trash", "Keychain: reset", "", resetKeychain]
   ];
+  const ax = data.accessibility || {};
+  for (const [option, key, title] of AX_SWITCHES) {
+    commands.push(["Accessibility", "pick", (ax[key] ? "Turn off " : "Turn on ") + title, "", () => setAccessibility(option, ax[key] ? "off" : "on", title + (ax[key] ? " off" : " on"))]);
+  }
+  commands.push(["Accessibility", "filter", "Color filters…", "", () => { openTab("device"); colorFilterSelect.focus(); }]);
+  if (ax.liquidGlass) {
+    const other = ax.liquidGlass === "tinted" ? "clear" : "tinted";
+    commands.push(["Accessibility", "layers", "Liquid Glass: " + other, "", () => setAccessibility("liquid-glass", other, "Liquid Glass " + other)]);
+  }
+  if (deviceInfo.app) {
+    commands.push(
+      ["App", "panel", "Show " + deviceInfo.app + " in the Finder", "", () => revealApp("bundle")],
+      ["App", "panel", "Show " + deviceInfo.app + "'s data container in the Finder", "", () => revealApp("data")],
+      ["App", "check", "Permissions of " + deviceInfo.app + "…", "", () => { openTab("device"); permissionRows.scrollIntoView({ block: "start" }); }]
+    );
+  }
   for (const [option, title] of DEBUG_OPTIONS) {
     commands.push(["Debug", option === "slow-animations" ? "slow" : "layers", (debug[option] ? "Turn off " : "Turn on ") + title, "", () => setDebugOption(option, !debug[option])]);
   }
@@ -186,7 +205,7 @@ function showShortcuts() {
   openPopover($("paletteButton"),
     "<p><b>⇧⌘P</b> commands · <b>⌥1–7</b> inspector tabs · <b>⌥⌘0</b> show or hide the inspector · <b>/</b> filter</p>" +
     "<p><b>↑ ↓</b> move in a list · <b>Enter</b> open · <b>Esc</b> close · <b>⇧F10</b> the row's menu</p>" +
-    "<p><b>⇧⌘H</b> Home · <b>⌃⇧⌘H</b> or a double-click on Home: the app switcher · <b>⌘S</b> screenshot · <b>⌘R</b> record video, again to save it · <b>⌃⌘Z</b> shake · <b>⇧⌘K</b> connect the Mac keyboard (⇧⌘K again releases it) · <b>⌘K</b> software keyboard while typing</p>" +
+    "<p><b>⇧⌘H</b> Home · <b>⌃⇧⌘H</b> or a double-click on Home: the app switcher · <b>⌘S</b> screenshot · <b>⌘R</b> record video, again to save it · <b>⌃⌘Z</b> shake · <b>⌘←</b> <b>⌘→</b> rotate · <b>⇧⌘K</b> connect the Mac keyboard (⇧⌘K again releases it) · <b>⌘K</b> software keyboard while typing</p>" +
     "<p><b>⌥-drag</b> pinch or rotate · <b>⌥⇧-drag</b> two-finger pan · the wheel scrolls · <b>P</b> picks elements in Accessibility · <b>⌘↩</b> runs the selected test</p>");
 }
 
@@ -221,6 +240,8 @@ document.addEventListener("keydown", (event) => {
   if (event.altKey && !meta && /^Digit[1-7]$/.test(event.code)) { event.preventDefault(); openTab(TABS[Number(event.code.slice(5)) - 1]); return; }
   if (meta && event.key === "Enter" && inspector.tab === "tests" && tests.view === "tests" && tests.selectedFile) { event.preventDefault(); runTest(tests.selectedFile); return; }
   if (editing || keyboardBridge.enabled) return;
+  // Simulator.app's Rotate Left and Right; with the Mac keyboard connected ⌘← and ⌘→ edit text in the device.
+  if (event.metaKey && !event.shiftKey && !event.altKey && !event.ctrlKey && (event.key === "ArrowLeft" || event.key === "ArrowRight")) { event.preventDefault(); if (!event.repeat) rotateDevice(event.key === "ArrowLeft" ? "left" : "right"); return; }
   if (meta && event.code === "KeyF" && inspector.open) { event.preventDefault(); focusFilter(); return; }
   if (event.key === "/" && !meta && !event.altKey) { event.preventDefault(); focusFilter(); return; }
   if (event.code === "KeyP" && !meta && !event.altKey && !event.shiftKey && inspector.tab === "ax" && inspector.open) { event.preventDefault(); setAxPick(!ax.pick); return; }

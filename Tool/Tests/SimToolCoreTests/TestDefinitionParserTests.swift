@@ -177,6 +177,33 @@ final class TestDefinitionParserTests: XCTestCase {
         }
     }
 
+    func testParsesPermissionAndRotateSteps() throws {
+        let test = try TestDefinitionParser.parse("""
+        steps:
+          - permission: { camera: deny }
+          - permission: { location: always }
+          - rotate: landscape-left
+          - rotate: Right
+        """)
+        XCTAssertEqual(test.steps.map(\.action), [
+            .device(DeviceControlPayload(action: "permission", option: "camera", value: "deny")),
+            .device(DeviceControlPayload(action: "permission", option: "location", value: "always")),
+            .rotate("landscape-left"),
+            .rotate("right"),
+        ])
+        XCTAssertEqual(test.steps.map(\.description), ["Deny Camera", "Always allow Location", "Rotate to landscape left", "Rotate right"])
+        for (step, expected) in [
+            ("- permission: { camera: deny, microphone: deny }", "names one permission"),
+            ("- permission: { bluetooth: grant }", "unknown permission `bluetooth`"),
+            ("- permission: { camera: always }", "takes grant, deny or reset."),
+            ("- rotate: sideways", "`rotate:` takes portrait"),
+        ] {
+            XCTAssertThrowsError(try TestDefinitionParser.parse("steps:\n  \(step)\n"), step) { error in
+                XCTAssertTrue("\(error)".contains(expected), "\(step) → \(error)")
+            }
+        }
+    }
+
     func testLongPressDurationIsOptional() throws {
         let test = try TestDefinitionParser.parse("""
         steps:
@@ -581,17 +608,18 @@ final class TestDefinitionParserTests: XCTestCase {
         XCTAssertEqual(test.reset.launchArguments, ["-AppleLanguages", "(es)", "-AppleLocale", "es_ES"])
     }
 
-    /// The notification prompt has no simctl backdoor, so accepting it in the
-    /// schema would mean silently doing nothing — the exact failure this design
-    /// is trying to remove.
-    func testRejectsNotificationPermissionWithExplanation() {
-        XCTAssertThrowsError(try TestDefinitionParser.parse("""
+    /// Notifications, Face ID and the rest simctl does not take are SimTool's
+    /// own to set, so a test pre-answers them like any other.
+    func testTakesThePermissionsSimctlDoesNotSet() throws {
+        let test = try TestDefinitionParser.parse("""
         reset:
-          permissions: { notifications: deny }
+          permissions: { notifications: deny, faceid: grant, camera: reset }
         steps:
           - wait: 1
-        """)) { error in
-            XCTAssertTrue("\(error)".contains("no simctl backdoor"))
+        """)
+        XCTAssertEqual(test.reset.permissions.map(\.service), ["camera", "faceid", "notifications"])
+        XCTAssertThrowsError(try TestDefinitionParser.parse("reset:\n  permissions: { bluetooth: grant }\nsteps:\n  - wait: 1\n")) { error in
+            XCTAssertTrue("\(error)".contains("unknown service `bluetooth`"))
         }
     }
 

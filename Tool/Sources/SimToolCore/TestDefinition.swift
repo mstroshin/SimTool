@@ -52,6 +52,8 @@ import Yams
 ///   - push: { aps: { alert: "Hello" } }
 ///   - location: "37.3349,-122.0090"
 ///   - statusBar: { time: "9:41", batteryLevel: 100 }
+///   - permission: { camera: deny } # one permission of the test's app
+///   - rotate: landscape-left      # or right / left: a quarter turn
 ///   - wait: 2
 /// ```
 ///
@@ -264,11 +266,14 @@ public struct TestPermission: Equatable, Sendable {
     /// directly in the device's TCC database instead.
     public static let appTrackingService = "att"
 
-    /// Services `xcrun simctl privacy` accepts, plus `att`.
+    /// Services `xcrun simctl privacy` accepts, plus `att` and the ones SimTool
+    /// sets itself (`SimulatorPermission`): notifications, Face ID, speech
+    /// recognition, tracking.
     public static let knownServices: [String] = [
         appTrackingService,
         "all", "calendar", "contacts-limited", "contacts", "location", "location-always",
         "photos-add", "photos", "media-library", "microphone", "motion", "reminders", "siri",
+        "notifications", "camera", "speech", "faceid", "user-tracking", "pasteboard",
     ]
 }
 
@@ -380,15 +385,17 @@ public enum TestStepAction: Equatable, Sendable, CustomStringConvertible {
     /// Folds a foldable (iPhone Duo): closed, book, open or a hinge angle.
     case pose(SimulatorPose)
     /// Changes a setting of the device or acts on it: appearance, text size,
-    /// biometrics, a push, the location, the status bar.
+    /// biometrics, a push, the location, the status bar, a permission.
     case device(DeviceControlPayload)
+    /// Turns the device: an orientation, or `left` / `right` a quarter.
+    case rotate(String)
     case pause(Double)
 
     /// Whether this action checks a result, and so may carry a `criterion:`.
     public var isAssertion: Bool {
         switch self {
         case .waitFor, .assertHidden: true
-        case .tap, .longPress, .type, .swipe, .scroll, .fling, .drag, .keyboard, .pose, .device, .pause: false
+        case .tap, .longPress, .type, .swipe, .scroll, .fling, .drag, .keyboard, .pose, .device, .rotate, .pause: false
         }
     }
 
@@ -409,6 +416,7 @@ public enum TestStepAction: Equatable, Sendable, CustomStringConvertible {
         case .keyboard(let visible): visible ? "Show keyboard" : "Hide keyboard"
         case .pose(let pose): "Fold to \(pose)"
         case .device(let control): DeviceActivityWording.describe(control: control).title
+        case .rotate(let orientation): DeviceActivityWording.describe(SimulatorInputPayload(action: "rotate", name: orientation), action: "rotate").title
         case .pause(let seconds): "Pause \(seconds.formatted())s"
         }
     }
@@ -716,10 +724,7 @@ public enum TestDefinitionParser {
             for (service, rawDecision) in mapping.sorted(by: { $0.key < $1.key }) {
                 guard TestPermission.knownServices.contains(service) else {
                     let known = TestPermission.knownServices.joined(separator: ", ")
-                    let extra = service == "notifications"
-                        ? " The notification prompt has no simctl backdoor: answer it once by hand and it stays answered for that install."
-                        : ""
-                    throw SimToolError("`reset.permissions`: unknown service `\(service)`. Known services: \(known).\(extra)")
+                    throw SimToolError("`reset.permissions`: unknown service `\(service)`. Known services: \(known).")
                 }
                 let text = scalarString(rawDecision)
                 guard let decision = TestPermission.Decision(rawValue: text) else {
@@ -913,10 +918,16 @@ public enum TestDefinitionParser {
             }
         case "wait":
             action = .pause(try seconds(value, context: context))
-        case "appearance", "textSize", "contrast", "biometrics", "push", "location", "statusBar":
+        case "appearance", "textSize", "contrast", "biometrics", "push", "location", "statusBar", "permission":
             action = .device(try deviceControl(keyword, value, context: context))
+        case "rotate":
+            let orientation = scalarString(value).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard ["left", "right"].contains(orientation.lowercased()) || SimulatorOrientation(parsing: orientation) != nil else {
+                throw SimToolError("\(context): `rotate:` takes portrait, landscape-left, landscape-right, upside-down, left or right.")
+            }
+            action = .rotate(orientation.lowercased())
         default:
-            throw SimToolError("Step \(index + 1): unknown step `\(keyword)`. Known steps: tap, longPress, type, swipe, scroll, fling, drag, keyboard, pose, appearance, textSize, contrast, biometrics, push, location, statusBar, waitFor, assertVisible, assertHidden, wait.")
+            throw SimToolError("Step \(index + 1): unknown step `\(keyword)`. Known steps: tap, longPress, type, swipe, scroll, fling, drag, keyboard, pose, rotate, appearance, textSize, contrast, biometrics, push, location, statusBar, permission, waitFor, assertVisible, assertHidden, wait.")
         }
         if criterion != nil, !action.isAssertion {
             throw SimToolError("\(context): `criterion:` marks the assertion that checks the claim, so it belongs on assertVisible, assertHidden or waitFor — not on `\(keyword)`.")
@@ -967,6 +978,17 @@ public enum TestDefinitionParser {
         case "location":
             if text.lowercased() == "clear", !(value is [String: Any]) { return DeviceControlPayload(action: "location", value: "clear") }
             return DeviceControlPayload(action: "location", location: try location(value, context: context))
+        case "permission":
+            guard let mapping = value as? [String: Any], mapping.count == 1, let (service, rawDecision) = mapping.first else {
+                throw SimToolError("\(context): `permission:` names one permission and what it is set to, like `{ camera: deny }` — several are several steps, or `reset.permissions`.")
+            }
+            guard let permission = SimulatorPermission(parsing: service) else {
+                throw SimToolError("\(context): unknown permission `\(service)`. Known: \(SimulatorPermission.names).")
+            }
+            guard let decision = SimulatorPermissionDecision(parsing: scalarString(rawDecision)), decision != .always || permission == .location else {
+                throw SimToolError("\(context): `\(service):` takes grant, deny or reset\(permission == .location ? " (or always)" : "").")
+            }
+            return DeviceControlPayload(action: "permission", option: permission.rawValue, value: decision.rawValue)
         default: // statusBar
             if let preset = value as? String {
                 switch preset.lowercased() {

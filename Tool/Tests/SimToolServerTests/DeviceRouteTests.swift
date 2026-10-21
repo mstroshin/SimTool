@@ -33,4 +33,27 @@ final class DeviceRouteTests: XCTestCase {
         XCTAssertEqual(Set(feed.entries.map(\.status)), [.failed])
         XCTAssertEqual(feed.entries.first?.kind, "appearance")
     }
+
+    // A server without an app asks for one; an install needs the build in its body.
+    func testTheAppRoutesSayWhatTheyLack() async throws {
+        let port = try freeLoopbackPort()
+        let device = SimulatorDevice(udid: "TEST-UDID", name: "iPhone", runtime: "iOS", state: "Booted", isAvailable: true)
+        let server = StreamServer(config: StreamServerConfig(host: "127.0.0.1", port: port, device: device, captureEnabled: false))
+        try server.start()
+        defer { server.stop() }
+
+        let (card, cardResponse) = try await URLSession.shared.data(from: URL(string: "http://127.0.0.1:\(port)/api/v1/app")!)
+        XCTAssertEqual((cardResponse as? HTTPURLResponse)?.statusCode, 400)
+        XCTAssertTrue(String(decoding: card, as: UTF8.self).contains("Name the app"))
+
+        var install = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/api/v1/app/install")!)
+        install.httpMethod = "POST"
+        let (body, installResponse) = try await URLSession.shared.data(for: install)
+        XCTAssertEqual((installResponse as? HTTPURLResponse)?.statusCode, 400)
+        XCTAssertTrue(String(decoding: body, as: UTF8.self).contains("must be the .ipa"))
+
+        let (odd, oddResponse) = try await URLSession.shared.data(from: URL(string: "http://127.0.0.1:\(port)/api/v1/app?bundleId=com.example%27x")!)
+        XCTAssertEqual((oddResponse as? HTTPURLResponse)?.statusCode, 400)
+        XCTAssertTrue(String(decoding: odd, as: UTF8.self).contains("is not a bundle identifier"))
+    }
 }

@@ -332,7 +332,11 @@ extension AgentSkill {
         all as the device reports them.
         - `simtool ui [appearance light|dark | text-size <size>|bigger|smaller | contrast on|off]`
           — sizes are simctl's (`large` is iOS's default, `accessibility-medium` …) or
-          `xs`…`xxxl`, `ax1`…`ax5`.
+          `xs`…`xxxl`, `ax1`…`ax5`. The same command takes the accessibility settings
+          simctl has no verb for: `reduce-motion`, `reduce-transparency`,
+          `button-shapes`, `voiceover` (on|off; the first time iOS shows its VoiceOver
+          Gestures sheet — tap OK), `color-filter none|grayscale|protanopia|deuteranopia|tritanopia`
+          (apps read it; the screen and screenshots show no filter), `liquid-glass clear|tinted`.
         - `simtool debug [<option> on|off]` — `slow-animations`, `color-blended`,
           `color-copies`, `color-misaligned`, `color-offscreen`; they stay on until turned
           off. `simtool debug memory-warning` sends every app a memory warning.
@@ -350,8 +354,28 @@ extension AgentSkill {
           · `clear`. simctl cannot read a location back: `simtool location` prints the
           one SimTool last set.
 
+        - `simtool input rotate left|right|portrait|landscape-left|landscape-right|upside-down`
+          — Simulator.app's Rotate Left / Right; returns once the device reports the
+          turn. The app follows if it supports the orientation, and then `ax` frames,
+          coordinates and screenshots are the turned picture's (874 × 402 on an iPhone
+          17 Pro in landscape). Without an argument it prints the orientation.
+        - `simtool permissions [grant|deny|reset|always] <permission> [--app …]` —
+          without arguments it prints all of the app's: notifications, location,
+          camera, microphone, photos, contacts, calendar, reminders, motion, faceid,
+          speech, user-tracking, pasteboard, …. A change usually ends the running app,
+          as iOS does; `notifications` resprings the simulator (~8 s, every app ends).
+        - `simtool keychain add-root-cert <ca.pem>` — trust a proxy's CA (Proxyman,
+          Charles, mitmproxy); `add-cert`, `reset`.
+        - `simtool app info [--app …] [--reveal bundle|data]` — version, build, minimum
+          iOS, pid, bundle and data-container paths, permissions; `--reveal` opens it in
+          the Finder. `simtool app install <.app|.ipa>` installs a build.
+
         The same changes are `POST /api/v1/device` (`{"action": "appearance", "value":
-        "dark"}`, …; `GET /api/v1/device` reads them) and YAML steps (`simtool-test`).
+        "dark"}`, …; `GET /api/v1/device` reads them), `POST /api/v1/input`
+        (`{"action": "rotate", "name": "left"}`), `GET /api/v1/app` (the app card) and
+        YAML steps (`simtool-test`). In the viewer they are the Device tab (⌥7), the
+        toolbar's rotate button (⌘← / ⌘→), and a drop on the screen: images and videos
+        go to Photos, an `.app` or `.ipa` is installed.
 
         ### Network (app gRPC/HTTP via the logger)
         `simtool network …` covers a system-level snapshot and app-emitted events. App

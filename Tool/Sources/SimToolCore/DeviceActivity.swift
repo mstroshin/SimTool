@@ -220,6 +220,10 @@ public enum DeviceActivityWording {
         case "pose":
             let pose = input.angle.map { SimulatorFoldState.degrees($0) } ?? named(input.name)
             return ("pose", pose.map { "Fold to " + $0 } ?? "Fold", nil)
+        case "rotate", "orientation":
+            let name = input.name?.lowercased() ?? ""
+            if name == "left" || name == "right" { return ("rotate", "Rotate " + name, nil) }
+            return ("rotate", "Rotate to " + (SimulatorOrientation(parsing: name)?.title ?? named(input.name) ?? "?"), nil)
         case "terminate":
             return ("terminate", "Terminate " + (named(input.name) ?? "the app"), nil)
         case "launch", "relaunch":
@@ -279,6 +283,30 @@ public enum DeviceActivityWording {
         case "location":
             if clear { return ("location", "Clear the location", nil) }
             return ("location", "Location " + (control.location?.summary ?? ""), nil)
+        case "accessibility":
+            let setting = control.option.flatMap(SimulatorAccessibilitySetting.init(parsing:))
+            let title = setting?.title ?? named(control.option) ?? "Accessibility"
+            let value = control.value.map { setting?.value(parsing: $0) ?? $0 } ?? (control.enabled == false ? "off" : "on")
+            return ("accessibility", title + " " + value, nil)
+        case "permission":
+            let permission = control.option.flatMap(SimulatorPermission.init(parsing:))
+            let what = permission?.title ?? named(control.option) ?? "a permission"
+            let verb = switch control.value.flatMap(SimulatorPermissionDecision.init(parsing:)) {
+            case .grant: "Grant "
+            case .always: "Always allow "
+            case .deny: "Deny "
+            case .reset: "Reset "
+            case nil: "Change "
+            }
+            return ("permission", verb + what, named(control.bundleId).map { "for " + $0 })
+        case "keychain":
+            let title = switch control.value?.lowercased() {
+            case "reset": "Reset the keychain"
+            case "add-root-cert": "Trust a root certificate"
+            case "add-cert": "Add a certificate to the keychain"
+            default: "Keychain"
+            }
+            return ("keychain", title, nil)
         default:
             return (action.isEmpty ? "device" : action, action.isEmpty ? "Device" : action.prefix(1).uppercased() + action.dropFirst(), nil)
         }
@@ -289,7 +317,7 @@ public enum DeviceActivityWording {
     /// override in force.
     public static func reportsResult(of control: DeviceControlPayload) -> Bool {
         switch control.action.lowercased() {
-        case "content-size", "text-size", "biometrics": true
+        case "content-size", "text-size", "biometrics", "permission": true
         case "status-bar": control.value?.lowercased() != "clear"
         default: false
         }

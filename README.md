@@ -195,6 +195,15 @@ swift run simtool biometrics enroll               # enroll | unenroll | match | 
 swift run simtool push --alert "Your order shipped" --app com.example.MyApp
 swift run simtool status-bar clean                # 9:41, full Wi-Fi, charged; or --time, --battery-level…; clear
 swift run simtool location route 37.3349,-122.0090 37.3318,-122.0312 --speed 15   # set <point> | clear
+swift run simtool ui reduce-motion on             # reduce-transparency, button-shapes, voiceover
+swift run simtool ui color-filter grayscale       # none, grayscale, protanopia, deuteranopia, tritanopia
+swift run simtool ui liquid-glass tinted          # clear | tinted, iOS 26 and later
+swift run simtool input rotate left               # right, portrait, landscape-left, landscape-right, upside-down
+swift run simtool permissions --app com.example.MyApp            # every permission, as the device has it
+swift run simtool permissions deny notifications --app com.example.MyApp   # grant | deny | reset | always (location)
+swift run simtool keychain add-root-cert ~/Downloads/proxy-ca.pem   # add-cert | reset
+swift run simtool app info --app com.example.MyApp --reveal data     # the card; --reveal bundle|data opens Finder
+swift run simtool app install Build/MyApp.ipa     # an .app, an .ipa, or a tar of an .app
 ```
 
 The colours are the guest render server's own debug options, which CoreSimulator
@@ -205,6 +214,19 @@ memory pressure, which UIKit turns into `didReceiveMemoryWarning`. `match` and
 cannot read a location back, so `simtool location` and the viewer show the one
 SimTool last set. Naming any cellular field of the status bar makes simctl fill
 in the rest — 5G, full bars, "Carrier" — so `clean` leaves them out.
+
+The accessibility settings go through a helper SimTool builds and runs inside the
+simulator, which calls the guest's own libAccessibility setters — the ones
+Settings calls — so running apps follow at once; Liquid Glass is UIKit's
+`UIViewGlassLegibilitySetting`. A rotation is the device-orientation event
+Simulator.app sends; the picture is then read back from CoreDevice whenever the
+guest says it turned, whoever turned it, so touches land where they point.
+Permissions go through `simctl privacy` where it has them (camera and pasteboard
+included), through the device's TCC database for Face ID, speech recognition and
+tracking, and through SpringBoard's own record for notifications: SpringBoard
+reads that only as it starts, so a notifications change resprings the simulator —
+backboardd restarts and takes SpringBoard with it (restarting SpringBoard alone
+would leave it unable to turn its interface until the simulator reboots).
 
 Touches are played by SimTool's own HID helper as timed paths, in screen points
 (the space `ax tree` reports frames in) — the same helper the viewer's live
@@ -253,8 +275,11 @@ elsewhere, as an entry. YAML tests take a `pose:` step.
 YAML tests change the device's settings with steps too — `appearance: dark`,
 `textSize: ax2`, `contrast: on`, `biometrics: match`, `push: { aps: { alert: "…" } }`
 (to the test's app), `location: "37.33,-122.01"` (or a `route:`), `statusBar:
-clean` — where the scenario needs them, so a Face ID prompt is answered after
-the tap that raised it.
+clean`, `permission: { camera: deny }`, `rotate: landscape-left` — where the
+scenario needs them, so a Face ID prompt is answered after the tap that raised
+it. A permission step that ends the app, as iOS does, relaunches it the way the
+run launched it. `reset.permissions` pre-answers notifications, camera, Face ID,
+speech and tracking too.
 
 Directions are the way the finger moves: `scroll up` drags the content up,
 revealing what is below. A `scroll` (and a `swipe`, unless `--hold 0`) slows
@@ -312,9 +337,20 @@ Touch ID (whichever the device has): enrolled or not, and a matching or
 non-matching face or finger for the prompt on screen; status bar overrides (a
 9:41 preset for screenshots, or time, battery and network one by one); the
 simulated location — a point or a route — and a push notification with its JSON
-payload. Each change is an entry in Activity; the tab reads the device again
+payload. It also holds the accessibility settings Simulator.app reached through
+Settings — Reduce Motion, Reduce Transparency, Button Shapes, VoiceOver, Color
+Filters (apps read the filter; the simulator's screen shows none) and Liquid
+Glass clear or tinted —, the orientation, the app under test's card (version
+and build, minimum iOS, its process, its bundle and data container with
+Reveal in Finder and Copy), each of its privacy permissions as a choice —
+notifications too —, and the keychain: trust a proxy's root certificate, or
+reset it. Each change is an entry in Activity; the tab reads the device again
 after it, every few seconds while it is open, and whenever an agent or a test
-changes a setting. The command palette has them too.
+changes a setting. The command palette has them too. The toolbar's rotate button
+turns the device left (⌘←; ⌘→ turns it right), and the stream, touches,
+accessibility frames and screenshots follow the turned picture. Files dropped
+on the screen go where Simulator.app sent them: images and videos to Photos, an
+`.app` bundle or an `.ipa` installed on the device.
 
 The **Accessibility** tab shows the served accessibility tree, with anonymous
 containers folded away, and picks elements on the screen: the picked element is
@@ -938,6 +974,9 @@ POST /api/v1/input
 GET /api/v1/input/stream (WebSocket)
 GET /api/v1/device
 POST /api/v1/device
+GET /api/v1/app?bundleId=<id>
+POST /api/v1/app/reveal
+POST /api/v1/app/install
 POST /api/v1/input/paste-image
 POST /api/v1/photos
 GET /api/v1/ax/tree?raw=1&format=flat&labeled=1
@@ -1048,14 +1087,16 @@ stream is down.
 
 `POST /api/v1/input` takes an `action` — `tap`, `longPress`, `type`, `paste`,
 `swipe`, `scroll`, `fling`, `drag`, `button`, `shake`, `terminate`, `launch`,
-`software-keyboard`, `hardware-keyboard`, `pose` — plus that action's fields: `x`/`y` or
+`software-keyboard`, `hardware-keyboard`, `pose`, `rotate` — plus that action's fields: `x`/`y` or
 `id`/`label` for `tap` and `longPress` (`duration` for the press),
 `startX`/`startY`/`endX`/`endY` with `velocity`, `duration`, `hold` (and `press`
 for `drag`), `direction` with `distance` or `velocity` and an optional start
 `x`/`y` for `scroll` and `fling`, `text` for `type` and `paste`, `enabled` for
 `hardware-keyboard` (connect or disconnect it), `visible` for
 `software-keyboard` (show or hide it and confirm it on screen; without it, a
-toggle), `name` (`closed`, `book`, `open`) or `angle` (0–180) for `pose`.
+toggle), `name` (`closed`, `book`, `open`) or `angle` (0–180) for `pose`,
+`name` (`portrait`, `landscape-left`, `landscape-right`, `upside-down`, or
+`left` / `right` for a quarter turn) for `rotate`.
 Coordinates are screen points. Images go as the raw request body instead:
 `POST /api/v1/input/paste-image` pastes one into the focused field, and
 `POST /api/v1/photos` adds an image or a video to Photos. Both read the type from
@@ -1074,8 +1115,21 @@ activity entry, and answers with what the device reports afterwards in
 route, `speed`, `interval` or `distance`; or `value: "clear"`). `GET
 /api/v1/device` reads them all back — `appearance`, `contentSize`,
 `increaseContrast`, `debug`, `biometrics` (`kind` face or touch, `enrolled`),
-`statusBar` (the overrides in force), `location` (the one SimTool last set) —
-and names in `unavailable` whatever the device would not say, and why.
+`statusBar` (the overrides in force), `location` (the one SimTool last set),
+`accessibility` (`reduceMotion`, `reduceTransparency`, `buttonShapes`,
+`voiceOver`, `colorFilter`, `liquidGlass`), `orientation` — and names in
+`unavailable` whatever the device would not say, and why. More actions:
+`accessibility` (`option`: `reduce-motion`, `reduce-transparency`,
+`button-shapes`, `voiceover` with `enabled`, or `color-filter`, `liquid-glass`
+with `value`), `permission` (`option`: a permission, `value`: `grant`, `deny`,
+`reset`, `always` for location, `bundleId` — the server's app by default) and
+`keychain` (`value`: `reset`, `add-root-cert`, `add-cert`; `certificate`: the
+file's bytes in base64). `GET /api/v1/app` is the app's card — `installed`,
+`name`, `version`, `build`, `minimumOS`, `pid`, `bundlePath`, `dataContainer`,
+`permissions` — for `bundleId` or the server's app; `POST /api/v1/app/reveal`
+(`{"bundleId", "what": "bundle"|"data"}`) shows one in the Finder of the Mac the
+server runs on; `POST /api/v1/app/install` installs the build in the body — an
+`.ipa`, or a tar of an `.app` — and answers its `bundleId` and `name`.
 
 `/api/v1/input/stream` is the viewer's live finger and keyboard: a WebSocket
 taking one JSON frame per touch event, `{"t": "down"|"move"|"up", "x": 0.5,

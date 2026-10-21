@@ -414,12 +414,17 @@ public struct SimulatorSettings: Codable, Equatable, Sendable {
     public var statusBar: SimulatorStatusBar?
     /// The location SimTool last set; absent when it set none (or cleared it).
     public var location: SimulatorLocation?
+    /// Reduce Motion, VoiceOver, Color Filters, Liquid Glass and the rest
+    /// `simctl ui` has no verb for.
+    public var accessibility: SimulatorAccessibilitySettings?
+    /// portrait, landscape-left, landscape-right, upside-down.
+    public var orientation: SimulatorOrientation?
     /// Setting → why it could not be read.
     public var unavailable: [String: String]?
 
     /// What a reading can be limited to.
     public enum Part: String, CaseIterable, Sendable {
-        case appearance, contentSize, increaseContrast, debug, biometrics, statusBar, location
+        case appearance, contentSize, increaseContrast, debug, biometrics, statusBar, location, accessibility, orientation
     }
 
     public init(
@@ -430,6 +435,8 @@ public struct SimulatorSettings: Codable, Equatable, Sendable {
         biometrics: SimulatorBiometricsState? = nil,
         statusBar: SimulatorStatusBar? = nil,
         location: SimulatorLocation? = nil,
+        accessibility: SimulatorAccessibilitySettings? = nil,
+        orientation: SimulatorOrientation? = nil,
         unavailable: [String: String]? = nil
     ) {
         self.appearance = appearance
@@ -439,6 +446,8 @@ public struct SimulatorSettings: Codable, Equatable, Sendable {
         self.biometrics = biometrics
         self.statusBar = statusBar
         self.location = location
+        self.accessibility = accessibility
+        self.orientation = orientation
         self.unavailable = unavailable
     }
 }
@@ -458,6 +467,9 @@ public struct SimulatorSettings: Codable, Equatable, Sendable {
 /// | `push` | `payload` (an object with `aps`), `bundleId` (default: the app) |
 /// | `status-bar` | `statusBar`, or `value`: clear |
 /// | `location` | `location`, or `value`: clear |
+/// | `accessibility` | `option` (a `SimulatorAccessibilitySetting`), `enabled` or `value` |
+/// | `permission` | `option` (a `SimulatorPermission`), `value` (grant, always, deny, reset), `bundleId` (default: the app) |
+/// | `keychain` | `value`: reset, add-root-cert, add-cert; `certificate` (PEM or DER, base64) |
 public struct DeviceControlPayload: Codable, Equatable, Sendable {
     public var action: String
     public var option: String?
@@ -467,6 +479,8 @@ public struct DeviceControlPayload: Codable, Equatable, Sendable {
     public var payload: NetworkLoggerJSONValue?
     public var statusBar: SimulatorStatusBar?
     public var location: SimulatorLocation?
+    /// A certificate file's bytes, base64: PEM or DER.
+    public var certificate: String?
 
     public init(
         action: String,
@@ -476,7 +490,8 @@ public struct DeviceControlPayload: Codable, Equatable, Sendable {
         bundleId: String? = nil,
         payload: NetworkLoggerJSONValue? = nil,
         statusBar: SimulatorStatusBar? = nil,
-        location: SimulatorLocation? = nil
+        location: SimulatorLocation? = nil,
+        certificate: String? = nil
     ) {
         self.action = action
         self.option = option
@@ -486,9 +501,10 @@ public struct DeviceControlPayload: Codable, Equatable, Sendable {
         self.payload = payload
         self.statusBar = statusBar
         self.location = location
+        self.certificate = certificate
     }
 
-    public static let actions = ["appearance", "content-size", "increase-contrast", "debug", "memory-warning", "biometrics", "push", "status-bar", "location"]
+    public static let actions = ["appearance", "content-size", "increase-contrast", "debug", "memory-warning", "biometrics", "push", "status-bar", "location", "accessibility", "permission", "keychain"]
 }
 
 // MARK: - acting and reading
@@ -560,6 +576,44 @@ public enum SimulatorDeviceControl {
             location.setAt = Date()
             SimulatorLocationStore.write(location, deviceUDID: udid)
             return location.summary
+        case "accessibility":
+            guard let raw = control.option, let setting = SimulatorAccessibilitySetting(parsing: raw) else {
+                throw SimToolError("Accessibility takes an option: \(SimulatorAccessibilitySetting.names)")
+            }
+            guard let value = control.value ?? control.enabled.map({ $0 ? "on" : "off" }) else {
+                throw SimToolError("\(setting.title) takes \(setting.values.map { "value: " + $0.joined(separator: ", ") } ?? "enabled: true or false")")
+            }
+            let settings = try await SimulatorAccessibilitySettingsClient.set(setting, to: value, deviceUDID: udid)
+            return setting.title + " " + (settings.value(of: setting) ?? "unknown")
+        case "permission":
+            guard let raw = control.option, let permission = SimulatorPermission(parsing: raw) else {
+                throw SimToolError("A permission takes an option: \(SimulatorPermission.names)")
+            }
+            guard let rawDecision = control.value, let decision = SimulatorPermissionDecision(parsing: rawDecision) else {
+                throw SimToolError("\(permission.title) takes value: grant, deny or reset\(permission == .location ? " (or always)" : "")")
+            }
+            guard let bundleId = control.bundleId.flatMap({ $0.isEmpty ? nil : $0 }) ?? app else {
+                throw SimToolError("A permission needs the app's bundle id: pass bundleId, or start the server with --app")
+            }
+            return permission.title + " " + (try await SimulatorPermissionClient.set(permission, to: decision, bundleId: bundleId, deviceUDID: udid))
+        case "keychain":
+            switch control.value?.lowercased() {
+            case "reset":
+                try await simctl(["keychain", udid, "reset"])
+                return "reset"
+            case "add-root-cert", "add-cert":
+                let verb = control.value!.lowercased()
+                guard let encoded = control.certificate, let data = Data(base64Encoded: encoded, options: .ignoreUnknownCharacters), !data.isEmpty else {
+                    throw SimToolError("Adding a certificate needs certificate: the file's bytes, base64")
+                }
+                let file = FileManager.default.temporaryDirectory.appendingPathComponent("simtool-certificate-\(UUID().uuidString)" + (data.starts(with: Array("-----BEGIN".utf8)) ? ".pem" : ".cer"))
+                try data.write(to: file)
+                defer { try? FileManager.default.removeItem(at: file) }
+                try await simctl(["keychain", udid, verb, file.path])
+                return verb == "add-root-cert" ? "trusted as a root" : "added"
+            default:
+                throw SimToolError("Keychain takes value: reset, add-root-cert or add-cert")
+            }
         default:
             throw SimToolError("Unknown device action \(control.action.isEmpty ? "<missing>" : control.action): use one of \(DeviceControlPayload.actions.joined(separator: ", "))")
         }
@@ -577,6 +631,8 @@ public enum SimulatorDeviceControl {
         async let debug = when(.debug) { try await debugOptions(deviceUDID: udid) }
         async let biometrics = when(.biometrics) { try await biometricsState(deviceUDID: udid, deviceType: deviceType) }
         async let statusBar = when(.statusBar) { try await statusBar(deviceUDID: udid) }
+        async let accessibility = when(.accessibility) { try await SimulatorAccessibilitySettingsClient.read(deviceUDID: udid) }
+        async let orientation = when(.orientation) { try await SimulatorOrientation.read(deviceUDID: udid) }
         var settings = SimulatorSettings(location: parts.contains(.location) ? SimulatorLocationStore.read(deviceUDID: udid) : nil)
         var unavailable: [String: String] = [:]
         func keep<T>(_ result: Result<T, Error>?, _ name: String, _ assign: (T) -> Void) {
@@ -594,6 +650,8 @@ public enum SimulatorDeviceControl {
         keep(await debug, "debug") { settings.debug = $0 }
         keep(await biometrics, "biometrics") { settings.biometrics = $0 }
         keep(await statusBar, "statusBar") { settings.statusBar = $0 }
+        keep(await accessibility, "accessibility") { settings.accessibility = $0 }
+        keep(await orientation, "orientation") { settings.orientation = $0 }
         settings.unavailable = unavailable.isEmpty ? nil : unavailable
         return settings
     }

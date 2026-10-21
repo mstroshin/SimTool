@@ -82,6 +82,28 @@ final class WebViewerPageTests: XCTestCase {
             XCTAssertTrue(page.contains(#"action: "\#(action)""#), "missing \(action)")
         }
         XCTAssertTrue(page.contains("/^Digit[1-7]$/"), "⌥7 opens the Device tab")
+        for route in ["/api/v1/app?bundleId=", "/api/v1/app/reveal", "/api/v1/app/install"] {
+            XCTAssertTrue(page.contains(route), "missing \(route)")
+        }
+        XCTAssertTrue(page.contains(#"action: "rotate", name"#), "a turn goes as input")
+    }
+
+    // Rotate Left and Right, as Simulator.app has them: a toolbar button and ⌘← / ⌘→.
+    func testTheDeviceTurnsFromTheToolbarAndTheKeyboard() throws {
+        XCTAssertTrue(page.contains(#"id="rotateButton" aria-label="Rotate left""#))
+        XCTAssertTrue(page.contains(#"aria-keyshortcuts="Meta+ArrowLeft Meta+ArrowRight""#))
+        let keys = try XCTUnwrap(page.range(of: "Simulator.app's Rotate Left and Right; with the Mac keyboard connected"))
+        XCTAssertTrue(page[keys.upperBound...].prefix(400).contains(#"rotateDevice(event.key === "ArrowLeft" ? "left" : "right")"#))
+    }
+
+    // A folder dropped on the screen is read before the first await, while the drop still holds it.
+    func testFilesDroppedOnTheScreenAreReadWhileTheDropHoldsThem() throws {
+        let drop = try XCTUnwrap(page.range(of: #"stageArea.addEventListener("drop""#))
+        let handler = page[drop.upperBound...].prefix(600)
+        XCTAssertTrue(handler.contains("webkitGetAsEntry"))
+        XCTAssertTrue(handler.contains("manualInputAllowed("))
+        XCTAssertTrue(page.contains(#"postFile("/api/v1/app/install""#))
+        XCTAssertTrue(page.contains("tarArchive(entries"))
     }
 
     // Screenshots and videos come with the device's bezel or as the screen

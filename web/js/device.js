@@ -367,6 +367,76 @@ $("photosFile").addEventListener("change", () => {
   addToPhotos(files);
 });
 
+// ---- Files dropped on the screen: media to Photos, an .app or an .ipa installed ----
+// A browser hands a dropped folder over as files: an .app is read entry by
+// entry and sent as a tar the server unpacks.
+
+async function droppedEntries(entry, prefix, out) {
+  if (entry.isFile) {
+    const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
+    out.push({ path: prefix + entry.name, bytes: new Uint8Array(await file.arrayBuffer()) });
+    return;
+  }
+  out.push({ path: prefix + entry.name, bytes: null });
+  const reader = entry.createReader();
+  for (;;) {
+    const batch = await new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+    if (!batch.length) break;
+    for (const child of batch) await droppedEntries(child, prefix + entry.name + "/", out);
+  }
+}
+
+async function installBuild(blob, name) {
+  setMessage("Installing " + name + "…", "sticky");
+  try {
+    const installed = await postFile("/api/v1/app/install", blob);
+    toast("Installed " + installed.name + " (" + installed.bundleId + ")");
+    setMessage("");
+    if (typeof loadAppCard === "function") loadAppCard();
+  } catch (error) {
+    setMessage("");
+    fail("Installing " + name + " failed", error);
+  }
+}
+
+// `dropped` is read from the drop event at once: its items are gone after the first await.
+async function dropOnScreen(dropped) {
+  const media = [];
+  let refused = 0;
+  for (const { entry, file } of dropped) {
+    const kind = dropKind(entry ? entry.name : file && file.name, file && file.type, entry ? entry.isDirectory : false);
+    if (kind === "media" && file) media.push(file);
+    else if (kind === "ipa" && file) await installBuild(file, file.name);
+    else if (kind === "app" && entry) {
+      setMessage("Reading " + entry.name + "…", "sticky");
+      const entries = [];
+      try { await droppedEntries(entry, "", entries); } catch (error) { setMessage(""); fail("Reading " + entry.name + " failed", error); continue; }
+      const tar = new File([tarArchive(entries, Date.now() / 1000)], entry.name + ".tar", { type: "application/x-tar" });
+      await installBuild(tar, entry.name);
+    } else refused += 1;
+  }
+  if (media.length) addToPhotos(media);
+  if (refused) toast("Drop images or videos for Photos, or an .app or .ipa to install", { error: true });
+}
+
+const stageArea = $("deviceArea");
+stageArea.addEventListener("dragover", (event) => {
+  if (!Array.from(event.dataTransfer.types || []).includes("Files") || app.dataset.mode === "replay") return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = "copy";
+  app.classList.add("dropping");
+});
+stageArea.addEventListener("dragleave", (event) => { if (!stageArea.contains(event.relatedTarget)) app.classList.remove("dropping"); });
+stageArea.addEventListener("drop", (event) => {
+  app.classList.remove("dropping");
+  if (!Array.from(event.dataTransfer.types || []).includes("Files")) return;
+  event.preventDefault();
+  const dropped = Array.from(event.dataTransfer.items || []).filter((item) => item.kind === "file")
+    .map((item) => ({ entry: item.webkitGetAsEntry ? item.webkitGetAsEntry() : null, file: item.getAsFile() }));
+  // Someone else driving: the person takes over first, then drops again.
+  if (manualInputAllowed(() => toast("Drop the files again"))) dropOnScreen(dropped);
+});
+
 function deviceMenuItems() {
   return [
     { icon: "paste", label: "Paste", kbd: "⌘V", run: pasteFromClipboard },
@@ -739,6 +809,7 @@ $("screenshotButton").addEventListener("click", saveScreenshot);
 $("recordButton").addEventListener("click", toggleRecording);
 wireMenuButton($("captureMenuButton"), captureMenuItems);
 $("shakeButton").addEventListener("click", pressShake);
+$("rotateButton").addEventListener("click", () => rotateDevice("left"));
 wireMenuButton($("keyboardButton"), keyboardMenuItems);
 $("terminateButton").addEventListener("click", terminateApp);
 $("relaunchButton").addEventListener("click", relaunchApp);
@@ -748,6 +819,8 @@ $("sbUdid").addEventListener("click", () => { if (deviceInfo.udid) copyText(devi
 function updateDeviceButtons() {
   const usable = screenState.connection === "live" && app.dataset.mode !== "replay";
   for (const id of ["homeButton", "screenshotButton", "shakeButton", "terminateButton", "relaunchButton"]) $(id).disabled = !usable;
+  // A foldable turns its picture as it folds.
+  $("rotateButton").disabled = !usable || !!screenState.foldable;
   // A recording in progress can always be stopped; one being saved cannot.
   $("recordButton").disabled = capture.recording ? capture.recording.state !== "recording" : !usable;
   renderFold();

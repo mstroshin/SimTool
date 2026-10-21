@@ -41,6 +41,29 @@ final class DeviceCommandSurfaceTests: XCTestCase {
         XCTAssertThrowsError(try StatusBar.parse(["clear", "--time", "9:41"]))
     }
 
+    func testPermissionsKeychainAppAndRotate() throws {
+        let names = SimTool.configuration.subcommands.map { $0.configuration.commandName ?? "" }
+        XCTAssertTrue(names.contains("permissions"))
+        XCTAssertTrue(names.contains("keychain"))
+        let grant = try Permissions.parse(["grant", "camera", "--app", "com.example.app"])
+        XCTAssertEqual(grant.decision, "grant")
+        XCTAssertEqual(grant.permission, "camera")
+        XCTAssertNil(try Permissions.parse([]).decision)
+        XCTAssertEqual(try Keychain.parse(["add-root-cert", "ca.pem"]).file, "ca.pem")
+        XCTAssertThrowsError(try Keychain.parse(["add-root-cert"]))
+        XCTAssertThrowsError(try Keychain.parse(["reset", "ca.pem"]))
+        XCTAssertThrowsError(try Keychain.parse(["wipe"]))
+        let appNames = AppCommand.configuration.subcommands.map { $0.configuration.commandName ?? "" }
+        XCTAssertTrue(appNames.contains("info"))
+        XCTAssertTrue(appNames.contains("install"))
+        XCTAssertEqual(try AppCommand.Info.parse(["--reveal", "data"]).reveal, "data")
+        XCTAssertEqual(try AppCommand.Install.parse(["Build/My.app"]).path, "Build/My.app")
+        let inputNames = Input.configuration.subcommands.map { $0.configuration.commandName ?? "" }
+        XCTAssertTrue(inputNames.contains("rotate"))
+        XCTAssertEqual(try Input.Rotate.parse(["left"]).orientation, "left")
+        XCTAssertNil(try Input.Rotate.parse([]).orientation)
+    }
+
     func testALocationTakesAnActionAndItsPoints() throws {
         let route = try Location.parse(["route", "1,2", "3,4", "--speed", "15"])
         XCTAssertEqual(route.action, "route")

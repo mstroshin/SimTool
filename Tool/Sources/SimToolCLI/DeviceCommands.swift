@@ -30,6 +30,15 @@ func printDeviceSettings(_ settings: SimulatorSettings, json: Bool, lines: [(Str
 
 private func onOff(_ value: Bool?) -> String? { value.map { $0 ? "on" : "off" } }
 
+private func accessibilityLines(_ settings: SimulatorSettings) -> [(String, String?)] {
+    SimulatorAccessibilitySetting.allCases.compactMap { setting in
+        let value = settings.accessibility?.value(of: setting)
+        // Liquid Glass is absent before iOS 26: no line rather than "unknown".
+        if value == nil, setting == .liquidGlass, settings.accessibility != nil { return nil }
+        return (setting.rawValue, value)
+    }
+}
+
 private func parseOnOff(_ raw: String, _ what: String) throws -> Bool {
     switch raw.lowercased() {
     case "on", "true", "yes", "1", "enabled": return true
@@ -47,19 +56,28 @@ private func configuredApp(_ app: String?) -> String? {
 struct UI: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "ui",
-        abstract: "Read or change the appearance, the text size (Dynamic Type) and Increase Contrast.",
+        abstract: "Read or change the appearance, the text size, and the accessibility settings: contrast, motion, transparency, VoiceOver, color filters, Liquid Glass.",
         discussion: """
         `simtool ui` prints them all; `simtool ui <setting>` prints one and \
         `simtool ui <setting> <value>` changes it:
 
-          appearance light|dark
-          text-size  extra-small … extra-extra-extra-large, accessibility-medium … \
+          appearance           light|dark
+          text-size            extra-small … extra-extra-extra-large, accessibility-medium … \
         accessibility-extra-extra-extra-large (or xs … xxxl, ax1 … ax5, default, bigger, smaller)
-          contrast   on|off
+          contrast             on|off   (Increase Contrast)
+          reduce-motion        on|off
+          reduce-transparency  on|off
+          button-shapes        on|off
+          voiceover            on|off   (the first time, iOS shows its VoiceOver Gestures sheet)
+          color-filter         none|grayscale|protanopia|deuteranopia|tritanopia
+          liquid-glass         clear|tinted   (iOS 26 and later)
+
+        Color filters change the setting apps read; the simulator's screen, \
+        and so screenshots and the stream, show no filter.
         """
     )
 
-    @Argument(help: "appearance, text-size or contrast. Omit it to print every setting.") var setting: String?
+    @Argument(help: "A setting from the list below. Omit it to print every setting.") var setting: String?
     @Argument(help: "The new value. Omit it to print the setting.") var value: String?
     @Option var device: String?
     @OptionGroup var common: CommonJSON
@@ -67,19 +85,28 @@ struct UI: AsyncParsableCommand {
     func run() async throws {
         let device = try await resolveConfiguredDevice(device)
         guard let setting else {
-            let settings = await SimulatorDeviceControl.read(deviceUDID: device.udid, parts: [.appearance, .contentSize, .increaseContrast])
+            let settings = await SimulatorDeviceControl.read(deviceUDID: device.udid, parts: [.appearance, .contentSize, .increaseContrast, .accessibility])
             try printDeviceSettings(settings, json: common.json, lines: [
                 ("appearance", settings.appearance),
                 ("text-size", settings.contentSize.map { "\($0) (\(SimulatorContentSize.short($0)))" }),
                 ("contrast", onOff(settings.increaseContrast)),
-            ])
+            ] + accessibilityLines(settings))
+            return
+        }
+        if let accessibility = SimulatorAccessibilitySetting(parsing: setting) {
+            guard let value else {
+                let settings = await SimulatorDeviceControl.read(deviceUDID: device.udid, parts: [.accessibility])
+                try printDeviceSettings(settings, json: common.json, lines: [(accessibility.rawValue, settings.accessibility?.value(of: accessibility))])
+                return
+            }
+            try await runDeviceControl(DeviceControlPayload(action: "accessibility", option: accessibility.rawValue, value: value), device: device, json: common.json)
             return
         }
         let (action, part): (String, SimulatorSettings.Part) = switch setting.lowercased() {
         case "appearance": ("appearance", .appearance)
         case "text-size", "content-size", "textsize": ("content-size", .contentSize)
         case "contrast", "increase-contrast": ("increase-contrast", .increaseContrast)
-        default: throw ValidationError("Unknown setting \(setting): use appearance, text-size or contrast")
+        default: throw ValidationError("Unknown setting \(setting): use appearance, text-size, contrast or \(SimulatorAccessibilitySetting.names)")
         }
         guard let value else {
             let settings = await SimulatorDeviceControl.read(deviceUDID: device.udid, parts: [part])
@@ -334,7 +361,7 @@ struct Location: AsyncParsableCommand {
 struct Settings: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "settings",
-        abstract: "Print every setting `simtool ui`, `debug`, `biometrics`, `status-bar` and `location` change, as the device reports it."
+        abstract: "Print every setting `simtool ui`, `debug`, `biometrics`, `status-bar`, `location` and `input rotate` change, as the device reports it."
     )
 
     @Option var device: String?
@@ -348,12 +375,199 @@ struct Settings: AsyncParsableCommand {
             ("text-size", settings.contentSize.map { "\($0) (\(SimulatorContentSize.short($0)))" }),
             ("contrast", onOff(settings.increaseContrast)),
         ]
+        lines += accessibilityLines(settings)
         lines += SimulatorDebugOption.allCases.map { ($0.rawValue, onOff(settings.debug?[$0.rawValue])) }
         lines += [
             ("biometrics", settings.biometrics.map { ($0.kind?.title ?? "no sensor") + ($0.enrolled ? ", enrolled" : ", not enrolled") }),
             ("status bar", settings.statusBar?.summary),
             ("location", settings.location?.summary ?? "none set by SimTool"),
+            ("orientation", settings.orientation?.rawValue),
         ]
         try printDeviceSettings(settings, json: common.json, lines: lines)
+    }
+}
+
+struct Permissions: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "permissions",
+        abstract: "Read an app's privacy permissions, or grant, deny or reset one — notifications included.",
+        discussion: """
+        `simtool permissions` prints every permission of the app (--app, else the \
+        project's bundleId). `grant`, `deny` and `reset` change one; `reset` \
+        puts it back to not asked, so the app prompts again; `always` is \
+        location in the background. `reset all` resets every one.
+
+          simtool permissions grant camera
+          simtool permissions deny notifications
+          simtool permissions always location
+
+        Permissions: notifications, location, camera, microphone, photos, \
+        photos-add, contacts, calendar, reminders, motion, media-library, siri, \
+        speech, faceid, user-tracking, pasteboard. A change may terminate the \
+        app if it runs; a notifications change resprings the simulator — \
+        SpringBoard reads it only as it starts — which ends running apps.
+        """
+    )
+
+    @Argument(help: "grant, deny, reset or always. Omit it to print every permission.") var decision: String?
+    @Argument(help: "The permission, or all (with reset).") var permission: String?
+    @Option(help: "The app's bundle identifier.") var app: String?
+    @Option var device: String?
+    @OptionGroup var common: CommonJSON
+
+    func run() async throws {
+        let device = try await resolveConfiguredDevice(device)
+        guard let bundleId = configuredApp(app) else { throw ValidationError("Pass --app <bundle-id>, or run inside a project whose config names bundleId") }
+        guard let decision else {
+            let states = try await SimulatorPermissionClient.read(bundleId: bundleId, deviceUDID: device.udid)
+            if common.json { try printJSON(states); return }
+            let width = SimulatorPermission.allCases.map(\.rawValue.count).max() ?? 0
+            for permission in SimulatorPermission.allCases {
+                print(permission.rawValue.padding(toLength: width, withPad: " ", startingAt: 0) + "  " + (states[permission.rawValue] ?? "unknown"))
+            }
+            return
+        }
+        guard let parsed = SimulatorPermissionDecision(parsing: decision) else { throw ValidationError("Unknown decision \(decision): use grant, deny, reset or always") }
+        guard let permission else { throw ValidationError("Name the permission: \(SimulatorPermission.names)") }
+        if permission.lowercased() == "all" {
+            guard parsed == .reset else { throw ValidationError("Only reset takes all") }
+            for each in SimulatorPermission.allCases {
+                try await runDeviceControl(DeviceControlPayload(action: "permission", option: each.rawValue, value: "reset", bundleId: bundleId), device: device, json: common.json)
+            }
+            return
+        }
+        guard let known = SimulatorPermission(parsing: permission) else { throw ValidationError("Unknown permission \(permission): use \(SimulatorPermission.names)") }
+        try await runDeviceControl(DeviceControlPayload(action: "permission", option: known.rawValue, value: parsed.rawValue, bundleId: bundleId), device: device, json: common.json)
+    }
+}
+
+struct Keychain: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "keychain",
+        abstract: "Reset the simulator's keychain, or add a certificate — a proxy's root CA to trust its TLS.",
+        discussion: """
+          simtool keychain add-root-cert ~/Downloads/proxy-ca.pem   # trusted as a root (Proxyman, Charles, mitmproxy)
+          simtool keychain add-cert client.cer
+          simtool keychain reset                                     # every item and certificate, gone
+        """
+    )
+
+    @Argument(help: "reset, add-root-cert or add-cert.") var action: String
+    @Argument(help: "The certificate file (PEM or DER).") var file: String?
+    @Option var device: String?
+    @OptionGroup var common: CommonJSON
+
+    func validate() throws {
+        switch action.lowercased() {
+        case "reset": if file != nil { throw ValidationError("reset takes no file") }
+        case "add-root-cert", "add-cert": if file == nil { throw ValidationError("\(action) takes a certificate file") }
+        default: throw ValidationError("Unknown action \(action): use reset, add-root-cert or add-cert")
+        }
+    }
+
+    func run() async throws {
+        let device = try await resolveConfiguredDevice(device)
+        let certificate = try file.map { try Data(contentsOf: URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath)).base64EncodedString() }
+        try await runDeviceControl(DeviceControlPayload(action: "keychain", value: action.lowercased(), certificate: certificate), device: device, json: common.json)
+    }
+}
+
+extension AppCommand {
+    struct Info: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "info",
+            abstract: "An installed app's card: version and build, minimum iOS, whether it runs, where its bundle and its data live, its permissions.",
+            discussion: "--reveal bundle|data shows the bundle or the data container in the Finder."
+        )
+
+        @Option(help: "The app's bundle identifier (default: the project's bundleId).") var app: String?
+        @Option(help: "bundle or data: show it in the Finder.") var reveal: String?
+        @Option var device: String?
+        @OptionGroup var common: CommonJSON
+
+        func run() async throws {
+            let device = try await resolveConfiguredDevice(device)
+            guard let bundleId = configuredApp(app) else { throw ValidationError("Pass --app <bundle-id>, or run inside a project whose config names bundleId") }
+            if let reveal {
+                let path = try await SimulatorAppInfoClient.reveal(reveal, bundleId: bundleId, deviceUDID: device.udid)
+                if common.json { try printJSON(CommandResultPayload(ok: true, stdout: path, stderr: "")) } else { print(path) }
+                return
+            }
+            let info = try await SimulatorAppInfoClient.read(bundleId: bundleId, deviceUDID: device.udid, permissions: true)
+            if common.json { try printJSON(info); return }
+            guard info.installed else { print("\(bundleId) is not installed on \(device.name)"); return }
+            let lines: [(String, String?)] = [
+                ("app", [info.name, bundleId].compactMap { $0 }.joined(separator: " — ")),
+                ("version", [info.version, info.build.map { "(\($0))" }].compactMap { $0 }.joined(separator: " ")),
+                ("minimum iOS", info.minimumOS),
+                ("running", info.pid.map { "pid \($0)" } ?? "no"),
+                ("bundle", info.bundlePath),
+                ("data", info.dataContainer),
+            ]
+            let width = lines.map(\.0.count).max() ?? 0
+            for (name, value) in lines { print(name.padding(toLength: width, withPad: " ", startingAt: 0) + "  " + (value ?? "unknown")) }
+            let granted = (info.permissions ?? [:]).filter { $0.value != "not-determined" }.sorted { $0.key < $1.key }
+            print("permissions".padding(toLength: width, withPad: " ", startingAt: 0) + "  " + (granted.isEmpty ? "none asked" : granted.map { "\($0.key) \($0.value)" }.joined(separator: ", ")))
+        }
+    }
+
+    struct Install: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "install",
+            abstract: "Install a built app on the simulator: a .app bundle, an .ipa, or a tar of a .app."
+        )
+
+        @Argument(help: "The .app, .ipa or .tar.") var path: String
+        @Option var device: String?
+        @OptionGroup var common: CommonJSON
+
+        func run() async throws {
+            let device = try await resolveConfiguredDevice(device)
+            let installed = try await SimulatorAppInstaller.install(URL(fileURLWithPath: (path as NSString).expandingTildeInPath), deviceUDID: device.udid)
+            await ActivityReporter(device: device).done(kind: "install", title: "Install " + installed.name, detail: installed.bundleId)
+            if common.json { try printJSON(installed) } else { print("Installed \(installed.name) (\(installed.bundleId))") }
+        }
+    }
+}
+
+extension Input {
+    struct Rotate: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "rotate",
+            abstract: "Turn the device — portrait, landscape-left, landscape-right, upside-down, or left / right a quarter — or show how it is held.",
+            discussion: """
+            As Simulator.app's Rotate Left (⌘←) and Rotate Right (⌘→): the device \
+            turns and the app follows if it supports the orientation. The command \
+            returns once the device reports the turn. Touches, the accessibility \
+            tree and screenshots then read the picture as it is turned.
+            """
+        )
+
+        @Argument(help: "portrait, landscape-left, landscape-right, upside-down, left or right. Omit it to read the orientation.") var orientation: String?
+        @Option var device: String?
+        @OptionGroup var common: CommonJSON
+
+        func run() async throws {
+            let device = try await resolveConfiguredDevice(device)
+            guard let orientation else {
+                let now = try await SimulatorOrientation.read(deviceUDID: device.udid)
+                if common.json { try printJSON(["orientation": now.rawValue]) } else { print(now.rawValue) }
+                return
+            }
+            let layout = await device.deviceTypeIdentifier.asyncFlatMap { await SimulatorDisplayLayout.load(deviceType: $0) }
+            let output = try await ActivityReporter(device: device).command(SimulatorInputPayload(action: "rotate", name: orientation)) {
+                let reached = try await SimulatorOrientation.rotate(to: orientation, deviceUDID: device.udid, layout: layout)
+                return ProcessOutput(status: 0, stdout: Data(reached.title.utf8))
+            }
+            await SimulatorDirectInputClient.shared.close()
+            try emitCommandResult(output, json: common.json)
+        }
+    }
+}
+
+private extension Optional {
+    func asyncFlatMap<T>(_ transform: (Wrapped) async -> T?) async -> T? {
+        guard let value = self else { return nil }
+        return await transform(value)
     }
 }

@@ -713,6 +713,13 @@ select.input { padding-right: 2px; }
 .sw:disabled { opacity: .4; cursor: default; }
 .sw:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
+.dev-path { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; min-width: 0; }
+.dev-path .mono { flex: 1 1 100%; min-width: 0; overflow-wrap: anywhere; }
+.dev-perms .dev-row { min-height: 28px; }
+.dev-perms select.input { width: 140px; }
+/* Files over the screen: it takes them. */
+.app.dropping .screen { outline: 2px dashed var(--accent); outline-offset: 6px; }
+
 /* No app attached */
 .noapp { flex: 1; overflow: auto; padding: var(--sp-6) var(--sp-5); }
 .noapp h2 { margin: 0 0 var(--sp-2); font-size: var(--fs-15); font-weight: 600; }

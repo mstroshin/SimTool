@@ -51,6 +51,8 @@ public actor SimulatorDirectInputClient {
     /// A foldable's lit panel: pushed by a server watching it, which keeps it
     /// current, or read for a command and trusted for half a second.
     private var displayStates: [String: (state: SimulatorDisplayState, at: Date, pushed: Bool)] = [:]
+    /// When CoreDevice last failed to say how a phone's picture is turned.
+    private var unreadablePhones: [String: Date] = [:]
 
     public init() {}
 
@@ -142,6 +144,13 @@ public actor SimulatorDirectInputClient {
         return on
     }
 
+    /// Turns the device, as Simulator.app's Rotate Left and Right do.
+    public func setOrientation(_ orientation: SimulatorOrientation, deviceUDID: String) async throws {
+        try await answered(SimulatorDirectInputCommand.orientation(orientation.deviceOrientation).line, deviceUDID: deviceUDID, timeoutSeconds: 5)
+        // The picture turns: what was read about it is stale.
+        if displayStates[deviceUDID]?.pushed == false { displayStates[deviceUDID] = nil }
+    }
+
     /// Simulate Memory Warning, as Simulator.app's Debug menu did.
     public func simulateMemoryWarning(deviceUDID: String) async throws {
         try await answered(SimulatorDirectInputCommand.memoryWarning.line, deviceUDID: deviceUDID, timeoutSeconds: 5)
@@ -188,6 +197,7 @@ public actor SimulatorDirectInputClient {
     /// forgets it, and commands read CoreDevice again.
     public func setDisplayState(_ state: SimulatorDisplayState?, deviceUDID: String) {
         displayStates[deviceUDID] = state.map { ($0, Date(), true) }
+        if state != nil { unreadablePhones[deviceUDID] = nil }
     }
 
     /// The device's screens, read once through the helper.
@@ -206,7 +216,21 @@ public actor SimulatorDirectInputClient {
     /// lit one. Nil for a one-screen device, whose touches go as they always
     /// have.
     private func route(deviceUDID: String, display: String? = nil) async throws -> SimulatorTouchRoute? {
-        guard let layout = await displayLayout(deviceUDID: deviceUDID), layout.isFoldable else { return nil }
+        guard let layout = await displayLayout(deviceUDID: deviceUDID) else { return nil }
+        guard layout.isFoldable else {
+            // A phone on its side keeps its framebuffer upright and turns the
+            // picture; a device CoreDevice cannot describe touches as it always
+            // has — and is not asked again for half a minute, since live
+            // touches come here at every move.
+            guard let screen = layout.displays.first else { return nil }
+            if let failed = unreadablePhones[deviceUDID], Date().timeIntervalSince(failed) < 30 { return nil }
+            guard let state = try? await displayState(deviceUDID: deviceUDID, layout: layout) else {
+                unreadablePhones[deviceUDID] = Date()
+                return nil
+            }
+            guard state.rotation(of: screen.id) != 0 else { return nil }
+            return SimulatorTouchRoute(target: layout.touchTarget(of: screen), display: screen, rotation: state.rotation(of: screen.id))
+        }
         let state = try await displayState(deviceUDID: deviceUDID, layout: layout)
         guard let panel = display.flatMap(layout.display(named:)) ?? layout.display(named: state.active) else { return nil }
         return SimulatorTouchRoute(
@@ -466,6 +490,9 @@ struct SimulatorDirectInputCommand: Equatable {
     }
 
     static let memoryWarning = Self(line: "memwarn")
+
+    /// Turns the device to a UIDeviceOrientation (1…4).
+    static func orientation(_ value: Int) -> Self { Self(line: "orient \(value)") }
 
     static let deviceType = Self(line: "type")
 
@@ -733,6 +760,8 @@ enum SimulatorDirectInputHelperSource {
     //   cadebug N [1|0]         "ok 1|0" — the render server's debug option N,
     //                           after setting it when a value is given
     //   memwarn                 simulates a memory warning
+    //   orient N                turns the device: UIDeviceOrientation N (1 portrait,
+    //                           2 upside down, 3 landscape left, 4 landscape right)
     // Streamed, never answered (a live finger must not wait on a reply):
     //   down X Y | move X Y | up X Y
     //   down2 X1 Y1 X2 Y2 | move2 … | up2 …     two fingers
@@ -1072,6 +1101,31 @@ enum SimulatorDirectInputHelperSource {
       return NULL;
     }
 
+    // Simulator.app's Rotate Left and Right: a GraphicsServices event — type 50,
+    // "device orientation changed", flagged as coming from the host — sent to
+    // the guest's PurpleWorkspacePort, where backboardd turns the device. The
+    // message is a GSEvent record after the Mach header: its type at 0x18, the
+    // size of its payload at 0x48, the orientation at 0x4C; 108 bytes, id 123
+    // (the layout facebook/idb documents).
+    static const char *setOrientation(unsigned orientation) {
+      if (orientation < 1 || orientation > 4) { return "no such orientation"; }
+      NSError *err = nil;
+      mach_port_t port = ((mach_port_t (*)(id, SEL, NSString *, NSError **))objc_msgSend)(device, sel_registerName("lookup:error:"), @"PurpleWorkspacePort", &err);
+      if (port == MACH_PORT_NULL) { return "the simulator vends no PurpleWorkspacePort"; }
+      uint32_t words[28] = {0};   // 112 bytes, aligned for the header
+      mach_msg_header_t *header = (mach_msg_header_t *)words;
+      header->msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+      header->msgh_size = 108;
+      header->msgh_remote_port = port;
+      header->msgh_local_port = MACH_PORT_NULL;
+      header->msgh_id = 123;
+      words[0x18 / 4] = 50 | 0x20000;
+      words[0x48 / 4] = 4;
+      words[0x4C / 4] = orientation;
+      kern_return_t sent = mach_msg(header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, 108, 0, MACH_PORT_NULL, 1000, MACH_PORT_NULL);
+      return sent == KERN_SUCCESS ? NULL : "the orientation could not be sent";
+    }
+
     // MARK: - the finger (worker thread only)
 
     typedef struct { double x, y, x2, y2; } Spot;
@@ -1184,7 +1238,7 @@ enum SimulatorDirectInputHelperSource {
 
     // MARK: - commands
 
-    typedef enum { CmdDown, CmdMove, CmdUp, CmdTap, CmdSwipe, CmdPath, CmdSize, CmdBoot, CmdType, CmdTarget, CmdKey, CmdPress, CmdButton, CmdHardwareKeyboard, CmdRenderDebug, CmdMemoryWarning, CmdQuit } Kind;
+    typedef enum { CmdDown, CmdMove, CmdUp, CmdTap, CmdSwipe, CmdPath, CmdSize, CmdBoot, CmdType, CmdTarget, CmdKey, CmdPress, CmdButton, CmdHardwareKeyboard, CmdRenderDebug, CmdMemoryWarning, CmdOrientation, CmdQuit } Kind;
     typedef struct {
       Kind kind; int count; Spot spot; double x2, y2; int ms; char *text;
       unsigned usage, page, mods[3]; int modCount; BOOL on;   // keyboard commands
@@ -1343,6 +1397,7 @@ enum SimulatorDirectInputHelperSource {
           return YES;
         }
         case CmdMemoryWarning: replyFailure(memoryWarning()); return YES;
+        case CmdOrientation: replyFailure(setOrientation(c->usage)); return YES;
         case CmdQuit: fingerUp(last); releaseKeys(); settleKeys(); return NO;
       }
       return YES;
@@ -1443,6 +1498,7 @@ enum SimulatorDirectInputHelperSource {
       if (!strcmp(name, "hwkeyboard") && n >= 1) { c->kind = CmdHardwareKeyboard; c->on = v[0] != 0; return YES; }
       if (!strcmp(name, "cadebug") && n >= 1) { c->kind = CmdRenderDebug; c->usage = (unsigned)v[0]; c->ms = n >= 2 ? (v[1] != 0) : -1; return YES; }
       if (!strcmp(name, "memwarn")) { c->kind = CmdMemoryWarning; return YES; }
+      if (!strcmp(name, "orient") && n >= 1) { c->kind = CmdOrientation; c->usage = (unsigned)v[0]; return YES; }
       size_t len = strlen(name);
       BOOL two = len > 1 && name[len - 1] == '2';
       if (two) { name[len - 1] = 0; }

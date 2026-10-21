@@ -89,6 +89,7 @@ public final class StreamServer: @unchecked Sendable {
     private let deviceSettings: DeviceSettingsReader
     private var displayMonitor: DisplayStateMonitor?
     private var foldMonitor: FoldMonitor?
+    private var orientationMonitor: OrientationMonitor?
     /// A foldable's 3D preview, rendered while a viewer watches it.
     private var duo3D: Duo3DStream?
     /// The fold last told to the activity feed, and a viewer update or a
@@ -178,7 +179,22 @@ public final class StreamServer: @unchecked Sendable {
         guard let deviceType, let layout = await SimulatorDisplayLayout.load(deviceType: deviceType) else { return }
         displays.set(layout: layout)
         frameCapture.setScreens(layout.displays.map { ($0.width, $0.height) })
-        guard layout.isFoldable else { return }
+        guard layout.isFoldable else {
+            // A phone turns its picture on its framebuffer when it is rotated —
+            // by SimTool, by Device Hub, by an app that forces landscape. It is
+            // read now, and again whenever the guest says it turned.
+            let monitor = DisplayStateMonitor(deviceUDID: config.device.udid, layout: layout) { [weak self] state in
+                self?.displayStateChanged(state)
+            }
+            let turns = OrientationMonitor(deviceUDID: config.device.udid) { [weak monitor] in await monitor?.refresh() }
+            stateLock.withLock {
+                displayMonitor = monitor
+                orientationMonitor = turns
+            }
+            await monitor.refresh()
+            turns.start()
+            return
+        }
         let monitor = DisplayStateMonitor(deviceUDID: config.device.udid, layout: layout) { [weak self] state in
             self?.displayStateChanged(state)
         }
@@ -280,6 +296,7 @@ public final class StreamServer: @unchecked Sendable {
     public func stop() {
         stateLock.withLock { displayMonitor }?.stop()
         stateLock.withLock { foldMonitor }?.stop()
+        stateLock.withLock { orientationMonitor }?.stop()
         stateLock.withLock { duo3D }?.stop()
         inspectorEvents.closeAll()
         testDefinitionsWatcher?.stop()
@@ -392,6 +409,29 @@ public final class StreamServer: @unchecked Sendable {
             }
         }
         server.POST["/api/v1/device"] = { request in self.handleDeviceControl(request) }
+        // The app under test (or `bundleId`): its card, its bundle and data in
+        // the Finder, and installing a build dropped on the viewer.
+        server.GET["/api/v1/app"] = { request in
+            do {
+                let bundleId = try self.bundleId(request.queryValue("bundleId"))
+                let udid = self.config.device.udid
+                return try self.jsonEncodedResponse(try self.waitForAsync { try await SimulatorAppInfoClient.read(bundleId: bundleId, deviceUDID: udid, permissions: true) })
+            } catch {
+                return self.errorResponse(error, statusCode: 400, reason: "Bad Request")
+            }
+        }
+        server.POST["/api/v1/app/reveal"] = { request in
+            do {
+                let body = try self.decodeJSON([String: String].self, from: request)
+                let bundleId = try self.bundleId(body["bundleId"])
+                let udid = self.config.device.udid
+                let path = try self.waitForAsync { try await SimulatorAppInfoClient.reveal(body["what"] ?? "bundle", bundleId: bundleId, deviceUDID: udid) }
+                return try self.jsonEncodedResponse(CommandResultPayload(ok: true, stdout: path, stderr: ""))
+            } catch {
+                return self.errorResponse(error, statusCode: 400, reason: "Bad Request")
+            }
+        }
+        server.POST["/api/v1/app/install"] = { request in self.handleInstall(request) }
         server.POST["/api/v1/input/paste-image"] = { request in self.handlePasteImage(request) }
         server.POST["/api/v1/photos"] = { request in self.handleAddToPhotos(request) }
 
@@ -1100,8 +1140,8 @@ public final class StreamServer: @unchecked Sendable {
                 }
             }
             testSessions.noteInput(at: startedAt)
-            // A fold says where the device came to rest.
-            if action == "pose", !output.stdoutString.isEmpty {
+            // A fold or a turn says where the device came to rest.
+            if action == "pose" || action == "rotate", !output.stdoutString.isEmpty {
                 activity.update(id: entry.id) { $0.detail = output.stdoutString }
             }
             activity.finish(id: entry.id)
@@ -1112,6 +1152,39 @@ public final class StreamServer: @unchecked Sendable {
             ))
         } catch {
             activity.finish(id: entry.id, error: error.localizedDescription)
+            return errorResponse(error, statusCode: 400, reason: "Bad Request")
+        }
+    }
+
+    /// The app a request names, or the server's own.
+    private func bundleId(_ requested: String?) throws -> String {
+        guard let bundleId = requested.flatMap({ $0.isEmpty ? nil : $0 }) ?? config.defaultLogApp else {
+            throw SimToolError("Name the app: pass bundleId, or start the server with --app")
+        }
+        return bundleId
+    }
+
+    /// Installs the build in the body: an `.ipa`, or a tar of a `.app` — what
+    /// the viewer sends for a bundle dropped on its screen.
+    private func handleInstall(_ request: HttpRequest) -> HttpResponse {
+        do {
+            guard !request.body.isEmpty else { throw SimToolError("The request body must be the .ipa, or a tar of the .app") }
+            let name = request.headers["x-simtool-filename"].flatMap { $0.removingPercentEncoding }.map { ($0 as NSString).lastPathComponent } ?? "upload"
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("simtool-install-upload-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let file = directory.appendingPathComponent(name.isEmpty ? "upload" : name)
+            try Data(request.body).write(to: file)
+            let udid = config.device.udid
+            let installed = try recordingActivity(of: request, kind: "install", title: "Install " + (name as NSString).deletingPathExtension.replacingOccurrences(of: ".app", with: "")) {
+                try self.waitForAsync { try await SimulatorAppInstaller.install(file, deviceUDID: udid) }
+            }
+            // The upload's name was a guess; the bundle says what it is.
+            if let entry = activity.last(where: { $0.kind == "install" }) {
+                activity.update(id: entry.id) { $0.title = "Install " + installed.name; $0.detail = installed.bundleId }
+            }
+            return try jsonEncodedResponse(installed)
+        } catch {
             return errorResponse(error, statusCode: 400, reason: "Bad Request")
         }
     }
@@ -1133,7 +1206,7 @@ public final class StreamServer: @unchecked Sendable {
             let startedAt = Date()
             let result = try waitForAsync { try await SimulatorDeviceControl.perform(control, deviceUDID: udid, app: app) }
             testSessions.noteInput(at: startedAt)
-            if DeviceActivityWording.reportsResult(of: control) { activity.update(id: entry.id) { $0.detail = result } }
+            if DeviceActivityWording.reportsResult(of: control) { activity.update(id: entry.id) { $0.detail = [words.detail, result].compactMap { $0 }.joined(separator: " · ") } }
             activity.finish(id: entry.id)
             return try jsonEncodedResponse(CommandResultPayload(ok: true, stdout: result, stderr: ""))
         } catch {
@@ -1547,6 +1620,15 @@ public final class StreamServer: @unchecked Sendable {
                 return (displays.current.state?.active, displays.fold)
             }
             return ProcessOutput(status: 0, stdout: Data(state.summary.utf8))
+        case "rotate", "orientation":
+            // Simulator.app's Rotate Left / Right; the picture turns once the
+            // device has, and is read again at once.
+            guard let name = input.name, !name.isEmpty else {
+                throw SimToolError("Rotate input requires name: portrait, landscape-left, landscape-right, upside-down, left or right")
+            }
+            let reached = try await SimulatorOrientation.rotate(to: name, deviceUDID: udid, layout: displays.current.layout)
+            await stateLock.withLock { displayMonitor }?.refresh()
+            return ProcessOutput(status: 0, stdout: Data(reached.title.utf8))
         case "shake":
             // Same darwin notification Simulator.app's Device > Shake menu posts;
             // UIKit in the simulated OS turns it into motionEnded(.motionShake).

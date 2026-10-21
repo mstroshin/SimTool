@@ -398,7 +398,16 @@ public final class TestRunExecutor: @unchecked Sendable {
             client: client,
             udid: config.udid,
             defaultTimeout: test.stepTimeout,
-            app: test.app
+            app: app,
+            // A permission step ends a running app, as iOS does; the run
+            // brings it back as it launched it, logs re-armed.
+            relaunch: app.map { app in
+                { [self] in
+                    try await self.launchApp(app, launch: launch, udid: config.udid)
+                    await self.rearmLogCapture(app: app, udid: config.udid)
+                    await self.narrate("Relaunched \(app) after the permission change")
+                }
+            }
         )
         var completedSteps = 0
         var stagingFailed = false

@@ -13,8 +13,12 @@ public struct TestRunner {
     public let client: SimToolClient
     public let udid: String
     public let defaultTimeout: Double
-    /// The app under test: where a `push:` step without its own `app:` goes.
+    /// The app under test: where a `push:` or `permission:` step without its
+    /// own `app:` goes.
     public let app: String?
+    /// Launches the app under test as the run did — after a permission step
+    /// that ended it.
+    public let relaunch: (@Sendable () async throws -> Void)?
 
     private static let pollInterval: Duration = .milliseconds(500)
 
@@ -22,12 +26,14 @@ public struct TestRunner {
         client: SimToolClient,
         udid: String,
         defaultTimeout: Double,
-        app: String? = nil
+        app: String? = nil,
+        relaunch: (@Sendable () async throws -> Void)? = nil
     ) {
         self.client = client
         self.udid = udid
         self.defaultTimeout = defaultTimeout
         self.app = app
+        self.relaunch = relaunch
     }
 
     /// Flat "type id label" lines of what is currently on screen, for failure
@@ -123,8 +129,13 @@ public struct TestRunner {
         case .pose(let pose):
             try check(await client.pose(pose), action: "fold to \(pose)")
         case .device(var control):
-            if control.action == "push", control.bundleId == nil { control.bundleId = app }
+            if ["push", "permission"].contains(control.action), control.bundleId == nil { control.bundleId = app }
+            let ending = control.action == "permission" && control.bundleId == app
+            let wasRunning = ending ? await SimulatorAppInfoClient.isRunning(bundleId: app ?? "", deviceUDID: udid) : false
             try check(await client.device(control), action: DeviceActivityWording.describe(control: control).title.lowercased())
+            if wasRunning, !(await SimulatorAppInfoClient.isRunning(bundleId: app ?? "", deviceUDID: udid)) { try await relaunch?() }
+        case .rotate(let orientation):
+            try check(await client.input(SimulatorInputPayload(action: "rotate", name: orientation)), action: "rotate \(orientation)")
         case .pause(let seconds):
             try await Task.sleep(for: .milliseconds(Int(seconds * 1000)))
         }

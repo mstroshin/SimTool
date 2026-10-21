@@ -75,7 +75,8 @@ struct ActivityReporter: Sendable {
         let started = await begin(DeviceActivityReport(kind: words.kind, title: words.title, detail: words.detail))
         do {
             let result = try await perform()
-            await finish(started, error: nil, detail: DeviceActivityWording.reportsResult(of: control) ? result : nil)
+            let detail = [words.detail, result].compactMap { $0 }.joined(separator: " · ")
+            await finish(started, error: nil, detail: DeviceActivityWording.reportsResult(of: control) ? detail : nil)
             return result
         } catch {
             await finish(started, error: error)

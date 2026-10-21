@@ -104,6 +104,17 @@ final class DeviceControlWordingTests: XCTestCase {
         XCTAssertEqual(DeviceActivityWording.describe(control: DeviceControlPayload(action: "debug", option: "slow", enabled: true)).kind, "debug")
     }
 
+    func testAccessibilityPermissionsKeychainAndATurnSayWhatChanged() {
+        XCTAssertEqual(title(DeviceControlPayload(action: "accessibility", option: "voiceover", enabled: true)), "VoiceOver on")
+        XCTAssertEqual(title(DeviceControlPayload(action: "accessibility", option: "color-filter", value: "red-green")), "Color Filters protanopia")
+        let grant = DeviceActivityWording.describe(control: DeviceControlPayload(action: "permission", option: "att", value: "revoke", bundleId: "com.example.app"))
+        XCTAssertEqual(grant.title, "Deny Tracking (ATT)")
+        XCTAssertEqual(grant.detail, "for com.example.app")
+        XCTAssertEqual(title(DeviceControlPayload(action: "keychain", value: "add-root-cert")), "Trust a root certificate")
+        XCTAssertEqual(DeviceActivityWording.describe(SimulatorInputPayload(action: "rotate", name: "left"), action: "rotate").title, "Rotate left")
+        XCTAssertEqual(DeviceActivityWording.describe(SimulatorInputPayload(action: "rotate", name: "landscape-right"), action: "rotate").title, "Rotate to landscape right")
+    }
+
     func testAPushNamesItsAppAndQuotesItsAlert() {
         let payload = NetworkLoggerJSONValue.object(["aps": .object(["alert": .object(["title": .string("Order"), "body": .string("Shipped")])])])
         let words = DeviceActivityWording.describe(control: DeviceControlPayload(action: "push", bundleId: "com.example.shop", payload: payload))

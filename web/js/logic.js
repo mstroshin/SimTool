@@ -1004,3 +1004,74 @@ function foldStateEvents(events, window) {
   }
   return { latest, changes, lastChange };
 }
+
+// ---- An .app dropped on the screen ----
+
+// A tar of entries { path, bytes } (bytes null for a folder) — how the viewer
+// uploads an .app bundle, which a browser hands over as files, not as a
+// folder. ustar, with a pax record for a path longer than its 100 bytes; every
+// file is executable, since the browser does not say which ones were.
+function tarArchive(entries, mtime) {
+  const blocks = [];
+  let size = 0;
+  const push = (bytes) => { blocks.push(bytes); size += bytes.length; };
+  const pad = (length) => { if (length % 512) push(new Uint8Array(512 - (length % 512))); };
+  const header = (name, length, type, mode) => {
+    const block = new Uint8Array(512);
+    const ascii = (offset, text) => block.set(utf8Bytes(text), offset);
+    block.set(name.subarray(0, 100), 0);
+    ascii(100, mode.toString(8).padStart(7, "0"));
+    ascii(108, "0000000");
+    ascii(116, "0000000");
+    ascii(124, length.toString(8).padStart(11, "0"));
+    ascii(136, Math.floor(mtime || 0).toString(8).padStart(11, "0"));
+    block[156] = type.charCodeAt(0);
+    ascii(257, "ustar");
+    ascii(263, "00");
+    block.fill(32, 148, 156);
+    let sum = 0;
+    for (const byte of block) sum += byte;
+    ascii(148, sum.toString(8).padStart(6, "0"));
+    block[154] = 0;
+    return block;
+  };
+  for (const entry of entries) {
+    const folder = !entry.bytes;
+    const path = entry.path + (folder && !entry.path.endsWith("/") ? "/" : "");
+    const name = utf8Bytes(path);
+    if (name.length > 100) {
+      // "<length> path=<path>\n", the length counting its own digits.
+      const rest = " path=" + path + "\n";
+      let length = utf8Bytes(rest).length;
+      while (String(length).length + utf8Bytes(rest).length !== length) length = String(length).length + utf8Bytes(rest).length;
+      const record = utf8Bytes(length + rest);
+      push(header(utf8Bytes("PaxHeader"), record.length, "x", 0o644));
+      push(record);
+      pad(record.length);
+    }
+    const data = entry.bytes || new Uint8Array(0);
+    push(header(name, data.length, folder ? "5" : "0", 0o755));
+    if (data.length) { push(data); pad(data.length); }
+  }
+  push(new Uint8Array(1024));
+  const out = new Uint8Array(size);
+  let at = 0;
+  for (const block of blocks) { out.set(block, at); at += block.length; }
+  return out;
+}
+
+function utf8Bytes(text) {
+  const raw = unescape(encodeURIComponent(text));
+  const bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+  return bytes;
+}
+
+// What a file dropped on the screen is for: Photos, an install, or nothing SimTool takes.
+function dropKind(name, type, folder) {
+  const lower = String(name || "").toLowerCase();
+  if (folder) return lower.endsWith(".app") ? "app" : "none";
+  if (lower.endsWith(".ipa")) return "ipa";
+  if (/^(image|video)\//.test(type || "") || /\.(png|jpe?g|heic|heif|gif|webp|tiff?|mov|mp4|m4v)$/.test(lower)) return "media";
+  return "none";
+}

@@ -216,6 +216,8 @@ extension AgentSkill {
           - push: { aps: { alert: "Shipped" } }   # to the test's app; { app: …, payload: { aps: … } } for another
           - location: "37.3349,-122.0090"         # or { route: ["lat,lon", …], speed: 20 } or clear
           - statusBar: clean           # 9:41, full Wi-Fi, charged — or { time: "9:41", batteryLevel: 20 } or clear
+          - permission: { camera: deny }          # one permission of the test's app: grant | deny | reset (location: always)
+          - rotate: landscape-left     # portrait | landscape-left | landscape-right | upside-down | left | right
           - assertVisible: { text: "Welcome", criterion: AC-1 }   # alias of waitFor
           - assertHidden: { label: "Loading" }
           - wait: 2                    # escape hatch; prefer waitFor / assertHidden
@@ -244,7 +246,8 @@ extension AgentSkill {
         in apps that support that; aim for the row's edge to reorder.
 
         **Device settings are steps, not staging.** `appearance`, `textSize`,
-        `contrast`, `biometrics`, `push`, `location` and `statusBar` change the
+        `contrast`, `biometrics`, `push`, `location`, `statusBar`, `permission` and
+        `rotate` change the
         simulator mid-run, where the scenario needs it — a dark-mode screen, a Face ID
         prompt answered after the tap that raised it, a push the app reacts to. They
         stay changed after the run: a test that sets one puts it back in its last steps
@@ -301,10 +304,11 @@ extension AgentSkill {
         **`reset:` replaces hand-written state-clearing shell** and travels with the
         test. `permissions:` pre-answers the system alerts that would otherwise block
         the drive: `simtool input` cannot reach a system alert, and while one is up the
-        accessibility tree is unreadable — which reads exactly like a broken app. Note
-        that the notification prompt has no `simctl` backdoor; answer it by hand once
-        and it stays answered for that install. A `reset:` that cannot be applied makes
-        the run `infra`, never a failing claim.
+        accessibility tree is unreadable — which reads exactly like a broken app.
+        `notifications`, `camera`, `faceid`, `speech`, `user-tracking` and `pasteboard`
+        are pre-answered too; `notifications` resprings the simulator (SpringBoard reads
+        it only as it starts), so put it in `reset:` rather than mid-run. A `reset:` that
+        cannot be applied makes the run `infra`, never a failing claim.
 
         **`setup:` is the escape hatch for what `reset:` cannot express.** Non-zero
         exits are recorded in the session and never fail the test, because these commands

@@ -222,6 +222,11 @@ public struct SimulatorDisplayState: Codable, Equatable, Sendable {
             }
             if let uniqueID = entry.uniqueId, !uniqueID.isEmpty { uniqueIDs[display.id] = uniqueID }
         }
+        // A phone's one screen is lit whenever the device is; CoreDevice does not say so.
+        if active == nil, layout.displays.count == 1, let only = layout.displays.first,
+           displays.contains(where: { $0.displayId == only.screenID }) {
+            active = only.id
+        }
         guard let active else { return nil }
         return SimulatorDisplayState(active: active, rotations: rotations, uniqueIDs: uniqueIDs)
     }
