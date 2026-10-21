@@ -88,6 +88,30 @@ final class WebViewerPageTests: XCTestCase {
         XCTAssertTrue(page.contains(#"action: "rotate", name"#), "a turn goes as input")
     }
 
+    // Device sits after Accessibility; the ⌥ keys stay each tab's own, so
+    // Tests and Activity keep ⌥5 and ⌥6.
+    func testTheDeviceTabFollowsAccessibilityAndTheTabKeysStay() throws {
+        let ax = try XCTUnwrap(page.range(of: #"id="tab-ax""#))
+        let device = try XCTUnwrap(page.range(of: #"id="tab-device""#))
+        let tests = try XCTUnwrap(page.range(of: #"id="tab-tests""#))
+        XCTAssertTrue(ax.lowerBound < device.lowerBound && device.lowerBound < tests.lowerBound)
+        XCTAssertTrue(page.contains(#"const TABS = ["network", "logs", "state", "ax", "device", "tests", "activity"];"#))
+        XCTAssertTrue(page.contains(#"const TAB_KEYS = ["network", "logs", "state", "ax", "tests", "activity", "device"];"#))
+        XCTAssertTrue(page.contains("openTab(TAB_KEYS[Number(event.code.slice(5)) - 1])"))
+    }
+
+    // One floating tip, moved along so it stays inside the window — a button at
+    // an edge keeps its words — and drawn above its control where there is no room below.
+    func testTooltipsStayInsideTheWindow() throws {
+        XCTAssertTrue(page.contains(#"<div class="tip" id="tip" aria-hidden="true" hidden></div>"#))
+        XCTAssertFalse(page.contains("content: attr(data-tip)"), "no tip drawn by CSS inside its control's box")
+        let draw = try XCTUnwrap(page.range(of: "function drawTip()"))
+        let body = page[draw.upperBound...].prefix(900)
+        XCTAssertTrue(body.contains("innerWidth - box.width - TIP_MARGIN"))
+        XCTAssertTrue(body.contains("anchor.top - TIP_GAP - box.height"))
+        XCTAssertTrue(page.contains(#"document.addEventListener("focusin""#), "keyboard focus shows the tip too")
+    }
+
     // Rotate Left and Right, as Simulator.app has them: a toolbar button and ⌘← / ⌘→.
     func testTheDeviceTurnsFromTheToolbarAndTheKeyboard() throws {
         XCTAssertTrue(page.contains(#"id="rotateButton" aria-label="Rotate left""#))

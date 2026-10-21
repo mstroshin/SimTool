@@ -1036,6 +1036,65 @@ enum WebViewerAssets {
           return true;
         }
 
+        // ---- Tooltips: the action and its shortcut, on hover and keyboard focus ----
+        // One floating tip for every [data-tip]: under its control, above it where the
+        // window has no room below, and moved along so it never leaves the window — a
+        // button at an edge keeps its words. A tip that changes while it shows (a
+        // toggled button) is drawn again.
+
+        const tip = { node: $("tip"), target: null, watch: null };
+        const TIP_GAP = 6, TIP_MARGIN = 6;
+
+        function showTip(target) {
+          if (tip.target !== target) {
+            hideTip();
+            tip.target = target;
+            tip.watch = new MutationObserver(drawTip);
+            tip.watch.observe(target, { attributes: true, attributeFilter: ["data-tip", "data-key", "hidden"] });
+          }
+          drawTip();
+        }
+
+        function drawTip() {
+          const target = tip.target;
+          if (!target || !target.dataset.tip || !target.isConnected || !target.getClientRects().length) { hideTip(); return; }
+          const node = tip.node;
+          node.replaceChildren(el("span", { text: target.dataset.tip }), target.dataset.key ? el("span", { text: target.dataset.key }) : "");
+          node.hidden = false;
+          const anchor = target.getBoundingClientRect(), box = node.getBoundingClientRect();
+          const left = Math.max(TIP_MARGIN, Math.min(anchor.left + anchor.width / 2 - box.width / 2, innerWidth - box.width - TIP_MARGIN));
+          const below = anchor.bottom + TIP_GAP;
+          const top = below + box.height <= innerHeight - TIP_MARGIN ? below : Math.max(TIP_MARGIN, anchor.top - TIP_GAP - box.height);
+          node.style.transform = "translate(" + Math.round(left) + "px, " + Math.round(top) + "px)";
+        }
+
+        function hideTip() {
+          if (tip.watch) tip.watch.disconnect();
+          tip.watch = null;
+          tip.target = null;
+          tip.node.hidden = true;
+        }
+
+        const tipTarget = (node) => (node && node.closest ? node.closest("[data-tip]") : null);
+        document.addEventListener("pointerover", (event) => {
+          if (event.pointerType === "touch") return;
+          const target = tipTarget(event.target);
+          if (target) showTip(target);
+          else if (tip.target && !tip.target.matches(":focus-visible")) hideTip();
+        });
+        document.addEventListener("pointerout", (event) => {
+          if (tip.target && !tipTarget(event.relatedTarget) && !tip.target.matches(":focus-visible")) hideTip();
+        });
+        document.addEventListener("focusin", (event) => {
+          const target = tipTarget(event.target);
+          if (target === event.target && target.matches(":focus-visible")) showTip(target);
+        });
+        document.addEventListener("focusout", (event) => { if (event.target === tip.target) hideTip(); });
+        // A press, a key or a scroll takes the tip away; it comes back on the next
+        // hover. A new window size moves it along with its control.
+        for (const type of ["pointerdown", "keydown", "wheel", "scroll"]) document.addEventListener(type, hideTip, true);
+        window.addEventListener("resize", () => { if (tip.target) drawTip(); });
+
         // ---- Confirmation for what cannot be undone ----
 
         let dialogResolve = null;
@@ -2152,7 +2211,9 @@ enum WebViewerAssets {
         // inspector, the filter field every tab shares, app launches, and the
         // split detail under each list.
 
-        const TABS = ["network", "logs", "state", "ax", "tests", "activity", "device"];
+        const TABS = ["network", "logs", "state", "ax", "device", "tests", "activity"];
+        // ⌥1–7, each tab's own: a tab added in between does not move the others' keys.
+        const TAB_KEYS = ["network", "logs", "state", "ax", "tests", "activity", "device"];
         const inspector = { tab: stored("tab", "network"), open: stored("inspectorOpen", true), attachedApp: "", configKnown: false };
         const tabHandlers = {};   // tab → { show(), hide() }
 
@@ -5083,7 +5144,7 @@ enum WebViewerAssets {
 
     static let jsPaletteJs = #"""
         // The command palette (⇧⌘P) and the page's keyboard shortcuts. Shortcuts
-        // follow Simulator.app and Xcode where they exist; tabs use ⌥1–6 because
+        // follow Simulator.app and Xcode where they exist; tabs use ⌥1–7 because
         // browsers keep ⌘1–9 for themselves.
 
         function paletteCommands() {
@@ -5119,9 +5180,9 @@ enum WebViewerAssets {
             ["Inspector", "panel", "Logs", "⌥2", () => openTab("logs")],
             ["Inspector", "panel", "State", "⌥3", () => openTab("state")],
             ["Inspector", "pick", "Accessibility", "⌥4", () => openTab("ax")],
+            ["Inspector", "panel", "Device — the simulator's settings and debug switches", "⌥7", () => openTab("device")],
             ["Inspector", "panel", "Tests", "⌥5", () => openTab("tests")],
             ["Inspector", "pick", "Activity — what was done to the device", "⌥6", () => openTab("activity")],
-            ["Inspector", "panel", "Device — the simulator's settings and debug switches", "⌥7", () => openTab("device")],
             ["Inspector", "search", "Filter the current list", "/", focusFilter],
             ["Network", network.paused ? "play" : "pause", network.paused ? "Resume the request list" : "Pause the request list", "", () => { openTab("network"); networkPause.click(); }],
             ["Network", "trash", "Clear the request list", "", () => { openTab("network"); networkClear.click(); }],
@@ -5321,7 +5382,7 @@ enum WebViewerAssets {
           if (event.metaKey && !event.shiftKey && !event.altKey && !event.ctrlKey && event.code === "KeyR") { event.preventDefault(); if (!event.repeat) toggleRecording(); return; }
           if (event.metaKey && event.ctrlKey && event.code === "KeyZ") { event.preventDefault(); pressShake(); return; }
           if (event.metaKey && event.altKey && event.code === "Digit0") { event.preventDefault(); setInspectorOpen(!inspector.open); return; }
-          if (event.altKey && !meta && /^Digit[1-7]$/.test(event.code)) { event.preventDefault(); openTab(TABS[Number(event.code.slice(5)) - 1]); return; }
+          if (event.altKey && !meta && /^Digit[1-7]$/.test(event.code)) { event.preventDefault(); openTab(TAB_KEYS[Number(event.code.slice(5)) - 1]); return; }
           if (meta && event.key === "Enter" && inspector.tab === "tests" && tests.view === "tests" && tests.selectedFile) { event.preventDefault(); runTest(tests.selectedFile); return; }
           if (editing || keyboardBridge.enabled) return;
           // Simulator.app's Rotate Left and Right; with the Mac keyboard connected ⌘← and ⌘→ edit text in the device.
@@ -7383,16 +7444,14 @@ enum WebViewerAssets {
         }
         @container bar (max-width: 560px) { .device-id, .brand { display: none; } }
 
-        /* Tooltips: the action and its shortcut, on hover and keyboard focus. */
-        [data-tip] { position: relative; }
-        [data-tip]:hover::after, [data-tip]:focus-visible::after {
-          content: attr(data-tip); position: absolute; top: calc(100% + 6px); left: 50%; transform: translateX(-50%); z-index: 40;
+        /* Tooltips: the action and its shortcut, on hover and keyboard focus — one floating tip
+           (js/core.js) under the control, above it where the window ends, always inside the window. */
+        .tip {
+          position: fixed; left: 0; top: 0; z-index: 80; display: flex; align-items: baseline; gap: 10px; max-width: min(420px, calc(100vw - 12px));
           padding: 4px 8px; border-radius: var(--r-1); background: var(--ink1); color: var(--g1);
-          font: 500 var(--fs-11)/1.3 var(--font-ui); white-space: nowrap; pointer-events: none;
+          font: 500 var(--fs-11)/1.3 var(--font-ui); pointer-events: none;
         }
-        [data-tip][data-key]:hover::after, [data-tip][data-key]:focus-visible::after { content: attr(data-tip) "   " attr(data-key); }
-        .tb-right [data-tip]:hover::after, .tb-right [data-tip]:focus-visible::after { left: auto; right: 0; transform: none; }
-        .statusbar [data-tip]:hover::after, .statusbar [data-tip]:focus-visible::after { top: auto; bottom: calc(100% + 6px); }
+        .tip[hidden] { display: none; }
 
         /* ── Workspace: stage | splitter | inspector ── */
         .workspace { display: grid; grid-template-columns: minmax(300px, var(--stage-w, 1fr)) 1px minmax(380px, 1fr); min-height: 0; min-width: 0; }
@@ -8171,17 +8230,17 @@ enum WebViewerAssets {
                   <button role="tab" class="tab" type="button" id="tab-logs" data-tab="logs" aria-controls="panel-logs" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+2">Logs <span class="count" id="count-logs"></span><span class="count-err" id="err-logs" hidden></span></button>
                   <button role="tab" class="tab" type="button" id="tab-state" data-tab="state" aria-controls="panel-state" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+3">State <span class="count" id="count-state"></span></button>
                   <button role="tab" class="tab" type="button" id="tab-ax" data-tab="ax" aria-controls="panel-ax" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+4">Accessibility</button>
+                  <button role="tab" class="tab" type="button" id="tab-device" data-tab="device" aria-controls="panel-device" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+7">Device</button>
                   <button role="tab" class="tab" type="button" id="tab-tests" data-tab="tests" aria-controls="panel-tests" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+5">Tests <span class="count" id="count-tests"></span><span class="count-err" id="err-tests" hidden></span></button>
                   <button role="tab" class="tab" type="button" id="tab-activity" data-tab="activity" aria-controls="panel-activity" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+6">Activity <span class="count" id="count-activity"></span><span class="count-err" id="err-activity" hidden></span></button>
-                  <button role="tab" class="tab" type="button" id="tab-device" data-tab="device" aria-controls="panel-device" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+7">Device</button>
                 </div>
                 <div class="panel" role="tabpanel" id="panel-network" aria-labelledby="tab-network"></div>
                 <div class="panel" role="tabpanel" id="panel-logs" aria-labelledby="tab-logs" hidden></div>
                 <div class="panel" role="tabpanel" id="panel-state" aria-labelledby="tab-state" hidden></div>
                 <div class="panel" role="tabpanel" id="panel-ax" aria-labelledby="tab-ax" hidden></div>
+                <div class="panel" role="tabpanel" id="panel-device" aria-labelledby="tab-device" hidden></div>
                 <div class="panel" role="tabpanel" id="panel-tests" aria-labelledby="tab-tests" hidden></div>
                 <div class="panel" role="tabpanel" id="panel-activity" aria-labelledby="tab-activity" hidden></div>
-                <div class="panel" role="tabpanel" id="panel-device" aria-labelledby="tab-device" hidden></div>
               </section>
             </main>
 
@@ -8199,6 +8258,7 @@ enum WebViewerAssets {
 
           <div class="menu" id="menu" role="menu" hidden></div>
           <div class="popover" id="popover" role="dialog" hidden></div>
+          <div class="tip" id="tip" aria-hidden="true" hidden></div>
           <div class="scrim" id="paletteScrim" hidden>
             <div class="palette" role="dialog" aria-modal="true" aria-label="Commands">
               <div class="palette-input"><svg class="ic" aria-hidden="true"><use href="#i-search"/></svg><input id="paletteInput" type="text" role="combobox" aria-expanded="true" aria-controls="paletteList" aria-label="Command" placeholder="Type a command or a test name…" autocomplete="off" spellcheck="false"></div>

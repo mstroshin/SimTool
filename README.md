@@ -63,7 +63,7 @@ Open `http://127.0.0.1:3200` after starting `serve` (the URL is printed on start
 or pass `--web` to open the browser viewer automatically.
 
 The viewer is one window: the device on the left, the inspector on the right
-(**Network**, **Logs**, **State**, **Accessibility**, **Tests**, **Activity**, **Device**), with a splitter
+(**Network**, **Logs**, **State**, **Accessibility**, **Device**, **Tests**, **Activity**), with a splitter
 between them that remembers where you leave it; in a narrow pane the inspector
 moves under the device instead of covering it. Under the device are its size in
 points, the frame rate and the pointer's position in points; the status bar at

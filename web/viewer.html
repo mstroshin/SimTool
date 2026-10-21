@@ -163,17 +163,17 @@
           <button role="tab" class="tab" type="button" id="tab-logs" data-tab="logs" aria-controls="panel-logs" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+2">Logs <span class="count" id="count-logs"></span><span class="count-err" id="err-logs" hidden></span></button>
           <button role="tab" class="tab" type="button" id="tab-state" data-tab="state" aria-controls="panel-state" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+3">State <span class="count" id="count-state"></span></button>
           <button role="tab" class="tab" type="button" id="tab-ax" data-tab="ax" aria-controls="panel-ax" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+4">Accessibility</button>
+          <button role="tab" class="tab" type="button" id="tab-device" data-tab="device" aria-controls="panel-device" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+7">Device</button>
           <button role="tab" class="tab" type="button" id="tab-tests" data-tab="tests" aria-controls="panel-tests" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+5">Tests <span class="count" id="count-tests"></span><span class="count-err" id="err-tests" hidden></span></button>
           <button role="tab" class="tab" type="button" id="tab-activity" data-tab="activity" aria-controls="panel-activity" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+6">Activity <span class="count" id="count-activity"></span><span class="count-err" id="err-activity" hidden></span></button>
-          <button role="tab" class="tab" type="button" id="tab-device" data-tab="device" aria-controls="panel-device" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+7">Device</button>
         </div>
         <div class="panel" role="tabpanel" id="panel-network" aria-labelledby="tab-network"></div>
         <div class="panel" role="tabpanel" id="panel-logs" aria-labelledby="tab-logs" hidden></div>
         <div class="panel" role="tabpanel" id="panel-state" aria-labelledby="tab-state" hidden></div>
         <div class="panel" role="tabpanel" id="panel-ax" aria-labelledby="tab-ax" hidden></div>
+        <div class="panel" role="tabpanel" id="panel-device" aria-labelledby="tab-device" hidden></div>
         <div class="panel" role="tabpanel" id="panel-tests" aria-labelledby="tab-tests" hidden></div>
         <div class="panel" role="tabpanel" id="panel-activity" aria-labelledby="tab-activity" hidden></div>
-        <div class="panel" role="tabpanel" id="panel-device" aria-labelledby="tab-device" hidden></div>
       </section>
     </main>
 
@@ -191,6 +191,7 @@
 
   <div class="menu" id="menu" role="menu" hidden></div>
   <div class="popover" id="popover" role="dialog" hidden></div>
+  <div class="tip" id="tip" aria-hidden="true" hidden></div>
   <div class="scrim" id="paletteScrim" hidden>
     <div class="palette" role="dialog" aria-modal="true" aria-label="Commands">
       <div class="palette-input"><svg class="ic" aria-hidden="true"><use href="#i-search"/></svg><input id="paletteInput" type="text" role="combobox" aria-expanded="true" aria-controls="paletteList" aria-label="Command" placeholder="Type a command or a test name…" autocomplete="off" spellcheck="false"></div>
