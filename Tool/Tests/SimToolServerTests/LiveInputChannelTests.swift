@@ -42,6 +42,28 @@ final class LiveInputChannelTests: XCTestCase {
         XCTAssertFalse(channel.isTouching)
     }
 
+    // A foldable's viewer names the panel it shows; the touch goes there.
+    func testTheShownPanelRidesAlongWithEveryPhase() {
+        let recorder = Recorder()
+        let displays = DisplayRecorder()
+        let channel = LiveInputChannel(emit: { event in
+            recorder.record(event)
+            if case let .touch(touch) = event { displays.append(touch.display) }
+        })
+        channel.receive(#"{"t":"down","x":0.5,"y":0.7,"d":"primary-1"}"#)
+        channel.receive(#"{"t":"move","x":0.5,"y":0.6,"d":"primary-1"}"#)
+        channel.disconnect()
+        XCTAssertEqual(recorder.lines, ["down 0.50000 0.70000", "move 0.50000 0.60000", "up 0.50000 0.60000"])
+        XCTAssertEqual(displays.values, ["primary-1", "primary-1", "primary-1"], "the lift a vanished viewer leaves goes to the same panel")
+    }
+
+    private final class DisplayRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: [String?] = []
+        func append(_ display: String?) { lock.withLock { stored.append(display) } }
+        var values: [String?] { lock.withLock { stored } }
+    }
+
     func testSecondFingerRidesAlong() {
         let (channel, recorder) = makeChannel()
         channel.receive(#"{"t":"down","x":0.4,"y":0.4,"x2":0.6,"y2":0.6}"#)

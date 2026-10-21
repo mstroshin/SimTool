@@ -81,6 +81,17 @@ public final class StreamServer: @unchecked Sendable {
     private let testRuns: TestRunController
     /// What was done to the device and by whom, for the viewer's activity feed.
     private let activity = DeviceActivityLog()
+    /// The device's screens and the lit one, once its device type is read.
+    private let displays = DeviceDisplays()
+    private var displayMonitor: DisplayStateMonitor?
+    private var foldMonitor: FoldMonitor?
+    /// A foldable's 3D preview, rendered while a viewer watches it.
+    private var duo3D: Duo3DStream?
+    /// The fold last told to the activity feed, and a viewer update or a
+    /// settle check already on its way.
+    private var recordedFold: SimulatorFoldState?
+    private var foldTopicPending = false
+    private var foldSettleGeneration = 0
     /// OSLog category that, by convention, carries a crash summary of the previous run (apps can
     /// only write it after relaunching - crash handlers cannot safely log at crash time).
     private static let crashReportCategory = "Crash"
@@ -111,10 +122,12 @@ public final class StreamServer: @unchecked Sendable {
     public init(config: StreamServerConfig) {
         self.config = config
         self.server = SameOriginHttpServer(policy: SameOriginPolicy(serverHost: config.host))
+        let displays = displays
         self.testSessions = TestSessionController(
             store: TestSessionStore(root: config.testSessionsRoot),
             device: config.device,
-            makeRecorder: { SimctlVideoRecorder() }
+            // A foldable's recording follows the screen lit when it starts.
+            makeRecorder: { SimctlVideoRecorder(display: { displays.activeDisplay?.id }) }
         )
         self.testRuns = TestRunController(
             testsRoot: config.testsRoot,
@@ -135,10 +148,123 @@ public final class StreamServer: @unchecked Sendable {
         try server.start(config.port, forceIPv4: true, priority: .userInteractive)
         if config.captureEnabled {
             try frameCapture.start(deviceUDID: config.device.udid, onFrame: frameHandler)
+            Task { await self.loadDisplays() }
         }
     }
 
+    /// Reads which screens the device has. A foldable is then watched for the
+    /// screen it lights, and the stream follows it.
+    private func loadDisplays() async {
+        var deviceType = config.device.deviceTypeIdentifier
+        if deviceType == nil {
+            deviceType = (try? await SimulatorDeviceClient.listDevices())?.first { $0.udid == config.device.udid }?.deviceTypeIdentifier
+        }
+        guard let deviceType, let layout = await SimulatorDisplayLayout.load(deviceType: deviceType) else { return }
+        displays.set(layout: layout)
+        frameCapture.setScreens(layout.displays.map { ($0.width, $0.height) })
+        guard layout.isFoldable else { return }
+        let monitor = DisplayStateMonitor(deviceUDID: config.device.udid, layout: layout) { [weak self] state in
+            self?.displayStateChanged(state)
+        }
+        let executable = Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])
+        stateLock.withLock { duo3D = Duo3DStream(deviceUDID: config.device.udid, executable: executable) }
+        let fold = FoldMonitor(deviceUDID: config.device.udid) { [weak self] state, panelSwitched in
+            self?.foldChanged(state, panelSwitched: panelSwitched)
+        }
+        stateLock.withLock {
+            displayMonitor = monitor
+            foldMonitor = fold
+        }
+        monitor.start()
+        fold.start()
+    }
+
+    /// SpringBoard reported the hinge, the posture or the primary panel. The
+    /// viewer hears it at most ten times a second; a new panel is read at once;
+    /// where the fold comes to rest goes to the activity feed.
+    private func foldChanged(_ fold: SimulatorFoldState, panelSwitched: Bool) {
+        guard displays.set(fold: fold) else { return }
+        update3D()
+        if panelSwitched, let monitor = stateLock.withLock({ displayMonitor }) {
+            Task { await monitor.refresh() }
+        }
+        let publish = stateLock.withLock {
+            defer { foldTopicPending = true }
+            return !foldTopicPending
+        }
+        if publish {
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                guard let self else { return }
+                self.stateLock.withLock { self.foldTopicPending = false }
+                self.inspectorEvents.publish(.device, self.displays.topic)
+            }
+        }
+        let generation = stateLock.withLock {
+            foldSettleGeneration += 1
+            return foldSettleGeneration
+        }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.8) { [weak self] in
+            self?.foldSettled(generation: generation)
+        }
+    }
+
+    /// The fold has rested for a moment. A pose SimTool was asked for carries
+    /// where it landed in its own entry; one made elsewhere — Device Hub's
+    /// hinge slider — gets an entry of its own.
+    private func foldSettled(generation: Int) {
+        guard let fold = displays.fold else { return }
+        let changed = stateLock.withLock {
+            guard generation == foldSettleGeneration,
+                  recordedFold?.pose != fold.pose || recordedFold?.panel != fold.panel || recordedFold.flatMap(\.hingeDegrees).map({ abs($0 - (fold.hingeDegrees ?? $0)) >= 5 }) ?? true else { return false }
+            recordedFold = fold
+            return true
+        }
+        guard changed else { return }
+        // A pose still running is the one that moved it; one that just
+        // finished where the device is now already says so.
+        let recent = Date().addingTimeInterval(-6)
+        if let asked = activity.last(where: { $0.kind == "pose" && $0.via != "device" }) {
+            if asked.status == .running {
+                activity.update(id: asked.id) { $0.detail = fold.summary }
+                return
+            }
+            if (asked.endedAt ?? asked.at) > recent, asked.detail == nil || asked.detail == fold.summary {
+                if asked.detail == nil { activity.update(id: asked.id) { $0.detail = fold.summary } }
+                return
+            }
+        }
+        activity.record(actor: .viewer, via: "device", kind: "pose", title: "Folded to " + (fold.pose ?? fold.hingeDegrees.map(SimulatorFoldState.degrees) ?? "an unknown pose"), detail: fold.summary)
+    }
+
+    /// Whether the 3D preview can be shown, with the model it renders, or why not.
+    private func view3D() -> (url: URL?, reason: String?) {
+        let located = Duo3DModel.locate(layout: displays.current.layout, developerDir: DeveloperFrameworks.developerDir())
+        if located.url != nil, let failure = stateLock.withLock({ duo3D })?.recentFailure { return (nil, failure) }
+        return located
+    }
+
+    /// Where the 3D preview's hinge and lit panel stand.
+    private func update3D() {
+        guard let stream = stateLock.withLock({ duo3D }) else { return }
+        let role = displays.activeDisplay?.role ?? "cover"
+        stream.update(panel: role, hinge: displays.fold?.hingeDegrees ?? (role == "cover" ? 0 : 180))
+    }
+
+    private func displayStateChanged(_ state: SimulatorDisplayState) {
+        defer { update3D() }
+        guard displays.set(state: state), let layout = displays.current.layout else { return }
+        // Touches follow the panel without asking CoreDevice each time.
+        let directInput = directInput, udid = config.device.udid
+        Task { await directInput.setDisplayState(state, deviceUDID: udid) }
+        let lit = layout.display(named: state.active)
+        frameCapture.setScreens(layout.displays.map { ($0.width, $0.height) }, preferred: lit.map { ($0.width, $0.height) })
+        inspectorEvents.publish(.device, displays.topic)
+    }
+
     public func stop() {
+        stateLock.withLock { displayMonitor }?.stop()
+        stateLock.withLock { foldMonitor }?.stop()
+        stateLock.withLock { duo3D }?.stop()
         inspectorEvents.closeAll()
         testDefinitionsWatcher?.stop()
         testDefinitionsWatcher = nil
@@ -625,9 +751,16 @@ public final class StreamServer: @unchecked Sendable {
             if let maxDimension, maxDimension <= 0 {
                 return self.errorResponse(SimToolError("maxDim must be positive"), statusCode: 400, reason: "Bad Request")
             }
+            // A foldable's screenshot is of the lit screen unless `display` names another.
+            let display: SimulatorDisplay?
+            do {
+                display = try self.displays.display(named: request.queryValue("display")?.removingPercentEncoding)
+            } catch {
+                return self.errorResponse(error, statusCode: 400, reason: "Bad Request")
+            }
             do {
                 let data = try self.waitForAsync {
-                    try await SimulatorScreenshotClient.png(deviceUDID: self.config.device.udid, maxDimension: maxDimension)
+                    try await SimulatorScreenshotClient.png(deviceUDID: self.config.device.udid, display: display?.id, maxDimension: maxDimension)
                 }
                 return self.dataResponse(data, contentType: "image/png")
             } catch {
@@ -635,7 +768,8 @@ public final class StreamServer: @unchecked Sendable {
             }
         }
 
-        server["/stream.avcc"] = { _ in
+        server["/stream.avcc"] = { request in
+            if request.queryValue("view") == "3d" { return self.stream3DResponse(request) }
             let client = self.clientManager.addAvccClient()
             return .raw(200, "OK", [
                 "Content-Type": "application/octet-stream",
@@ -656,6 +790,35 @@ public final class StreamServer: @unchecked Sendable {
                 semaphore.wait()
                 self.clientManager.removeAvccClient(client)
             }
+        }
+    }
+
+    /// `/stream.avcc?view=3d&theme=dark&bg=1b1d20`: the 3D preview, in the
+    /// same envelopes as the screen plus each frame's projection. 503 with the
+    /// reason when there is none to show.
+    private func stream3DResponse(_ request: HttpRequest) -> HttpResponse {
+        let view = view3D()
+        guard let model = view.url, let layout = displays.current.layout, let stream = stateLock.withLock({ duo3D }) else {
+            return errorResponse(SimToolError(view.reason ?? "the 3D preview is not running"), statusCode: 503, reason: "Service Unavailable")
+        }
+        let background = request.queryValue("bg").flatMap { $0.count == 6 && Int($0, radix: 16) != nil ? "#" + $0 : nil } ?? "#000000"
+        let look = Duo3DStream.Look(dark: request.queryValue("theme") != "light", background: background)
+        let role = displays.activeDisplay?.role ?? "cover"
+        let hinge = displays.fold?.hingeDegrees ?? (role == "cover" ? 0 : 180)
+        return .raw(200, "OK", [
+            "Content-Type": "application/octet-stream",
+            "Cache-Control": "no-cache, no-store",
+            "Connection": "keep-alive",
+        ]) { writer in
+            let client = Duo3DStream.Client { data in (try? writer.write(data)) != nil }
+            do {
+                try stream.attach(client, model: model, layout: layout, panel: role, hinge: hinge, look: look)
+            } catch {
+                DebugLog.write("duo3d", "cannot start the renderer: \(error.localizedDescription)")
+                return
+            }
+            client.ended.wait()
+            stream.detach(client)
         }
     }
 
@@ -714,7 +877,8 @@ public final class StreamServer: @unchecked Sendable {
             activity: {
                 let page = activity.query(since: nil)
                 return ActivityTopicPayload(entries: page.entries, revision: page.revision)
-            }()
+            }(),
+            device: displays.topic
         )
     }
 
@@ -802,7 +966,12 @@ public final class StreamServer: @unchecked Sendable {
             testSessionsPath: config.testSessionsRoot.path,
             instanceId: inspectorEvents.instanceId,
             runtime: config.device.runtime,
-            version: SimToolVersion.current
+            version: SimToolVersion.current,
+            deviceType: displays.current.layout?.deviceType ?? config.device.deviceTypeIdentifier,
+            displays: displays.current.layout == nil ? nil : displays.payloads,
+            activeDisplay: displays.activeDisplay?.id,
+            fold: displays.fold,
+            view3d: displays.isFoldable ? { let view = view3D(); return ServerView3DPayload(available: view.url != nil, reason: view.reason) }() : nil
         )
     }
 
@@ -850,6 +1019,10 @@ public final class StreamServer: @unchecked Sendable {
                 }
             }
             testSessions.noteInput(at: startedAt)
+            // A fold says where the device came to rest.
+            if action == "pose", !output.stdoutString.isEmpty {
+                activity.update(id: entry.id) { $0.detail = output.stdoutString }
+            }
             activity.finish(id: entry.id)
             return try jsonEncodedResponse(CommandResultPayload(
                 ok: true,
@@ -1245,6 +1418,28 @@ public final class StreamServer: @unchecked Sendable {
                 return try await play(try await SimulatorInputClient.flingStroke(deviceUDID: udid, direction: direction, velocity: velocity, x: start?.x, y: start?.y))
             }
             return try await play(try await SimulatorInputClient.scrollStroke(deviceUDID: udid, direction: direction, distance: input.distance, x: start?.x, y: start?.y))
+        case "pose":
+            // A foldable's hinge: a named pose or an angle, confirmed by the device.
+            let pose: SimulatorPose
+            if let angle = input.angle {
+                pose = try SimulatorPose(parsing: String(angle))
+            } else if let name = input.name {
+                pose = try SimulatorPose(parsing: name)
+            } else {
+                throw SimToolError("Pose input requires name (closed, book, open) or angle (0…180)")
+            }
+            let displays = displays
+            let monitor = stateLock.withLock { displayMonitor }
+            let state = try await SimulatorFoldClient.shared.fold(
+                to: pose,
+                from: displays.fold?.hingeDegrees,
+                layout: displays.current.layout,
+                deviceUDID: udid
+            ) {
+                await monitor?.refresh()
+                return (displays.current.state?.active, displays.fold)
+            }
+            return ProcessOutput(status: 0, stdout: Data(state.summary.utf8))
         case "shake":
             // Same darwin notification Simulator.app's Device > Shake menu posts;
             // UIKit in the simulated OS turns it into motionEnded(.motionShake).

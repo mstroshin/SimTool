@@ -17,6 +17,7 @@ function createTouchStream(options) {
   let frameScheduled = false;
   let retryMs = 250;
   let closed = false;
+  let display = null;   // the screen shown, on a device with several
 
   function connect() {
     if (closed) return;
@@ -53,6 +54,7 @@ function createTouchStream(options) {
   function message(t, first, second) {
     const m = { t, x: round(first.x), y: round(first.y) };
     if (second) { m.x2 = round(second.x); m.y2 = round(second.y); }
+    if (display) m.d = display;
     return m;
   }
 
@@ -74,6 +76,8 @@ function createTouchStream(options) {
     },
     up(first, second) { flushMove(); send(message("up", first, second)); },
     key(message) { flushMove(); send(message); },
+    // A foldable's viewer names the panel it shows; touches go there.
+    setDisplay(id) { display = id || null; },
     get connected() { return open; },
     close() { closed = true; if (socket) socket.close(); }
   };

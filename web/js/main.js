@@ -27,6 +27,11 @@ function applyConfig(config) {
   $("sbServer").textContent = location.host;
   $("sbApp").textContent = deviceInfo.app || "No app attached";
   $("sbVersion").textContent = config.version ? "simtool " + config.version : "";
+  applyDisplays(config.displays, config.activeDisplay);
+  applyFold(config.fold);
+  applyView3D(config.view3d);
+  // A viewer that left a foldable in 3D finds it in 3D again.
+  if (screenState.foldable && !screenState.view3d && stored("view3d", "0") === "1") setView3D(true);
 }
 
 // A new server: everything numbered by the old one is stale.
@@ -57,7 +62,7 @@ async function bootstrap() {
 // The screen's size in points, for the pointer readout and the rulers; the
 // Accessibility tab refines it with the full tree.
 async function loadScreenPoints() {
-  if (screenState.points) return;
+  if (screenState.points || screenState.display) return;
   try {
     const flat = await apiJSON("/api/v1/ax/tree?format=flat");
     const root = (flat.nodes || []).find((node) => node.depth === 0 && Array.isArray(node.frame));

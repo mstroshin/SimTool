@@ -23,6 +23,45 @@ final class InputRouteTests: XCTestCase {
         XCTAssertTrue(body.contains("Launch requires an app bundle id"), "unexpected error body: \(body)")
     }
 
+    // A device that does not fold refuses a pose instead of reporting it done.
+    func testAPoseOnADeviceThatDoesNotFoldFailsWithExplanation() async throws {
+        let port = try availablePort()
+        let device = SimulatorDevice(udid: "TEST-UDID", name: "iPhone", runtime: "iOS", state: "Booted", isAvailable: true)
+        let server = StreamServer(config: StreamServerConfig(host: "127.0.0.1", port: port, device: device, captureEnabled: false))
+        try server.start()
+        defer { server.stop() }
+
+        for (body, expected) in [
+            (#"{"action": "pose", "name": "book"}"#, "does not fold"),
+            (#"{"action": "pose", "name": "tent"}"#, "Unknown pose tent"),
+            (#"{"action": "pose", "angle": 200}"#, "Unknown pose"),
+            (#"{"action": "pose"}"#, "Pose input requires name"),
+        ] {
+            var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/api/v1/input")!)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = Data(body.utf8)
+            let (data, response) = try await URLSession.shared.data(for: request)
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 400, body)
+            let text = String(decoding: data, as: UTF8.self)
+            XCTAssertTrue(text.contains(expected), "\(body) → \(text)")
+        }
+    }
+
+    // A device without a fold has no 3D preview: 503 and why, not an empty stream.
+    func testThe3DStreamOfADeviceThatDoesNotFoldIsRefusedWithTheReason() async throws {
+        let port = try availablePort()
+        let device = SimulatorDevice(udid: "TEST-UDID", name: "iPhone", runtime: "iOS", state: "Booted", isAvailable: true)
+        let server = StreamServer(config: StreamServerConfig(host: "127.0.0.1", port: port, device: device, captureEnabled: false))
+        try server.start()
+        defer { server.stop() }
+        let (data, response) = try await URLSession.shared.data(from: URL(string: "http://127.0.0.1:\(port)/stream.avcc?view=3d")!)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 503)
+        XCTAssertTrue(String(decoding: data, as: UTF8.self).contains("only a foldable device has a 3D preview"))
+        let config = try JSONDecoder().decode(ServerConfigPayload.self, from: try await URLSession.shared.data(from: URL(string: "http://127.0.0.1:\(port)/config")!).0)
+        XCTAssertNil(config.view3d, "a phone says nothing about 3D")
+    }
+
     func testPasteActionWithoutTextFailsBeforeTouchingTheSimulator() async throws {
         let port = try availablePort()
         let device = SimulatorDevice(udid: "TEST-UDID", name: "iPhone", runtime: "iOS", state: "Booted", isAvailable: true)

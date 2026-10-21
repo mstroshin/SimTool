@@ -65,9 +65,11 @@ function plural(count, one, many) {
 }
 
 // "com.apple.CoreSimulator.SimRuntime.iOS-26-4" → "iOS 26.4"
+// A device-specific runtime (iOS-27-2-iPhone19-4, the iPhone Duo's) names the
+// OS version first and the model after it; the model is the device's, not the OS's.
 function runtimeName(identifier) {
   if (!identifier) return "";
-  const match = /SimRuntime\.([A-Za-z]+)-(\d+(?:-\d+)*)$/.exec(identifier);
+  const match = /SimRuntime\.([A-Za-z]+)-(\d+(?:-\d+)*?)(?:-[A-Za-z]+\d+-\d+)?$/.exec(identifier);
   if (!match) return identifier;
   return match[1] + " " + match[2].replace(/-/g, ".");
 }
@@ -521,6 +523,94 @@ function axScreenFrame(tree) {
     if (area > bestArea) { bestArea = area; best = frame; }
   }
   return best;
+}
+
+// ---- A screen's picture on its framebuffer ----
+
+// How far to turn a decoded frame for the screen it shows: the screen's
+// rotation once the frame's shape is that screen's (a frame of the panel
+// before a fold, still in flight, is not turned).
+function frameRotation(frameWidth, frameHeight, display) {
+  if (!display || !display.rotation || !display.width || !display.height || !frameWidth || !frameHeight) return 0;
+  // The cover (0.687) and the inner panel (0.703) differ by little; the encoder rounds by less.
+  const sameShape = Math.abs(frameWidth / frameHeight - display.width / display.height) < 0.006;
+  return sameShape ? ((display.rotation % 360) + 360) % 360 : 0;
+}
+
+// The canvas transform that draws a frame turned clockwise by `rotation` into
+// a canvas of width × height, and the size to draw the untransformed frame at.
+function canvasTurn(rotation, width, height) {
+  switch (rotation) {
+    case 90: return { a: 0, b: 1, c: -1, d: 0, e: width, f: 0, width: height, height: width };
+    case 180: return { a: -1, b: 0, c: 0, d: -1, e: width, f: height, width, height };
+    case 270: return { a: 0, b: -1, c: 1, d: 0, e: 0, f: height, width: height, height: width };
+    default: return { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0, width, height };
+  }
+}
+
+// The screen's corner radii as CSS for a picture `cssWidth` wide: its points,
+// clockwise from the top-left as the picture reads.
+function screenRadius(display, cssWidth) {
+  const radii = display && display.cornerRadii, points = display && display.points;
+  if (!Array.isArray(radii) || radii.length !== 4 || !points || !points.width || !cssWidth) return "";
+  const scale = cssWidth / points.width;
+  return radii.map((radius) => Math.round(radius * scale) + "px").join(" ");
+}
+
+// What the toolbar says about a fold: "130° · inner", "open · 180° · inner".
+function foldReadout(fold) {
+  if (!fold || fold.hingeDegrees == null) return fold && fold.panel ? fold.panel : "";
+  const degrees = Math.round(fold.hingeDegrees * 10) / 10 + "°";
+  return [fold.pose, degrees, fold.panel].filter(Boolean).join(" · ");
+}
+
+// ---- The 3D preview ----
+
+// A point of a 3D frame (fractions, top-left origin) on the lit panel's
+// framebuffer, or null off its screen: each projected leaf of the panel is
+// inverted as a square-to-quad homography and its framebuffer region applied.
+// Follows serve-sim's pointOnDuoScreen (Apache-2.0); see THIRD_PARTY_NOTICES.md.
+function pointOnDuoScreen(projection, x, y) {
+  if (!projection || !Array.isArray(projection.pieces)) return null;
+  for (const piece of projection.pieces) {
+    if (!Array.isArray(piece) || piece.length !== 5) continue;
+    const [p0, p1, p2, p3, region] = piece;
+    if ([...p0, ...p1, ...p2, ...p3, ...region].some((n) => !Number.isFinite(n))) continue;
+    const dx1 = p1[0] - p2[0], dx2 = p3[0] - p2[0], dy1 = p1[1] - p2[1], dy2 = p3[1] - p2[1];
+    const sx = p0[0] - p1[0] + p2[0] - p3[0], sy = p0[1] - p1[1] + p2[1] - p3[1];
+    const denominator = dx1 * dy2 - dx2 * dy1;
+    if (Math.abs(denominator) < 1e-10) continue;
+    const g = (sx * dy2 - dx2 * sy) / denominator, h = (dx1 * sy - sx * dy1) / denominator;
+    const a = p1[0] - p0[0] + g * p1[0], b = p3[0] - p0[0] + h * p3[0];
+    const d = p1[1] - p0[1] + g * p1[1], e = p3[1] - p0[1] + h * p3[1];
+    const aa = a - x * g, bb = b - x * h, dd = d - y * g, ee = e - y * h;
+    const determinant = aa * ee - bb * dd;
+    if (Math.abs(determinant) < 1e-10) continue;
+    const u = ((x - p0[0]) * ee - bb * (y - p0[1])) / determinant;
+    const v = (aa * (y - p0[1]) - (x - p0[0]) * dd) / determinant;
+    if (u < -0.001 || v < -0.001 || u > 1.001 || v > 1.001) continue;
+    return { x: region[0] + Math.max(0, Math.min(1, u)) * region[2], y: region[1] + Math.max(0, Math.min(1, v)) * region[3] };
+  }
+  return null;
+}
+
+// A framebuffer point as the screen's picture reads it, the picture turned
+// `rotation` degrees clockwise — the inverse of the server's turn, so a touch
+// sent as a picture fraction lands on the framebuffer point.
+function pictureRatio(raw, rotation) {
+  switch (((rotation % 360) + 360) % 360) {
+    case 90: return { x: 1 - raw.y, y: raw.x };
+    case 180: return { x: 1 - raw.x, y: 1 - raw.y };
+    case 270: return { x: raw.y, y: 1 - raw.x };
+    default: return { x: raw.x, y: raw.y };
+  }
+}
+
+// `rgb(27, 29, 32)` → `1b1d20`, the stage's colour for the 3D frame's backdrop.
+function cssColorHex(color) {
+  const parts = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(color || "");
+  if (!parts) return "000000";
+  return parts.slice(1, 4).map((part) => Number(part).toString(16).padStart(2, "0")).join("");
 }
 
 // ---- Theme ----

@@ -15,7 +15,8 @@ enum LiveInputEvent: Equatable, Sendable {
 ///
 /// Messages are JSON objects. Touches carry fractions of the screen:
 /// `{"t": "down" | "move" | "up", "x": 0.5, "y": 0.7}`, plus `x2`/`y2` for a
-/// second finger. Keys carry the browser's physical key name:
+/// second finger and, on a foldable, `d` — the panel shown (`primary-1`).
+/// Keys carry the browser's physical key name:
 /// `{"t": "keydown" | "keyup", "code": "KeyA"}`.
 final class LiveInputChannel: @unchecked Sendable {
     private struct Message: Decodable {
@@ -24,6 +25,7 @@ final class LiveInputChannel: @unchecked Sendable {
         var y: Double?
         var x2: Double?
         var y2: Double?
+        var d: String?
         var code: String?
     }
 
@@ -62,7 +64,7 @@ final class LiveInputChannel: @unchecked Sendable {
             } else {
                 nil
             }
-            started = receiveTouch(LiveTouchEvent(phase: phase, first: TouchRatio(x: x, y: y), second: second))
+            started = receiveTouch(LiveTouchEvent(phase: phase, first: TouchRatio(x: x, y: y), second: second, display: message.d))
         }
         if started { onDown() }
     }
@@ -74,7 +76,7 @@ final class LiveInputChannel: @unchecked Sendable {
             guard !closed else { return }
             closed = true
             if let last = lastDown {
-                emit(.touch(LiveTouchEvent(phase: .up, first: last.first, second: last.second)))
+                emit(.touch(LiveTouchEvent(phase: .up, first: last.first, second: last.second, display: last.display)))
                 lastDown = nil
             }
             for key in heldKeys.reversed() {

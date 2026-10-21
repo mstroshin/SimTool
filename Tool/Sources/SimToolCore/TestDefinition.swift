@@ -371,13 +371,15 @@ public enum TestStepAction: Equatable, Sendable, CustomStringConvertible {
     case assertHidden(TestTarget, timeout: Double?)
     /// Shows (true) or hides the software keyboard.
     case keyboard(visible: Bool)
+    /// Folds a foldable (iPhone Duo): closed, book, open or a hinge angle.
+    case pose(SimulatorPose)
     case pause(Double)
 
     /// Whether this action checks a result, and so may carry a `criterion:`.
     public var isAssertion: Bool {
         switch self {
         case .waitFor, .assertHidden: true
-        case .tap, .longPress, .type, .swipe, .scroll, .fling, .drag, .keyboard, .pause: false
+        case .tap, .longPress, .type, .swipe, .scroll, .fling, .drag, .keyboard, .pose, .pause: false
         }
     }
 
@@ -396,6 +398,7 @@ public enum TestStepAction: Equatable, Sendable, CustomStringConvertible {
         case .waitFor(let target, _): "Wait for \(target)"
         case .assertHidden(let target, _): "Assert hidden \(target)"
         case .keyboard(let visible): visible ? "Show keyboard" : "Hide keyboard"
+        case .pose(let pose): "Fold to \(pose)"
         case .pause(let seconds): "Pause \(seconds.formatted())s"
         }
     }
@@ -892,10 +895,16 @@ public enum TestDefinitionParser {
             case "hide": action = .keyboard(visible: false)
             default: throw SimToolError("\(context): `keyboard:` takes show or hide.")
             }
+        case "pose":
+            do {
+                action = .pose(try SimulatorPose(parsing: scalarString(value)))
+            } catch {
+                throw SimToolError("\(context): `pose:` takes closed, book, open or a hinge angle from 0 to 180.")
+            }
         case "wait":
             action = .pause(try seconds(value, context: context))
         default:
-            throw SimToolError("Step \(index + 1): unknown step `\(keyword)`. Known steps: tap, longPress, type, swipe, scroll, fling, drag, keyboard, waitFor, assertVisible, assertHidden, wait.")
+            throw SimToolError("Step \(index + 1): unknown step `\(keyword)`. Known steps: tap, longPress, type, swipe, scroll, fling, drag, keyboard, pose, waitFor, assertVisible, assertHidden, wait.")
         }
         if criterion != nil, !action.isAssertion {
             throw SimToolError("\(context): `criterion:` marks the assertion that checks the claim, so it belongs on assertVisible, assertHidden or waitFor — not on `\(keyword)`.")

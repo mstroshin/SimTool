@@ -7,6 +7,13 @@ public protocol TestVideoRecorder: AnyObject, Sendable {
     func start(deviceUDID: String, outputFile: URL) throws
     /// Interrupts the recorder and waits for it to finalize the file.
     func stop() async
+    /// Why the recording ended by itself, if it did: the session has no video
+    /// then, and says why.
+    var failure: String? { get }
+}
+
+extension TestVideoRecorder {
+    public var failure: String? { nil }
 }
 
 public enum TestSessionError: Error, LocalizedError, Equatable {
@@ -217,6 +224,7 @@ public final class TestSessionController: @unchecked Sendable {
         lock.unlock()
 
         await recorder?.stop()
+        if let failure = recorder?.failure { session.videoError = failure }
         if recorder != nil {
             await normalizeVideo(for: session.id)
             session.videoDurationSeconds = await VideoDurationNormalizer.durationSeconds(of: store.videoFile(for: session.id))
@@ -311,6 +319,7 @@ public final class TestSessionController: @unchecked Sendable {
         lock.unlock()
         await recorder?.stop()
         if session != nil {
+            if let failure = recorder?.failure { session!.videoError = failure }
             if recorder != nil {
                 await normalizeVideo(for: session!.id)
                 session!.videoDurationSeconds = await VideoDurationNormalizer.durationSeconds(of: store.videoFile(for: session!.id))

@@ -116,6 +116,8 @@ public struct TestRunner {
             try await waitForAbsence(target, timeout: timeout)
         case .keyboard(let visible):
             try check(await client.softwareKeyboard(visible: visible), action: visible ? "show keyboard" : "hide keyboard")
+        case .pose(let pose):
+            try check(await client.pose(pose), action: "fold to \(pose)")
         case .pause(let seconds):
             try await Task.sleep(for: .milliseconds(Int(seconds * 1000)))
         }

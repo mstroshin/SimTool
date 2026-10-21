@@ -109,6 +109,7 @@ let package = Package(
             dependencies: [
                 "SimToolCore",
                 "SimToolClient",
+                "SimToolStream",
                 .product(name: "SimToolNetworkLogger", package: "SimTool"),
                 "SimToolServer",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),

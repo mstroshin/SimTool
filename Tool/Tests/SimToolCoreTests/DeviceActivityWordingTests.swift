@@ -28,6 +28,12 @@ final class DeviceActivityWordingTests: XCTestCase {
         XCTAssertEqual(title(SimulatorInputPayload(action: "swipe"), stroke: stroke), "Swipe 201, 655 → 201, 345")
     }
 
+    func testAFoldSaysWhereTo() {
+        XCTAssertEqual(DeviceActivityWording.describe(SimulatorInputPayload(action: "pose", name: "book"), action: "pose").title, "Fold to book")
+        XCTAssertEqual(DeviceActivityWording.describe(SimulatorInputPayload(action: "pose", angle: 92.5), action: "pose").title, "Fold to 92.5°")
+        XCTAssertEqual(DeviceActivityWording.describe(SimulatorInputPayload(action: "pose"), action: "pose").kind, "pose")
+    }
+
     func testTextIsQuotedShortAndOnOneLine() {
         XCTAssertEqual(title(SimulatorInputPayload(action: "type", text: "hello")), "Type “hello”")
         let long = String(repeating: "a", count: 60)

@@ -70,6 +70,20 @@ final class WebViewerTouchTests: XCTestCase {
         context.evaluateScript(expression)?.toString() ?? ""
     }
 
+    // A foldable's viewer names the panel it shows on every touch.
+    func testTouchesNameTheScreenShownOnceOneIsSet() throws {
+        let context = try makeStream()
+        context.evaluateScript("""
+        socket().onopen();
+        stream.down({ x: 0.5, y: 0.8 });
+        stream.setDisplay("primary-1");
+        stream.up({ x: 0.5, y: 0.8 });
+        stream.setDisplay(null);
+        stream.down({ x: 0.1, y: 0.1 });
+        """)
+        XCTAssertEqual(value(context, "socket().sent.map(function (m) { return m.d || '-'; }).join(',')"), "-,primary-1,-")
+    }
+
     func testMovesCoalesceToOnePerFrameAndDownAndUpGoOutAtOnce() throws {
         let context = try makeStream()
         context.evaluateScript("""

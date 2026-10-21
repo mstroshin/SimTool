@@ -78,6 +78,16 @@ the inspector — and ⌥1–6 switch inspector tabs, `/` filters the current li
 the viewer greys the last frame, says so, stops sending touches and reconnects
 by itself; a restarted server is noticed and its lists are reloaded.
 
+An iPhone Duo adds Closed, Book and Open buttons to the toolbar, the fold under
+the device (`book · 130° · inner`) and a **3D** button: the device itself,
+folded as it is and animated as it folds, its lit panel live on it, rendered on
+the server with RealityKit from the device model Device Hub draws it with
+(`V68.usdz`, read from the selected Xcode at run time — SimTool ships no Apple
+asset) and streamed like the screen. Clicks and drags on its screen land on
+that panel. Without the model — or with RealityKit's offscreen renderer
+missing (macOS 14) or failing — the button says why and the viewer stays on
+the flat screen; `simtool doctor` reports it as "iPhone Duo 3D preview".
+
 What an agent or a test run does to the device shows as it happens. Every touch
 from `simtool input`, the HTTP API or a YAML step is drawn on the screen in
 course ink — a ring where the finger went down, a stroke to where it lifted, a
@@ -165,6 +175,37 @@ swift run simtool input fling up --speed fast        # lifted in motion, keeps g
 swift run simtool input swipe --start-x 200 --start-y 700 --end-x 200 --end-y 300 --hold 0
 swift run simtool input drag --start-x 200 --start-y 140 --end-x 200 --end-y 290
 ```
+
+On an iPhone Duo every touch — the CLI's, the API's, a test's and the viewer's
+live finger — lands on the panel that is lit, in points of its picture as a
+screenshot and `ax tree` show it: the open inner panel reads 951 × 669 pt
+(landscape) although its framebuffer is portrait, and SimTool turns each point
+onto it. The viewer shows the lit panel upright, with its own corners, and
+follows it as the device folds. The inner panel takes SimTool's own Indigo touches (target
+`0x40000003`); the cover is touched through the simulator's HID daemon,
+dtuhidd, as Device Hub does — while dtuhidd runs, SimulatorHID keeps the cover's
+own touch screen stood down, and an Indigo event sent into it would abort
+backboardd.
+
+An iPhone Duo folds from the CLI, the API, a test and the viewer's toolbar:
+
+```sh
+swift run simtool input pose book      # closed | book | open | a hinge angle 0–180
+swift run simtool input pose           # the fold now: open · 180°, inner panel lit
+```
+
+Closed (0°) lights the cover; book (130°) and open (180°) the inner panel. The
+hinge is swept there as a hand would fold it — SpringBoard folds with
+hysteresis, and a jump can leave the panel that was lit — by a helper SimTool
+runs inside the simulator, which posts the hinge the way Device Hub's slider
+does. A pose returns once the device reports it: the hinge as the guest's
+motion service took it and the panel CoreDevice says is lit; one the device does
+not take is an error naming what it reports instead. The fold is read back
+continuously too — Device Hub's own slider included: `/config` and the event
+stream's `device` topic carry it as `fold` (`hingeDegrees`, `pose`, SpringBoard's
+`posture`, the lit `panel`), the toolbar shows it next to its Closed / Book /
+Open buttons, and the activity feed has a pose's result, or a fold made
+elsewhere, as an entry. YAML tests take a `pose:` step.
 
 Directions are the way the finger moves: `scroll up` drags the content up,
 revealing what is below. A `scroll` (and a `swipe`, unless `--hold 0`) slows
@@ -806,6 +847,7 @@ GET /api/v1/devices
 GET /api/v1/metrics
 GET /api/v1/events (Server-Sent Events)
 GET /stream.avcc
+GET /stream.avcc?view=3d&theme=dark&bg=1b1d20
 GET /stream.jpeg
 GET /stream.mjpeg
 POST /api/v1/input
@@ -825,7 +867,7 @@ GET /api/v1/mocks/ack
 GET /api/v1/activity?since=<revision>&limit=200
 POST /api/v1/activity
 GET /api/v1/tests/<session-id>/evidence/<file>
-GET /api/v1/screenshot?maxDim=800
+GET /api/v1/screenshot?maxDim=800&display=<screen>
 ```
 
 The API answers the viewer's own page and clients that are not browsers — the
@@ -863,9 +905,28 @@ has confirmed applying (learned from its poll). A run that declares `mocks:`
 waits for the two to meet before its first step — otherwise the app can still be
 answering from the real backend while the test believes it is mocked.
 
+`/stream.avcc?view=3d` is a foldable's 3D preview in the screen stream's
+envelopes, `theme` choosing the shell's finish and `bg` the backdrop's colour;
+before each frame whose map moved it sends an envelope tagged 4 with JSON
+`{"pieces", "panel", "hinge", "width", "height"}` — per leaf of the lit panel
+the frame corners it lands on and the part of the panel's framebuffer it shows.
+It answers 503 with the reason when there is no 3D to show; `/config` says so
+ahead in `view3d` (`available`, `reason`).
+
 `screenshot` returns the full-resolution PNG by default; `maxDim` scales it so
 the longest edge fits the given pixel size — agents reading the screen pay for
 image pixels, and an 800px screenshot is still perfectly legible.
+
+A device with more than one screen — the iPhone Duo, a cover panel and an inner
+one that opens like a book — streams, screenshots and records the screen that is
+lit, and follows it as the device folds. `/config` lists the screens under
+`displays` (`id` as simctl names it — `primary`, `primary-1` —, `role` `cover` or
+`inner`, the framebuffer `width`/`height`, the picture's `rotation` and its size
+in `points`, `active`) and names the lit one in `activeDisplay`; the event
+stream's `device` topic sends them again whenever they change. `screenshot`
+takes `display=` (an `id`, a `role` or the screen number) for the screen that is
+not lit — which reads black. The inner panel's framebuffer is portrait while it
+shows a landscape picture: `rotation` 90, `points` 951 × 669.
 
 The `logs/capture` routes drive a continuous capture (OSLog plus optional
 stdout/`print`) into a bounded buffer that clients poll incrementally by cursor;
@@ -873,8 +934,9 @@ stdout/`print`) into a bounded buffer that clients poll incrementally by cursor;
 
 `/api/v1/events` pushes what the viewer's inspector shows as it changes — one
 Server-Sent Events stream per page, with the topics `network`, `logs`, `state`,
-`tests`, `launches` and `activity` (an entry of `/api/v1/activity` each time it
-changes, with the log's `revision`). It opens with a `snapshot` event holding all of them,
+`tests`, `launches`, `activity` (an entry of `/api/v1/activity` each time it
+changes, with the log's `revision`) and `device` (the device's screens, as
+`/config` lists them). It opens with a `snapshot` event holding all of them,
 then sends each change once, with `id: <server instance>:<sequence>`. A client
 that reconnects with `Last-Event-ID` (or `?lastEventId=`) gets the events it
 missed; one whose id is too old, or from a previous run of the server, gets a
@@ -884,14 +946,15 @@ stream is down.
 
 `POST /api/v1/input` takes an `action` — `tap`, `longPress`, `type`, `paste`,
 `swipe`, `scroll`, `fling`, `drag`, `button`, `shake`, `terminate`, `launch`,
-`software-keyboard`, `hardware-keyboard` — plus that action's fields: `x`/`y` or
+`software-keyboard`, `hardware-keyboard`, `pose` — plus that action's fields: `x`/`y` or
 `id`/`label` for `tap` and `longPress` (`duration` for the press),
 `startX`/`startY`/`endX`/`endY` with `velocity`, `duration`, `hold` (and `press`
 for `drag`), `direction` with `distance` or `velocity` and an optional start
 `x`/`y` for `scroll` and `fling`, `text` for `type` and `paste`, `enabled` for
 `hardware-keyboard` (connect or disconnect it), `visible` for
 `software-keyboard` (show or hide it and confirm it on screen; without it, a
-toggle). Coordinates are screen points. Images go as the raw request body instead:
+toggle), `name` (`closed`, `book`, `open`) or `angle` (0–180) for `pose`.
+Coordinates are screen points. Images go as the raw request body instead:
 `POST /api/v1/input/paste-image` pastes one into the focused field, and
 `POST /api/v1/photos` adds an image or a video to Photos. Both read the type from
 `Content-Type` and an optional percent-encoded `X-SimTool-Filename` header.
@@ -899,7 +962,8 @@ toggle). Coordinates are screen points. Images go as the raw request body instea
 `/api/v1/input/stream` is the viewer's live finger and keyboard: a WebSocket
 taking one JSON frame per touch event, `{"t": "down"|"move"|"up", "x": 0.5,
 "y": 0.7}` with coordinates as fractions of the screen, plus `x2`/`y2` for a
-second finger, and one per key, `{"t": "keydown"|"keyup", "code": "KeyA"}` with
+second finger and, on a foldable, `"d"` — the screen shown (`primary-1`) — and
+one per key, `{"t": "keydown"|"keyup", "code": "KeyA"}` with
 the browser's `KeyboardEvent.code`. Frames are never answered; moves are
 coalesced, downs, ups and keys never dropped, and when the socket closes a
 finger still down is lifted where it was and held keys are released.

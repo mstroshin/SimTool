@@ -13,6 +13,14 @@ function paletteCommands() {
     ["Device", "paste", "Paste the Mac clipboard", "⌘V", pasteFromClipboard],
     ["Device", "photo", "Add files to Photos…", "", () => $("photosFile").click()]
   ];
+  if (screenState.foldable) {
+    commands.push(
+      ["Device", "fold-closed", "Fold closed — the cover lights", "", () => foldTo("closed")],
+      ["Device", "fold-book", "Fold to book, 130°", "", () => foldTo("book")],
+      ["Device", "fold-open", "Fold open flat, 180°", "", () => foldTo("open")]
+    );
+    if (!screenState.view3dUnavailable) commands.push(["View", "cube", screenState.view3d ? "Show the screen instead of the 3D device" : "Show the device in 3D", "", () => setView3D(!screenState.view3d)]);
+  }
   if (deviceInfo.app) {
     commands.push(["App", "stop", "Terminate " + deviceInfo.app, "", terminateApp], ["App", "relaunch", "Relaunch " + deviceInfo.app, "", relaunchApp]);
   }

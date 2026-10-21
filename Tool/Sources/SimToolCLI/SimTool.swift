@@ -6,6 +6,7 @@ import SimToolClient
 import SimToolCore
 import SimToolNetworkLogger
 import SimToolServer
+import SimToolStream
 
 /// Core owns the model; the CLI-only ability to parse one from a flag is added
 /// here so SimToolCore stays free of an ArgumentParser dependency.
@@ -36,6 +37,7 @@ struct SimTool: AsyncParsableCommand {
             Checksum.self,
             Open.self,
             Interactive.self,
+            DuoRender.self,
         ],
         defaultSubcommand: Interactive.self
     )
@@ -164,12 +166,17 @@ struct Doctor: AsyncParsableCommand {
         async let simctl = check(executable: "/usr/bin/xcrun", arguments: ["--find", "simctl"])
         async let axe = check(executable: "/usr/bin/which", arguments: ["axe"])
         let developerDir = DeveloperFrameworks.developerDir()
-        let checks = [
+        var checks = [
             ToolCheck(name: "simctl", available: await simctl.available, detail: await simctl.detail),
             ToolCheck(name: "axe", available: await axe.available, detail: await axe.detail),
             framework(named: "CoreSimulator", developerDir: developerDir),
             framework(named: "SimulatorKit", developerDir: developerDir),
         ]
+        // Foldables: a runtime that runs one, and Device Hub's hold on each booted one's input.
+        let executable = Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])
+        var foldable = [await FoldableReadiness.runtimeCheck(), await FoldableReadiness.previewCheck(executable: executable, developerDir: developerDir)]
+        foldable += await FoldableReadiness.inputChecks(for: (try? await SimulatorDeviceClient.listDevices()) ?? [])
+        checks += foldable.map { ToolCheck(name: $0.name, available: $0.available, detail: $0.detail) }
         if common.json {
             try printJSON(["checks": checks])
         } else {
@@ -214,7 +221,7 @@ struct Input: AsyncParsableCommand {
         Every touch is played by SimTool's own HID helper as a timed path, in \
         screen points (the space `simtool ax tree` reports frames in).
         """,
-        subcommands: [Tap.self, LongPress.self, TypeText.self, Paste.self, Swipe.self, Scroll.self, Fling.self, Drag.self, Button.self, Keyboard.self]
+        subcommands: [Tap.self, LongPress.self, TypeText.self, Paste.self, Swipe.self, Scroll.self, Fling.self, Drag.self, Button.self, Keyboard.self, Pose.self]
     )
 }
 
@@ -543,6 +550,56 @@ extension Input {
                 }
             }
             try emitCommandResult(output, json: common.json)
+        }
+    }
+}
+
+extension Input {
+    struct Pose: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "pose",
+            abstract: "Fold an iPhone Duo — closed, book, open or a hinge angle — or show how it is folded.",
+            discussion: """
+            Closed (0°) lights the cover; book (130°) and open (180°) the inner panel. \
+            The hinge is swept there as a hand would fold it, and the command \
+            returns once the device reports the pose — or fails, saying what it \
+            reports instead. Without a pose it prints the fold: the hinge angle, \
+            SpringBoard's posture and the lit panel.
+            """
+        )
+
+        @Argument(help: "closed, book, open, or a hinge angle from 0 to 180. Omit it to read the fold.") var pose: String?
+        @Option var device: String?
+        @OptionGroup var common: CommonJSON
+
+        func run() async throws {
+            let device = try await resolveConfiguredDevice(device)
+            guard let deviceType = device.deviceTypeIdentifier,
+                  let layout = await SimulatorDisplayLayout.load(deviceType: deviceType), layout.isFoldable else {
+                throw SimToolError("\(device.name) does not fold: only a device with a cover and an inner screen (iPhone Duo) takes a pose")
+            }
+            let udid = device.udid
+            let readback: SimulatorFoldClient.Readback = {
+                async let active = try? SimulatorDisplayState.read(deviceUDID: udid, layout: layout).active
+                async let fold = SimulatorFoldState.read(deviceUDID: udid, last: "20s")
+                return (await active, await fold)
+            }
+            guard let pose else {
+                var fold = await SimulatorFoldState.read(deviceUDID: udid) ?? SimulatorFoldState()
+                fold.panel = (try? await SimulatorDisplayState.read(deviceUDID: udid, layout: layout)).flatMap { layout.display(named: $0.active)?.role } ?? fold.panel
+                if common.json { try printJSON(fold) } else { print(fold.summary) }
+                return
+            }
+            let target = try SimulatorPose(parsing: pose)
+            let input = SimulatorInputPayload(action: "pose", name: target.name, angle: target.name == nil ? target.hingeDegrees : nil)
+            var reached = SimulatorFoldState()
+            let output = try await ActivityReporter(device: device).command(input) {
+                let from = await SimulatorFoldState.read(deviceUDID: udid)?.hingeDegrees
+                reached = try await SimulatorFoldClient.shared.fold(to: target, from: from, layout: layout, deviceUDID: udid, readback: readback)
+                return ProcessOutput(status: 0, stdout: Data(reached.summary.utf8))
+            }
+            await SimulatorFoldClient.shared.close()
+            if common.json { try printJSON(reached) } else { try emitCommandResult(output, json: false) }
         }
     }
 }
@@ -1992,6 +2049,52 @@ struct TestCommand: AsyncParsableCommand {
                 )
             }
         }
+    }
+}
+
+/// The 3D preview's renderer, a process of its own that the server starts
+/// (`Duo3DWorker`); `--check` only loads the model, for `simtool doctor`.
+struct DuoRender: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "duo-render",
+        abstract: "Render an iPhone Duo's 3D preview (started by the server).",
+        shouldDisplay: false
+    )
+
+    @Option var device: String?
+    @Option var model: String
+    @Option(help: "The cover's framebuffer, WxH.") var cover: String?
+    @Option(help: "The inner panel's framebuffer, WxH.") var inner: String?
+    @Flag var check = false
+
+    func run() async throws {
+        guard #available(macOS 15.0, *) else {
+            FileHandle.standardError.write(Data("the 3D preview renders with RealityKit, which needs macOS 15 or newer\n".utf8))
+            throw ExitCode(4)
+        }
+        let modelURL = URL(fileURLWithPath: model)
+        if check {
+            if let failure = await Duo3DWorker.check(modelURL: modelURL) {
+                FileHandle.standardError.write(Data((failure + "\n").utf8))
+                throw ExitCode(3)
+            }
+            print("ok")
+            return
+        }
+        guard let device, let cover = Self.size(cover), let inner = Self.size(inner) else {
+            throw ValidationError("duo-render needs --device, --cover and --inner")
+        }
+        do {
+            try await Duo3DWorker.run(Duo3DWorker.Options(deviceUDID: device, modelURL: modelURL, cover: cover, inner: inner))
+        } catch {
+            FileHandle.standardError.write(Data((error.localizedDescription + "\n").utf8))
+            throw ExitCode(2)
+        }
+    }
+
+    static func size(_ text: String?) -> (width: Int, height: Int)? {
+        let parts = (text ?? "").split(separator: "x").compactMap { Int($0) }
+        return parts.count == 2 && parts[0] > 0 && parts[1] > 0 ? (parts[0], parts[1]) : nil
     }
 }
 

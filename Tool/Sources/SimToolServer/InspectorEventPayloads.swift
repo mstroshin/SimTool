@@ -16,6 +16,16 @@ struct InspectorSnapshotPayload: Encodable {
     var tests: TestsTopicPayload
     var launches: AppLaunchesPayload
     var activity: ActivityTopicPayload
+    var device: DeviceTopicPayload
+}
+
+/// `device`: the device's screens as they read now — on a foldable, which one
+/// is lit and how each picture is turned. Sent whole whenever that changes.
+struct DeviceTopicPayload: Encodable {
+    var displays: [ServerDisplayPayload]
+    var activeDisplay: String?
+    /// A foldable's hinge, posture and primary panel, as SpringBoard reports them.
+    var fold: SimulatorFoldState?
 }
 
 /// `network`: calls the app reported (a known id replaces its call), the

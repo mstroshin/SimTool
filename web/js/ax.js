@@ -40,8 +40,9 @@ function setAxPick(on) {
 }
 
 // Picking happens on the live screen, with the Accessibility tab in view.
+// Picking reads the screen in points: not on the 3D device.
 function axPickActive() {
-  return ax.pick && inspector.open && inspector.tab === "ax" && app.dataset.mode !== "replay" && !!ax.tree;
+  return ax.pick && inspector.open && inspector.tab === "ax" && app.dataset.mode !== "replay" && !!ax.tree && !screenState.view3d;
 }
 
 function updateAxMode() {
@@ -65,7 +66,9 @@ function indexAx(tree) {
   };
   (tree.roots || []).forEach((root, index) => walk(root, null, 0, String(index)));
   ax.nodes = nodes;
-  const screen = axScreenFrame(tree);
+  // The server's own screen size wins: an iPhone Duo's app root keeps the
+  // cover's or a portrait frame while its children read the lit panel.
+  const screen = screenState.display ? null : axScreenFrame(tree);
   if (screen) {
     screenState.points = { width: screen.width, height: screen.height, x: screen.x, y: screen.y };
     updateReadoutSize();

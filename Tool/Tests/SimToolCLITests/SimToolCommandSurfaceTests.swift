@@ -89,6 +89,22 @@ final class SimToolCommandSurfaceTests: XCTestCase {
         XCTAssertNil(drag.velocity)
     }
 
+    func testThe3DRendererTakesEachPanelsFramebuffer() throws {
+        XCTAssertTrue(SimTool.configuration.subcommands.contains { $0 == DuoRender.self })
+        XCTAssertFalse(DuoRender.configuration.shouldDisplay, "the server starts it; nobody types it")
+        XCTAssertEqual(DuoRender.size("2007x2853")?.width, 2007)
+        XCTAssertNil(DuoRender.size("2007"))
+        XCTAssertNil(DuoRender.size(nil))
+    }
+
+    func testInputFoldsAFoldableOrReadsItsFold() throws {
+        let names = Input.configuration.subcommands.map { commandName(for: $0) }
+        XCTAssertTrue(names.contains("pose"))
+        XCTAssertEqual(try Input.Pose.parse(["book", "--device", "X"]).pose, "book")
+        XCTAssertEqual(try Input.Pose.parse(["90"]).pose, "90")
+        XCTAssertNil(try Input.Pose.parse(["--json"]).pose, "without a pose it reads the fold")
+    }
+
     func testInputShowsAndHidesTheSoftwareKeyboard() throws {
         let names = Input.configuration.subcommands.map { commandName(for: $0) }
         XCTAssertTrue(names.contains("keyboard"))

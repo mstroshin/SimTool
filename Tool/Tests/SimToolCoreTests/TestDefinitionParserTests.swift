@@ -107,6 +107,22 @@ final class TestDefinitionParserTests: XCTestCase {
         }
     }
 
+    func testParsesPoseSteps() throws {
+        let test = try TestDefinitionParser.parse("""
+        steps:
+          - pose: book
+          - pose: 90
+          - pose: Open
+        """)
+        XCTAssertEqual(test.steps.map(\.action), [.pose(.book), .pose(SimulatorPose(hingeDegrees: 90)), .pose(.open)])
+        XCTAssertEqual(test.steps.map(\.description), ["Fold to book", "Fold to 90°", "Fold to open"])
+        for step in ["- pose: tent", "- pose: 200"] {
+            XCTAssertThrowsError(try TestDefinitionParser.parse("steps:\n  \(step)\n"), step) { error in
+                XCTAssertTrue("\(error)".contains("takes closed, book, open or a hinge angle"), "\(step) → \(error)")
+            }
+        }
+    }
+
     func testLongPressDurationIsOptional() throws {
         let test = try TestDefinitionParser.parse("""
         steps:

@@ -69,6 +69,12 @@ public struct SimToolClient: Sendable {
         try await input(SimulatorInputPayload(action: "software-keyboard", visible: visible))
     }
 
+    /// Folds a foldable to a named pose (closed, book, open) or a hinge angle;
+    /// answers once the device reports it.
+    public func pose(_ pose: SimulatorPose) async throws -> CommandResultPayload {
+        try await input(SimulatorInputPayload(action: "pose", name: pose.name, angle: pose.name == nil ? pose.hingeDegrees : nil))
+    }
+
     /// Pastes an image (PNG, JPEG, HEIC, …) into the focused field the same way.
     public func pasteImage(_ data: Data, contentType: String) async throws -> CommandResultPayload {
         try await sendFile(path: "input/paste-image", data: data, contentType: contentType, filename: nil)

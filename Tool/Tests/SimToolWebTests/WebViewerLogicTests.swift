@@ -230,6 +230,80 @@ final class WebViewerLogicTests: XCTestCase {
         XCTAssertEqual(value(context, "formatOffset(83.4)"), "1:23")
         XCTAssertEqual(value(context, "plural(1, 'step', 'steps') + ' / ' + plural(2, 'step', 'steps')"), "1 step / 2 steps")
         XCTAssertEqual(value(context, "runtimeName('com.apple.CoreSimulator.SimRuntime.iOS-26-4')"), "iOS 26.4")
+        // The iPhone Duo's device-specific runtime: the OS version, not the model.
+        XCTAssertEqual(value(context, "runtimeName('com.apple.CoreSimulator.SimRuntime.iOS-27-2-iPhone19-4')"), "iOS 27.2")
+        XCTAssertEqual(value(context, "runtimeName('com.apple.CoreSimulator.SimRuntime.watchOS-11-0')"), "watchOS 11.0")
+    }
+
+    // MARK: - A screen's picture
+
+    // The open inner panel of an iPhone Duo streams a portrait framebuffer
+    // under a landscape picture: its frames are turned once their shape is
+    // the panel's, and a cover frame still in flight is not.
+    func testAFrameTurnsWithTheScreenItShows() throws {
+        let context = try makeContext()
+        context.evaluateScript("var inner = { id: 'primary-1', width: 2007, height: 2853, rotation: 90 };")
+        XCTAssertEqual(value(context, "frameRotation(900, 1280, inner)"), "90", "the encoder scales, the shape stays")
+        XCTAssertEqual(value(context, "frameRotation(880, 1280, inner)"), "0", "a cover frame (1398×2034) is not the inner panel's")
+        XCTAssertEqual(value(context, "frameRotation(900, 1280, null)"), "0")
+        XCTAssertEqual(value(context, "frameRotation(900, 1280, { width: 2007, height: 2853, rotation: -90 })"), "270")
+    }
+
+    // The canvas transform must put the framebuffer's bottom-left corner at
+    // the top-left of a picture turned 90° clockwise.
+    func testTheCanvasTurnPutsEachCornerWhereThePictureHasIt() throws {
+        let context = try makeContext()
+        context.evaluateScript("""
+        function place(rotation, x, y) {
+          var t = canvasTurn(rotation, 300, 200);
+          return Math.round(t.a * x + t.c * y + t.e) + "," + Math.round(t.b * x + t.d * y + t.f);
+        }
+        """)
+        // Drawn at (turn.width × turn.height) = (200 × 300) in frame space.
+        XCTAssertEqual(value(context, "place(90, 0, 300)"), "0,0", "the frame's bottom-left lands top-left")
+        XCTAssertEqual(value(context, "place(90, 0, 0)"), "300,0", "the frame's top-left lands top-right")
+        XCTAssertEqual(value(context, "[canvasTurn(90, 300, 200).width, canvasTurn(90, 300, 200).height].join('x')"), "200x300")
+        XCTAssertEqual(value(context, "place(180, 0, 0)"), "300,200")
+        XCTAssertEqual(value(context, "place(270, 0, 0)"), "0,200")
+        XCTAssertEqual(value(context, "place(0, 10, 20)"), "10,20")
+    }
+
+    // A click on the 3D device lands on the panel's framebuffer through the
+    // projected quad of the leaf it hit, and goes out as a picture fraction.
+    func testA3DClickLandsOnThePanelUnderIt() throws {
+        let context = try makeContext()
+        context.evaluateScript("""
+        var flat = { pieces: [[[0.1, 0.2], [0.5, 0.2], [0.5, 0.8], [0.1, 0.8], [0, 0.5, 1, 0.5]],
+                              [[0.5, 0.2], [0.9, 0.2], [0.9, 0.8], [0.5, 0.8], [0, 0, 1, 0.5]]] };
+        function at(x, y) { var p = pointOnDuoScreen(flat, x, y); return p ? p.x.toFixed(3) + "," + p.y.toFixed(3) : "none"; }
+        """)
+        XCTAssertEqual(value(context, "at(0.1, 0.2)"), "0.000,0.500", "the first leaf's top-left is its region's top-left")
+        XCTAssertEqual(value(context, "at(0.3, 0.5)"), "0.500,0.750")
+        XCTAssertEqual(value(context, "at(0.7, 0.5)"), "0.500,0.250")
+        XCTAssertEqual(value(context, "at(0.05, 0.5)"), "none", "beside the screen touches nothing")
+        XCTAssertEqual(value(context, "pointOnDuoScreen(null, 0.5, 0.5)"), "null")
+        // The inverse of the server's turn (SimulatorDisplayRotation.framebufferRatio).
+        XCTAssertEqual(value(context, "JSON.stringify(pictureRatio({ x: 0.496, y: 0.832 }, 90))"), #"{"x":0.16800000000000004,"y":0.496}"#)
+        XCTAssertEqual(value(context, "JSON.stringify(pictureRatio({ x: 0.9, y: 0.25 }, 270))"), #"{"x":0.25,"y":0.09999999999999998}"#)
+        XCTAssertEqual(value(context, "JSON.stringify(pictureRatio({ x: 0.75, y: 0.9 }, 180))"), #"{"x":0.25,"y":0.09999999999999998}"#)
+        XCTAssertEqual(value(context, "JSON.stringify(pictureRatio({ x: 0.3, y: 0.4 }, 0))"), #"{"x":0.3,"y":0.4}"#)
+        XCTAssertEqual(value(context, "cssColorHex('rgb(27, 29, 32)')"), "1b1d20")
+        XCTAssertEqual(value(context, "cssColorHex('transparent')"), "000000")
+    }
+
+    func testTheToolbarSaysHowTheDeviceIsFolded() throws {
+        let context = try makeContext()
+        XCTAssertEqual(value(context, "foldReadout({ hingeDegrees: 130, pose: 'book', panel: 'inner' })"), "book · 130° · inner")
+        XCTAssertEqual(value(context, "foldReadout({ hingeDegrees: 92.64, panel: 'inner' })"), "92.6° · inner")
+        XCTAssertEqual(value(context, "foldReadout({ panel: 'cover' })"), "cover")
+        XCTAssertEqual(value(context, "foldReadout(null)"), "")
+    }
+
+    func testTheScreensCornersComeFromItsDeviceTypeInProportion() throws {
+        let context = try makeContext()
+        XCTAssertEqual(value(context, "screenRadius({ cornerRadii: [8, 59, 59, 8], points: { width: 466, height: 678 } }, 233)"), "4px 30px 30px 4px")
+        XCTAssertEqual(value(context, "screenRadius({ points: { width: 466, height: 678 } }, 233)"), "", "no radii: the page's own heuristic")
+        XCTAssertEqual(value(context, "screenRadius(null, 233)"), "")
     }
 
     // MARK: - Theme

@@ -38,7 +38,10 @@ public enum SimulatorTouchScreen {
 
     /// Reads `log show --style ndjson` lines, oldest first. Only the last
     /// backboardd counts: one that restarts brings its screens up afresh.
-    static func isCutOff(log: Data) -> Bool {
+    /// `screen` — a display's unique id — asks about the touch screen of that
+    /// display alone: a foldable has one per panel (`ScreenTouchService.<id>`),
+    /// and a panel stood down says nothing about the other.
+    static func isCutOff(log: Data, screen: String? = nil) -> Bool {
         struct Entry: Decodable {
             var processID: Int?
             var eventMessage: String?
@@ -49,15 +52,26 @@ public enum SimulatorTouchScreen {
             return (process, message)
         }
         guard let current = entries.last?.process else { return false }
-        var stoodDown = Set<String>()
+        // Each stood-down service, with the display it touches when it names one.
+        var stoodDown: [String: String] = [:]
         for entry in entries where entry.process == current {
-            if entry.message.hasPrefix("Disconnecting service:"), let screen = screenIdentifier(in: entry.message) {
-                stoodDown.insert(screen)
+            if entry.message.hasPrefix("Disconnecting service:"), let service = screenIdentifier(in: entry.message) {
+                stoodDown[service] = serviceDisplay(in: entry.message) ?? ""
             } else if let sender = attachedSender(in: entry.message) {
-                stoodDown.remove(sender)
+                stoodDown[sender] = nil
             }
         }
-        return !stoodDown.isEmpty
+        guard let screen else { return !stoodDown.isEmpty }
+        return stoodDown.values.contains { $0 == screen.uppercased() }
+    }
+
+    /// `… ScreenTouchService.0C89A8AA-FCF7-4C74-9347-CD63A1AC5101, state: …`
+    /// → `0C89A8AA-FCF7-4C74-9347-CD63A1AC5101`; nil for a service named after
+    /// no display (`ScreenTouchService.PurpleMain`).
+    private static func serviceDisplay(in message: String) -> String? {
+        guard let marker = message.range(of: "com.apple.SimulatorHID.ScreenTouchService.") else { return nil }
+        let name = message[marker.upperBound...].prefix { $0.isHexDigit || $0 == "-" }
+        return UUID(uuidString: String(name)) == nil ? nil : name.uppercased()
     }
 
     /// `… identifier: 0xacefade00000007 com.apple.SimulatorHID.ScreenTouchService…`
@@ -108,12 +122,14 @@ struct TouchScreenCheck: Sendable {
     )
 
     /// A log that cannot be read counts as a screen that takes touches: the
-    /// check must never stop touches that would land.
-    func isCutOff(deviceUDID: String, bootedAt: Date) async -> Bool {
-        if let known = recorded(deviceUDID: deviceUDID, bootedAt: bootedAt) { return known }
+    /// check must never stop touches that would land. `screen` asks about one
+    /// display's touch screen (a foldable's panel), remembered on its own.
+    func isCutOff(deviceUDID: String, bootedAt: Date, screen: String? = nil) async -> Bool {
+        let key = screen.map { "\(deviceUDID)-\($0)" } ?? deviceUDID
+        if let known = recorded(deviceUDID: key, bootedAt: bootedAt) { return known }
         guard let log = await readLog(deviceUDID, bootedAt) else { return false }
-        let cutOff = SimulatorTouchScreen.isCutOff(log: log)
-        record(cutOff, deviceUDID: deviceUDID, bootedAt: bootedAt)
+        let cutOff = SimulatorTouchScreen.isCutOff(log: log, screen: screen)
+        record(cutOff, deviceUDID: key, bootedAt: bootedAt)
         return cutOff
     }
 

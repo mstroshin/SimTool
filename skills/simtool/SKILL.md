@@ -267,12 +267,17 @@ caveats that `--help` won't tell you are spelled out here. Most commands accept
 There is no `simtool screenshot` subcommand. Either fetch one from a running
 server (`GET /api/v1/screenshot`, see the viewer below) or use
 `xcrun simctl io <udid> screenshot /tmp/shot.png` and Read the PNG. The first
-frame is usually the splash — capture again to see the settled screen.
+frame is usually the splash — capture again to see the settled screen. An iPhone
+Duo has two screens and simctl refuses to choose: pass `--display=primary` (the
+cover) or `--display=primary-1` (the inner panel); the server's route takes the
+lit one, or `?display=cover|inner`.
 
 ### Input · accessibility · logs
 - `simtool input …` — touches, typing, hardware buttons. Coordinates are
-  screen **points** (the frames `simtool ax` reports), and every touch is played
-  by SimTool's own HID helper as a timed path:
+  screen **points** (the frames `simtool ax` reports) — on an iPhone Duo, points
+  of the lit panel as its screenshot reads (the open inner panel is 951 × 669,
+  landscape) —, and every touch is played by SimTool's own HID helper as a
+  timed path:
   - `tap` / `long-press` — by label, a11y-id or coordinates. A long press under
     ~0.6 s may land as a tap (warns); the default 1 s is safe.
   - `scroll up|down|left|right [--distance <pt>]` — the direction is **the way
@@ -294,6 +299,10 @@ frame is usually the splash — capture again to see the settled screen.
     react. For a photo picker, put the image in the library instead: `xcrun
     simctl addmedia <udid> <file>…` (or right-click the viewer's screen › Add
     files to Photos…).
+  - `pose closed|book|open|<0–180>` — folds an iPhone Duo and waits until the
+    device reports the pose (closed lights the cover, book and open the inner
+    panel; coordinates then follow the lit panel). Without an argument it prints
+    the fold. A pose the device does not take fails, saying what it reports.
   - `keyboard show|hide` — the software keyboard, confirmed on screen (or off
     it) through the accessibility tree; idempotent. Hide it when it covers the
     button you need; `show` fails when no text field is focused — tap one
@@ -417,7 +426,10 @@ State, Accessibility, Tests; ⇧⌘P lists every action). The mouse on the scree
 a live finger — hold, drag, wheel-scroll, Option for pinch; the Accessibility tab
 picks elements and copies them as YAML steps. Scoping `--app <bundle>` captures
 that app's OSLog **and** stdout from the start. `simtool run` reads `.simtool/config.yml` and does build → launch → viewer
-in one step. Flags: `simtool serve --help` / `simtool run --help`.
+in one step. Flags: `simtool serve --help` / `simtool run --help`. On an iPhone
+Duo the toolbar folds it (Closed / Book / Open) and its 3D button shows the
+folded device with the lit panel live on it — clicks on that screen land on the
+panel; `simtool doctor` says when 3D is unavailable, and why.
 
 ## Workflow
 

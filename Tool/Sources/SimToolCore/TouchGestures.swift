@@ -60,11 +60,15 @@ public struct LiveTouchEvent: Equatable, Sendable {
     public var phase: TouchPhase
     public var first: TouchRatio
     public var second: TouchRatio?
+    /// The screen the viewer showed — on a foldable, the panel touched; nil
+    /// means the lit one. Fractions are of that screen's picture.
+    public var display: String?
 
-    public init(phase: TouchPhase, first: TouchRatio, second: TouchRatio? = nil) {
+    public init(phase: TouchPhase, first: TouchRatio, second: TouchRatio? = nil, display: String? = nil) {
         self.phase = phase
         self.first = first
         self.second = second
+        self.display = display
     }
 
     var helperLine: String {
