@@ -100,6 +100,51 @@ public struct ProjectConfig: Codable, Equatable, Sendable {
             describes(selection) ? builder : nil
         }
 
+        /// The configured DerivedData path when `selection` builds this
+        /// block's workspace or project, else nil — as with `settings(for:)`.
+        /// A build of the configured app named by its path must land where
+        /// `run` builds it: another DerivedData is a second cold build, and
+        /// one that fights the first over shared module caches.
+        public func derivedDataPath(for selection: SimulatorAppBuildSelection) -> String? {
+            describes(selection) ? derivedDataPath : nil
+        }
+
+        /// What a command line with `--workspace` or `--project` builds: that
+        /// workspace or project, with `configured`'s builder, settings and
+        /// DerivedData path when the block describes the same one — the flags
+        /// over them, key by key. Xcode takes no build settings or DerivedData
+        /// path, so with `xcode-mcp` the configured ones stay out and a flag
+        /// for either is an error.
+        public static func explicitSelection(
+            configured: Build?,
+            workspace: String?,
+            project: String?,
+            scheme: String?,
+            configuration: String?,
+            derivedDataPath: String?,
+            settings explicit: [String: String],
+            builder: SimulatorAppBuilder?
+        ) throws -> SimulatorAppBuildSelection {
+            let base = try SimulatorAppBuildSelection.validated(
+                workspacePath: workspace,
+                projectPath: project,
+                scheme: scheme,
+                configuration: configuration
+            )
+            let builder = builder ?? configured?.builder(for: base) ?? .xcodebuild
+            let usesXcodebuild = builder == .xcodebuild
+            let settings = (usesXcodebuild ? configured?.settings(for: base) ?? [:] : [:]).merging(explicit) { _, flag in flag }
+            return try SimulatorAppBuildSelection.validated(
+                workspacePath: workspace,
+                projectPath: project,
+                scheme: scheme,
+                configuration: configuration,
+                derivedDataPath: derivedDataPath ?? (usesXcodebuild ? configured?.derivedDataPath(for: base) : nil),
+                buildSettings: settings,
+                builder: builder
+            )
+        }
+
         private func describes(_ selection: SimulatorAppBuildSelection) -> Bool {
             guard let configured = try? self.selection(builder: .xcodebuild) else { return false }
             return configured.identity.workspacePath == selection.identity.workspacePath

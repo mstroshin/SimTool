@@ -573,6 +573,12 @@ swift run simtool app build --workspace MyApp.xcworkspace --scheme MyApp \
 A flag wins over the config for the same key. Settings are part of the build
 cache key, so a build with other settings never reuses a cached one.
 
+Naming the configured workspace or project with `--workspace` / `--project`
+still builds the configured app: the command takes `build.settings`,
+`build.builder` and `build.derivedDataPath` from the config, so it lands in the
+DerivedData `run` builds into and shares its cache entry instead of starting a
+second cold build. A build of any other workspace or project takes none of them.
+
 ### Building in Xcode over MCP
 
 Xcode 27 offers its build to agents as MCP tools (`xcrun mcpbridge`), and SimTool

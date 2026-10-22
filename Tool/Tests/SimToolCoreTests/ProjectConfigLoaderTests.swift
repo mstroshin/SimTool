@@ -299,6 +299,58 @@ final class ProjectConfigLoaderTests: XCTestCase {
         XCTAssertNil(config.build.builder(for: otherProject))
     }
 
+    // `app build --workspace <the configured one>` must build what `run`
+    // builds, where `run` builds it: a DerivedData of its own is a second cold
+    // build, and with Xcode's custom build locations a fight over module caches.
+    func testAnExplicitWorkspaceOfTheConfiguredAppInheritsItsDerivedData() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try writeConfig("""
+        simulator: booted
+        bundleId: com.example.MyApp
+        build:
+          workspace: App.xcworkspace
+          scheme: App
+          derivedDataPath: DerivedData
+          settings:
+            MACOSX_DEPLOYMENT_TARGET: 15.0
+        """, in: root)
+        let build = try ProjectConfigLoader.load(startDirectory: root).build
+        let workspace = root.appendingPathComponent("App.xcworkspace").path
+        func explicit(
+            workspace: String? = workspace,
+            project: String? = nil,
+            derivedDataPath: String? = nil,
+            builder: SimulatorAppBuilder? = nil
+        ) throws -> SimulatorAppBuildSelection {
+            try ProjectConfig.Build.explicitSelection(
+                configured: build, workspace: workspace, project: project, scheme: "App", configuration: nil,
+                derivedDataPath: derivedDataPath, settings: [:], builder: builder
+            )
+        }
+
+        // The same workspace by its path is the configured build: one cache entry.
+        XCTAssertEqual(try explicit().identity, try build.selection().identity)
+        XCTAssertEqual(try explicit().identity.derivedDataPath, root.appendingPathComponent("DerivedData").path)
+        // A flag still wins over the key.
+        XCTAssertEqual(try explicit(derivedDataPath: "/tmp/Elsewhere").identity.derivedDataPath, "/tmp/Elsewhere")
+        // Another project takes nothing from the block.
+        let other = try explicit(workspace: nil, project: root.appendingPathComponent("App.xcodeproj").path)
+        XCTAssertNil(other.identity.derivedDataPath)
+        XCTAssertNil(other.identity.buildSettings)
+        // Without a config, the flags alone.
+        XCTAssertNil(try ProjectConfig.Build.explicitSelection(
+            configured: nil, workspace: workspace, project: nil, scheme: "App", configuration: nil,
+            derivedDataPath: nil, settings: [:], builder: nil
+        ).identity.derivedDataPath)
+        // Xcode picks its DerivedData itself: the configured one stays out,
+        // and asking for one is an error.
+        let xcode = try explicit(builder: .xcodeMCP)
+        XCTAssertNil(xcode.identity.derivedDataPath)
+        XCTAssertNil(xcode.identity.buildSettings)
+        XCTAssertThrowsError(try explicit(derivedDataPath: "/tmp/Elsewhere", builder: .xcodeMCP))
+    }
+
     func testFlagsOverrideTheConfiguredBuildKeyByKey() throws {
         let root = try makeTempDirectory()
         defer { try? FileManager.default.removeItem(at: root) }

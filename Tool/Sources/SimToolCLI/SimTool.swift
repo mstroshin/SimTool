@@ -1025,7 +1025,7 @@ struct AppBuildOptions: ParsableArguments {
     @Option(help: "Build configuration. Defaults to `build.configuration` for the configured app, else Debug.")
     var configuration: String?
 
-    @Option(name: .customLong("derived-data-path"), help: "DerivedData path for xcodebuild products. Defaults to `build.derivedDataPath` for the configured app.")
+    @Option(name: .customLong("derived-data-path"), help: "DerivedData path for xcodebuild products. Defaults to `build.derivedDataPath` when building the configured workspace or project.")
     var derivedDataPath: String?
 
     @Option(name: .customLong("build-setting"), help: buildSettingHelp)
@@ -1063,7 +1063,7 @@ struct AppTestOptions: ParsableArguments {
     @Option(help: "Build configuration. Defaults to `build.configuration` for the configured app, else Debug.")
     var configuration: String?
 
-    @Option(name: .customLong("derived-data-path"), help: "DerivedData path for xcodebuild products. Defaults to `build.derivedDataPath` for the configured app.")
+    @Option(name: .customLong("derived-data-path"), help: "DerivedData path for xcodebuild products. Defaults to `build.derivedDataPath` when building the configured workspace or project.")
     var derivedDataPath: String?
 
     @Option(name: .customLong("build-setting"), help: buildSettingHelp)
@@ -1098,10 +1098,9 @@ private let builderHelp = ArgumentHelp(
 /// The build selection a command line asks for. Without `--workspace` or
 /// `--project` that is the project config's `build:` block — the app `run`
 /// builds — with each flag over its key. With one, it is that workspace or
-/// project, with the config's `build.settings` and `build.builder` when it
-/// describes the same one, and the flags on top. Xcode takes no build
-/// settings, so with `xcode-mcp` the configured ones stay out and a
-/// `--build-setting` is an error.
+/// project, with the config's `build.settings`, `build.builder` and
+/// `build.derivedDataPath` when it describes the same one, and the flags on
+/// top (`ProjectConfig.Build.explicitSelection`).
 private func appBuildSelection(
     workspace: String?,
     project: String?,
@@ -1125,24 +1124,14 @@ private func appBuildSelection(
             settings: explicit
         )
     }
-    let base = try SimulatorAppBuildSelection.validated(
-        workspacePath: workspace,
-        projectPath: project,
-        scheme: scheme,
-        configuration: configuration,
-        derivedDataPath: derivedDataPath
-    )
-    let builder = builder ?? configBuild?.builder(for: base) ?? .xcodebuild
-    let configured = builder == .xcodebuild ? configBuild?.settings(for: base) ?? [:] : [:]
-    let settings = configured.merging(explicit) { _, flag in flag }
-    guard !settings.isEmpty || builder != .xcodebuild else { return base }
-    return try SimulatorAppBuildSelection.validated(
-        workspacePath: workspace,
-        projectPath: project,
+    return try ProjectConfig.Build.explicitSelection(
+        configured: configBuild,
+        workspace: workspace,
+        project: project,
         scheme: scheme,
         configuration: configuration,
         derivedDataPath: derivedDataPath,
-        buildSettings: settings,
+        settings: explicit,
         builder: builder
     )
 }
