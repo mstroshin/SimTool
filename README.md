@@ -1025,6 +1025,14 @@ tracked inputs can generate another one (generator flags, a binary cache, a
 generator update). Hashing is by content, so regenerating an identical project
 does not invalidate the cache.
 
+Content hashes are remembered between runs in `.simtool/build/input-hashes.tsv`,
+keyed by each file's size, modification and change times and inode: a file is
+read again only when one of those changed, so checking a large project's
+sources costs a `stat` per file rather than reading all of them. The change
+time cannot be set back, so content rewritten behind restored timestamps is
+still seen; a file changed within two seconds of its hashing is read again
+next time.
+
 `run --force` skips the checksum cache: it always builds (xcodebuild, or Xcode
 with `xcode-mcp`) and reinstalls the app. Use it when a dependency the fingerprint cannot see
 changed — e.g. a local package outside the project root, or a Tuist binary

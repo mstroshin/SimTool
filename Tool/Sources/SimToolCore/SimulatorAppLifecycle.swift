@@ -522,6 +522,12 @@ public struct SimulatorAppBuildCache {
             .appendingPathExtension("json")
     }
 
+    /// The content hashes of the project's input files, by their `stat`
+    /// (`SimulatorAppInputHashCache`): one per project, whatever the identity.
+    public var inputHashesURL: URL {
+        metadataRoot.appendingPathComponent("input-hashes.tsv")
+    }
+
     /// Where the full log of the last xcodebuild run of `identity` is kept,
     /// beside its metadata; each build replaces it.
     public func logURL(for identity: SimulatorAppBuildIdentity, action: String = "build") throws -> URL {
@@ -572,13 +578,35 @@ public struct SimulatorAppBuildCache {
 }
 
 public enum SimulatorAppBuildFingerprinter {
-    public static func fingerprint(selection: SimulatorAppBuildSelection, cacheRoot: URL? = nil) throws -> SimulatorAppBuildFingerprint {
+    /// The checksum of what a build of `selection` reads: its identity and
+    /// every input file, by path, size and content. With `hashCache`, files
+    /// whose `stat` is unchanged since the last fingerprint are not read
+    /// again (`SimulatorAppInputHashCache`); the checksum is the same either way.
+    public static func fingerprint(
+        selection: SimulatorAppBuildSelection,
+        cacheRoot: URL? = nil,
+        hashCache: URL? = nil
+    ) throws -> SimulatorAppBuildFingerprint {
         let files = try inputFiles(selection: selection, cacheRoot: cacheRoot)
+        let started = Date()
+        let known = hashCache.map(SimulatorAppInputHashCache.load) ?? SimulatorAppInputHashCache()
+        var seen = SimulatorAppInputHashCache()
         var hasher = SHA256()
         try update(&hasher, with: JSON.data(selection.identity, pretty: false))
         for file in files {
-            update(&hasher, with: "\nfile:\(file.relativePath):\(file.byteCount)\n")
-            try update(&hasher, with: Data(contentsOf: URL(fileURLWithPath: file.path)))
+            let status = SimulatorAppInputHashCache.Status(path: file.path)
+            let contentHash: String
+            if let status, let cached = known.hash(of: file.path, status: status) {
+                contentHash = cached
+            } else {
+                contentHash = hex(SHA256.hash(data: try Data(contentsOf: URL(fileURLWithPath: file.path))))
+            }
+            if let status { seen.record(file.path, status: status, hash: contentHash) }
+            update(&hasher, with: "\nfile:\(file.relativePath):\(file.byteCount):\(contentHash)\n")
+        }
+        if let hashCache {
+            seen.writtenAt = started
+            seen.write(to: hashCache)
         }
         return SimulatorAppBuildFingerprint(checksum: hex(hasher.finalize()), inputFileCount: files.count)
     }
@@ -588,7 +616,9 @@ public enum SimulatorAppBuildFingerprinter {
     /// workspace or project, and every project the workspace references —
     /// whether git tracks them or not.
     public static func inputFiles(selection: SimulatorAppBuildSelection, cacheRoot: URL? = nil) throws -> [SimulatorAppBuildInputFile] {
-        let root = selection.projectRoot.standardizedFileURL
+        // Paths are strings from here on: a large project lists tens of
+        // thousands of files, and URL standardization goes to the disk.
+        let root = selection.projectRoot.standardizedFileURL.path
         // Build products are never sources: SimTool's own DerivedData, and the
         // configured one wherever it lives — inside the project, under any name.
         let excludedRoots = [cacheRoot?.path, selection.identity.derivedDataPath]
@@ -607,7 +637,7 @@ public enum SimulatorAppBuildFingerprinter {
         // content is deterministic, so hashing it misses only when it changed.
         var seen = Set(files.map(\.path))
         for container in containers(of: selection) {
-            for file in walk(container, root: root, excludedRoots: excludedRoots) where seen.insert(file.path).inserted {
+            for file in walk(container.path, root: root, excludedRoots: excludedRoots) where seen.insert(file.path).inserted {
                 files.append(file)
             }
         }
@@ -620,26 +650,18 @@ public enum SimulatorAppBuildFingerprinter {
 
     /// The build-input files under `directory`, found by walking the
     /// filesystem; excluded directory names count from `directory` down.
-    private static func walk(_ directory: URL, root: URL, excludedRoots: [String]) -> [SimulatorAppBuildInputFile] {
-        let resourceKeys: [URLResourceKey] = [.isDirectoryKey, .fileSizeKey]
-        guard let enumerator = FileManager.default.enumerator(
-            at: directory,
-            includingPropertiesForKeys: resourceKeys,
-            options: [],
-            errorHandler: nil
-        ) else { return [] }
-
+    private static func walk(_ directory: String, root: String, excludedRoots: [String]) -> [SimulatorAppBuildInputFile] {
+        guard let enumerator = FileManager.default.enumerator(atPath: directory) else { return [] }
         var files: [SimulatorAppBuildInputFile] = []
-        for case let url as URL in enumerator {
-            let standardized = url.standardizedFileURL
-            let path = standardized.path
-            if isExcludedPath(standardized, root: directory) || isUnder(path, anyOf: excludedRoots) {
-                if isDirectory(standardized) { enumerator.skipDescendants() }
+        for case let below as String in enumerator {
+            let path = directory + "/" + below
+            let isDirectory = (enumerator.fileAttributes?[.type] as? FileAttributeType) == .typeDirectory
+            if isExcluded(relativePath: below) || isUnder(path, anyOf: excludedRoots) {
+                if isDirectory { enumerator.skipDescendants() }
                 continue
             }
-            guard !isDirectory(standardized), isBuildInputFile(standardized, root: root) else { continue }
-            let relativePath = standardized.pathRelative(to: root)
-            let byteCount = ((try? standardized.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init)) ?? 0
+            let relativePath = relative(path, to: root)
+            guard !isDirectory, isBuildInput(relativePath: relativePath), let byteCount = regularFileSize(atPath: path) else { continue }
             files.append(SimulatorAppBuildInputFile(relativePath: relativePath, path: path, byteCount: byteCount))
         }
         return files
@@ -650,40 +672,50 @@ public enum SimulatorAppBuildFingerprinter {
     /// is unavailable) so the caller falls back to the filesystem walk. Listing
     /// via git is what excludes gitignored generated artifacts from the
     /// fingerprint; the walk's own exclusions — build directories by name, the
-    /// DerivedData roots — and its type filter (`isBuildInputFile`) then apply
+    /// DerivedData roots — and its type filter (`isBuildInput`) then apply
     /// as well, so a project whose `.gitignore` misses its DerivedData neither
     /// misses the cache forever nor hashes gigabytes of build products.
-    private static func gitInputFiles(root: URL, excludedRoots: [String]) -> [SimulatorAppBuildInputFile]? {
+    private static func gitInputFiles(root: String, excludedRoots: [String]) -> [SimulatorAppBuildInputFile]? {
         // Ignored directories are not walked at all: excluded by name here,
         // and by path through pathspecs (relative to `root`, where git runs).
-        var arguments = ["-C", root.path, "ls-files", "--cached", "--others", "--exclude-standard", "-z"]
+        var arguments = ["-C", root, "ls-files", "--cached", "--others", "--exclude-standard", "-z"]
         arguments += excludedDirectoryNames.sorted().map { "--exclude=\($0)/" }
         arguments += ["--", "."]
         for excluded in excludedRoots {
-            let relative = URL(fileURLWithPath: excluded).pathRelative(to: root)
-            guard !relative.hasPrefix("/"), !relative.isEmpty else { continue }
-            arguments.append(":(exclude,literal)\(relative)")
+            let below = relative(excluded, to: root)
+            guard !below.hasPrefix("/"), !below.isEmpty else { continue }
+            arguments.append(":(exclude,literal)\(below)")
         }
-        guard let output = runGit(arguments, in: root), output.status == 0 else { return nil }
+        guard let output = runGit(arguments), output.status == 0 else { return nil }
 
         var files: [SimulatorAppBuildInputFile] = []
         var seen = Set<String>()
-        for relative in String(decoding: output.stdout, as: UTF8.self).split(separator: "\0") {
-            let relativePath = String(relative)
-            if relativePath.isEmpty { continue }
-            let url = root.appendingPathComponent(relativePath).standardizedFileURL
-            let path = url.path
-            guard seen.insert(path).inserted else { continue }
+        for listed in String(decoding: output.stdout, as: UTF8.self).split(separator: "\0") {
+            let relativePath = String(listed)
+            guard !relativePath.isEmpty, seen.insert(relativePath).inserted else { continue }
+            let path = root + "/" + relativePath
             // Tracked files are listed whatever the exclusions say.
-            if isExcludedPath(url, root: root) || isUnder(path, anyOf: excludedRoots) { continue }
-            guard isBuildInputFile(url, root: root) else { continue }
-            // Skip directories and stale index entries (deleted/renamed files).
-            var isDirectory: ObjCBool = false
-            guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), !isDirectory.boolValue else { continue }
-            let byteCount = ((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init)) ?? 0
-            files.append(SimulatorAppBuildInputFile(relativePath: url.pathRelative(to: root), path: path, byteCount: byteCount))
+            if isExcluded(relativePath: relativePath) || isUnder(path, anyOf: excludedRoots) { continue }
+            // Directories (submodules) and stale index entries (deleted or
+            // renamed files) have no regular file to hash.
+            guard isBuildInput(relativePath: relativePath), let byteCount = regularFileSize(atPath: path) else { continue }
+            files.append(SimulatorAppBuildInputFile(relativePath: relativePath, path: path, byteCount: byteCount))
         }
         return files
+    }
+
+    /// The size of the regular file at `path`, links followed — what reading
+    /// it reads; nil for anything else, or nothing.
+    private static func regularFileSize(atPath path: String) -> Int64? {
+        var info = stat()
+        guard stat(path, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else { return nil }
+        return Int64(info.st_size)
+    }
+
+    /// `path` below `root`, or `path` itself when it is not inside it.
+    private static func relative(_ path: String, to root: String) -> String {
+        if path == root { return "" }
+        return path.hasPrefix(root + "/") ? String(path.dropFirst(root.count + 1)) : path
     }
 
     /// The Xcode containers the build reads: the selected workspace or
@@ -711,7 +743,7 @@ public enum SimulatorAppBuildFingerprinter {
     /// Runs git synchronously, returning its exit status and stdout, or `nil` if
     /// git could not be launched. stderr is discarded; stdout is drained before
     /// `waitUntilExit` to avoid pipe-buffer deadlock.
-    private static func runGit(_ arguments: [String], in directory: URL) -> (status: Int32, stdout: Data)? {
+    private static func runGit(_ arguments: [String]) -> (status: Int32, stdout: Data)? {
         let gitURL = URL(fileURLWithPath: "/usr/bin/git")
         guard FileManager.default.isExecutableFile(atPath: gitURL.path) else { return nil }
         let process = Process()
@@ -730,7 +762,7 @@ public enum SimulatorAppBuildFingerprinter {
         hasher.update(data: Data(string.utf8))
     }
 
-    private static func update(_ hasher: inout SHA256, with data: Data) throws {
+    private static func update(_ hasher: inout SHA256, with data: Data) {
         hasher.update(data: data)
     }
 
@@ -738,30 +770,30 @@ public enum SimulatorAppBuildFingerprinter {
         digest.map { String(format: "%02x", $0) }.joined()
     }
 
-    private static func isDirectory(_ url: URL) -> Bool {
-        ((try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false) == true
-    }
-
     private static func isUnder(_ path: String, anyOf roots: [String]) -> Bool {
         roots.contains { path == $0 || path.hasPrefix($0 + "/") }
     }
 
-    private static func isExcludedPath(_ url: URL, root: URL) -> Bool {
-        let components = url.pathRelative(to: root).split(separator: "/").map(String.init)
-        return components.contains { excludedDirectoryNames.contains($0) }
+    /// Whether a path holds a build directory — counted from where the
+    /// path is relative to.
+    private static func isExcluded(relativePath: String) -> Bool {
+        relativePath.split(separator: "/").contains { excludedDirectoryNames.contains(String($0)) }
     }
 
-    static func isBuildInputFile(_ url: URL, root: URL) -> Bool {
-        let relativeComponents = url.pathRelative(to: root).split(separator: "/").map(String.init)
-        if relativeComponents.contains(where: isBuildPackageComponent) { return true }
-        let filename = url.lastPathComponent
-        if includedFileNames.contains(filename) { return true }
-        let fileExtension = url.pathExtension.lowercased()
-        return includedExtensions.contains(fileExtension)
+    /// Whether the file at `relativePath` (relative to the project root, or
+    /// absolute outside it) is something a build reads.
+    static func isBuildInput(relativePath: String) -> Bool {
+        let components = relativePath.split(separator: "/")
+        if components.contains(where: { buildPackageExtensions.contains(pathExtension($0)) }) { return true }
+        guard let name = components.last else { return false }
+        return includedFileNames.contains(String(name)) || includedExtensions.contains(pathExtension(name))
     }
 
-    private static func isBuildPackageComponent(_ component: String) -> Bool {
-        buildPackageExtensions.contains(URL(fileURLWithPath: component).pathExtension.lowercased())
+    /// A name's extension, lowercased, as `URL.pathExtension` reads it:
+    /// none for a dotfile (`.env`, `.bundle`).
+    private static func pathExtension(_ name: Substring) -> String {
+        guard let dot = name.lastIndex(of: "."), dot != name.startIndex else { return "" }
+        return name[name.index(after: dot)...].lowercased()
     }
 
     private static let excludedDirectoryNames: Set<String> = [
@@ -890,7 +922,11 @@ public enum SimulatorAppLifecycleClient {
         force: Bool = false,
         cache: SimulatorAppBuildCache = SimulatorAppBuildCache(simtoolDirectory: SimToolDirectory.resolve())
     ) throws -> SimulatorAppBuildPlan {
-        let fingerprint = try SimulatorAppBuildFingerprinter.fingerprint(selection: selection, cacheRoot: cache.derivedDataRoot)
+        let fingerprint = try SimulatorAppBuildFingerprinter.fingerprint(
+            selection: selection,
+            cacheRoot: cache.derivedDataRoot,
+            hashCache: cache.inputHashesURL
+        )
         let derivedDataPath: String
         if let selectedDerivedDataPath = selection.identity.derivedDataPath {
             derivedDataPath = selectedDerivedDataPath
@@ -1099,7 +1135,11 @@ public enum SimulatorAppLifecycleClient {
         guard FileManager.default.fileExists(atPath: appBundleURL.path, isDirectory: &isDirectory), isDirectory.boolValue else {
             throw SimToolError("App bundle not found: \(appBundleURL.path)")
         }
-        let fingerprint = try SimulatorAppBuildFingerprinter.fingerprint(selection: selection, cacheRoot: cache.derivedDataRoot)
+        let fingerprint = try SimulatorAppBuildFingerprinter.fingerprint(
+            selection: selection,
+            cacheRoot: cache.derivedDataRoot,
+            hashCache: cache.inputHashesURL
+        )
         let bundleIdentifier = try bundleIdentifier(appBundleURL: appBundleURL)
         let stamp = try productStamp(appBundleURL: appBundleURL)
         var metadata = SimulatorAppBuildCacheMetadata(
@@ -1635,13 +1675,4 @@ struct XcodeBuildProduct: Equatable {
 
 private struct XcodeBuildSettingsEntry: Decodable {
     var buildSettings: [String: String]
-}
-
-private extension URL {
-    func pathRelative(to root: URL) -> String {
-        let rootPath = root.standardizedFileURL.path
-        let path = standardizedFileURL.path
-        guard path == rootPath || path.hasPrefix(rootPath + "/") else { return path }
-        return String(path.dropFirst(rootPath.count + (path == rootPath ? 0 : 1)))
-    }
 }
