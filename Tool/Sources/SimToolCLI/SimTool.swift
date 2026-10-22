@@ -1105,7 +1105,7 @@ let buildTimeoutHelp = ArgumentHelp(
 
 private let builderHelp = ArgumentHelp(
     "What builds the app: xcodebuild, or xcode-mcp — Xcode itself, over its MCP tools (`xcrun mcpbridge`).",
-    discussion: "Defaults to `build.builder` from .simtool/config.yml, else xcodebuild. Xcode keeps the workspace loaded and builds into its own DerivedData, often much faster than a cold xcodebuild; it builds the scheme's Run configuration with the project's own settings, so --derived-data-path and --build-setting do not apply. Xcode asks to approve SimTool on first use."
+    discussion: "Defaults to `build.builder` from .simtool/config.yml, else xcodebuild. Xcode keeps the workspace loaded and builds where a build from its UI would, often much faster than a cold xcodebuild; it builds the scheme's Run configuration with the project's own settings into the DerivedData its own settings name, so --derived-data-path and --build-setting do not apply. Xcode asks to approve SimTool on first use."
 )
 
 /// The build selection a command line asks for. Without `--workspace` or

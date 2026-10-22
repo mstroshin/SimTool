@@ -275,7 +275,7 @@ final class ProjectConfigLoaderTests: XCTestCase {
         let config = try ProjectConfigLoader.load(startDirectory: root)
         XCTAssertEqual(config.build.builder, .xcodeMCP)
 
-        // Xcode builds into its own DerivedData with the project's own
+        // Xcode builds where its own settings say, with the project's own
         // settings, so neither reaches its build nor its cache entry.
         let xcode = try config.buildSelection()
         XCTAssertEqual(xcode.builder, .xcodeMCP)

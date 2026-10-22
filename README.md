@@ -594,8 +594,8 @@ Xcode 27 offers its build to agents as MCP tools (`xcrun mcpbridge`), and SimToo
 can build through them instead of running xcodebuild: set `builder: xcode-mcp`
 in the config's `build:` block, or pass `--builder xcode-mcp` to `run`,
 `app build` or `app launch` (`--builder xcodebuild` switches back for one
-command). Xcode keeps the workspace loaded between builds and builds into the
-DerivedData its own UI uses, so a build there is often far faster than a cold
+command). Xcode keeps the workspace loaded between builds and builds where a
+build from its own UI would, so a build there is often far faster than a cold
 xcodebuild.
 
 ```sh
@@ -611,12 +611,16 @@ Xcode where the `.app` landed. The workspace stays open for the next build;
 opened.
 
 Xcode decides the build itself: the scheme's Run configuration, the project's
-own settings, its own DerivedData. So an Xcode build leaves the config's
-`derivedDataPath` and `settings` out (they still apply to xcodebuild), refuses
-`--derived-data-path` and `--build-setting`, and fails when the scheme's Run
-configuration is not the `configuration` asked for. Its builds get a cache
-entry of their own: switching builders builds once rather than reusing the
-other builder's `.app`.
+own settings, and where it builds — the DerivedData its own build location
+settings name. That is not necessarily a folder of its own: with Xcode set to
+put build products next to the workspace (Settings → Locations → Advanced),
+xcodebuild's products land in the very same place, whatever `-derivedDataPath`
+says. So an Xcode build leaves the config's `derivedDataPath` and `settings` out
+(they still apply to xcodebuild), refuses `--derived-data-path` and
+`--build-setting`, and fails when the scheme's Run configuration is not the
+`configuration` asked for. Its builds get a cache entry of their own, and
+whichever builder last wrote a shared `.app`, the other's cache entry sees the
+bundle changed and builds again rather than reusing it.
 
 The first time, Xcode asks you to approve SimTool as an agent and to let it
 open the project's folder — from the Xcode MCP menu bar icon, or with
@@ -632,18 +636,9 @@ simulator does not have that build installed yet, SimTool installs it before
 launching. Checksum metadata is stored in `.simtool/build/` inside the project;
 build products (DerivedData) stay in `~/Library/Caches/SimTool`.
 
-That cache keeps one DerivedData per build identity — gigabytes each — and no
-build removes one, so they outlive the worktrees and checkouts they were built
-for. `simtool app cache prune` clears them out: an entry goes when the workspace
-or project it was built from no longer exists, when no build has used it for
-`--older-than <days>`, or with `--all`; one a running build uses stays. It is a
-dry run that lists what would go and the space it frees until you pass
-`--delete`. A `derivedDataPath` set in a project's config is the project's own
-and never touched.
-
 ```sh
-swift run simtool app cache prune                       # what would go, and how much
-swift run simtool app cache prune --older-than 30 --delete
+swift run simtool app launch --device <udid-or-name> --workspace MyApp.xcworkspace --scheme MyApp --json
+swift run simtool app launch --device <udid-or-name> --workspace MyApp.xcworkspace --scheme MyApp --json
 ```
 
 A cache hit also needs the `.app` to still be the one that build produced.
@@ -678,9 +673,19 @@ of building again. The locks live in `~/Library/Caches/SimTool/app-builds/locks`
 and vanish with the process that holds them, so a killed build leaves none
 behind.
 
+The managed cache in `~/Library/Caches/SimTool` keeps one DerivedData per
+build identity without a configured `derivedDataPath` — gigabytes each — and no
+build removes one, so they outlive the worktrees and checkouts they were built
+for. `simtool app cache prune` clears them out: an entry goes when the workspace
+or project it was built from no longer exists, when no build has used it for
+`--older-than <days>`, or with `--all`; one a running build uses stays. It is a
+dry run that lists what would go and the space it frees until you pass
+`--delete`. A `derivedDataPath` set in a project's config is the project's own
+and never touched.
+
 ```sh
-swift run simtool app launch --device <udid-or-name> --workspace MyApp.xcworkspace --scheme MyApp --json
-swift run simtool app launch --device <udid-or-name> --workspace MyApp.xcworkspace --scheme MyApp --json
+swift run simtool app cache prune                       # what would go, and how much
+swift run simtool app cache prune --older-than 30 --delete
 ```
 
 Pass runtime flags to the launched app with repeatable `--env KEY=VALUE`

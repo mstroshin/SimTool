@@ -789,7 +789,7 @@ final class SimulatorAppLifecycleTests: XCTestCase {
         // What only xcodebuild can take is refused, not dropped in silence.
         XCTAssertThrowsError(try SimulatorAppBuildSelection.validated(
             workspacePath: nil, projectPath: project.path, scheme: "Example", derivedDataPath: root.path, builder: .xcodeMCP
-        )) { XCTAssertTrue("\($0)".contains("own DerivedData"), "\($0)") }
+        )) { XCTAssertTrue("\($0)".contains("DerivedData its own settings name"), "\($0)") }
         XCTAssertThrowsError(try SimulatorAppBuildSelection.validated(
             workspacePath: nil, projectPath: project.path, scheme: "Example", buildSettings: ["ENABLE_PREVIEWS": "NO"], builder: .xcodeMCP
         )) { XCTAssertTrue("\($0)".contains("own settings"), "\($0)") }

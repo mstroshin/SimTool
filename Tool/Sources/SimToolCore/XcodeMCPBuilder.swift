@@ -127,9 +127,8 @@ extension SimulatorDevice {
 /// Builds in Xcode itself, through the MCP tools Xcode serves over
 /// `xcrun mcpbridge`: opens the workspace or project, makes the scheme and a
 /// run destination for the simulator active, runs `BuildProject`, and asks
-/// Xcode where the `.app` landed. A warm Xcode keeps the workspace loaded and
-/// builds into its own DerivedData, so it often finishes far sooner than a
-/// cold `xcodebuild`.
+/// Xcode where the `.app` landed. A warm Xcode keeps the workspace loaded,
+/// so it often finishes far sooner than a cold `xcodebuild`.
 ///
 /// Xcode decides the rest: it builds the scheme's Run configuration with the
 /// project's own settings, into the DerivedData it would use for a build from

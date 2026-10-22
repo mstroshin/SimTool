@@ -98,8 +98,9 @@ workspace.
   (or `--builder xcode-mcp` on `run` / `app build` / `app launch`) builds in
   Xcode over its MCP tools instead of xcodebuild — often much faster, since
   Xcode keeps the workspace loaded. Xcode builds the scheme's Run configuration
-  with the project's own settings, so `derivedDataPath` / `settings` don't
-  apply. If it fails with "approve", Xcode is waiting for the user to approve
+  with the project's own settings, into the DerivedData its own settings name —
+  possibly the very folder xcodebuild builds into — so `derivedDataPath` /
+  `settings` don't apply. If it fails with "approve", Xcode is waiting for the user to approve
   `simtool`: ask them to, then rerun — don't fall back to xcodebuild silently.
 - **Launch profiles**: name the argv recipes your tests and runs need in
   `profiles:` in `.simtool/config.yml`, and refer to them by name from a test's
@@ -117,6 +118,14 @@ workspace.
   when nothing changed, else `xcodebuild` or Xcode) → install if needed → **cold** launch
   (so launch args/env always take effect). Use the force-rebuild flag to bypass a
   valid cache. See `simtool app build --help` / `simtool app launch --help`.
+- **Long builds**: a build has no time limit unless `build.timeout` in the
+  config or `--build-timeout` (`45m`, `1.5h`) sets one, so a cold build of a
+  large project may take long — wait for it, don't kill it. A second build of
+  the same project waits for the first ("Waiting for another build of … to
+  finish") instead of failing; let it. A failed build names its full log
+  (`Full log: .simtool/build/<key>.log`, `logPath` with `--json`): read that
+  rather than rerunning `xcodebuild` by hand. `simtool app cache prune` lists
+  the cached DerivedData of removed checkouts (`--delete` removes it).
 
 ### Canonical commands
 

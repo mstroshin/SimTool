@@ -104,8 +104,8 @@ public struct SimulatorAppBuildSelection: Codable, Equatable, Sendable {
     }
 
     /// `xcode-mcp` takes no DerivedData path and no build settings: Xcode
-    /// builds the project as it stands, into its own DerivedData. Asking for
-    /// either is an error rather than a silent drop.
+    /// builds the project as it stands, into the DerivedData its own settings
+    /// name. Asking for either is an error rather than a silent drop.
     public static func validated(
         workspacePath: String?,
         projectPath: String?,
@@ -122,7 +122,7 @@ public struct SimulatorAppBuildSelection: Codable, Equatable, Sendable {
         }
         if builder == .xcodeMCP {
             if canonicalPath(derivedDataPath) != nil {
-                throw SimToolError("With builder xcode-mcp, Xcode builds into its own DerivedData: a DerivedData path applies to xcodebuild builds only.")
+                throw SimToolError("With builder xcode-mcp, Xcode builds into the DerivedData its own settings name: a DerivedData path applies to xcodebuild builds only.")
             }
             if !buildSettings.isEmpty {
                 throw SimToolError("With builder xcode-mcp, Xcode builds the project with its own settings: build settings apply to xcodebuild builds only.")
@@ -981,7 +981,7 @@ public enum SimulatorAppLifecycleClient {
             )
         }
 
-        // Xcode picks its own DerivedData: only the project's lock covers it.
+        // Xcode picks the DerivedData itself: the project's lock covers it.
         let lockedDerivedData = selection.builder == .xcodebuild ? plan.derivedDataPath : nil
         let (buildLock, waited) = try await cache.lockBuild(of: selection, derivedDataPath: lockedDerivedData) { message in
             report(message, to: progress)
