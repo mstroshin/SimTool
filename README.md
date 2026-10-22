@@ -949,10 +949,29 @@ build served this way fills the Network and State panels without `run`.
 
 The source fingerprint hashes only git-tracked (and untracked-but-not-ignored)
 files when the project is in a git work tree, falling back to a filesystem walk
-otherwise. This keeps gitignored, generated artifacts — a Tuist-managed
-`.xcodeproj`/`Derived/` that xcodebuild rewrites on every build, DerivedData,
+otherwise. This keeps gitignored, generated artifacts — Tuist's `Derived/`,
 SPM checkouts — out of the checksum, so they don't spuriously invalidate the
-cache.
+cache. Build directories stay out either way, ignored or not: anything under a
+directory named `DerivedData`, `build`, `Build`, `.build`, `.swiftpm`,
+`.simtool` or `xcuserdata`, and the configured `derivedDataPath` under any name.
+
+What it hashes is what a build compiles, links or copies into the app: code,
+headers and build configuration (`.xcconfig`, `.xcfilelist`, `.entitlements`,
+`.xcprivacy`, schemes, package manifests and pins), resources — images, video,
+audio, animations (`.lottie`, `.riv`), fonts, interface files (`.storyboard`,
+`.xib`, `.nib`), strings and String Catalogs (`.xcstrings`), data (`.json`,
+`.plist`, `.bin`, `.txt`, `.proto`…), models, certificates — every file inside
+asset catalogs, `.lproj`, `.bundle`, `.framework`/`.xcframework` and other
+package directories, and shell scripts, as what run-script phases run.
+Documentation (`.md`) and scripts in other languages are left out: their edits
+would only cost rebuilds.
+
+The workspace or project being built — and every project the workspace
+references in its `contents.xcworkspacedata` — is hashed even when git ignores
+it, as a generated one usually is: it is what xcodebuild builds, and the same
+tracked inputs can generate another one (generator flags, a binary cache, a
+generator update). Hashing is by content, so regenerating an identical project
+does not invalidate the cache.
 
 `run --force` skips the checksum cache: it always builds (xcodebuild, or Xcode
 with `xcode-mcp`) and reinstalls the app. Use it when a dependency the fingerprint cannot see

@@ -135,20 +135,20 @@ final class SimulatorAppLifecycleTests: XCTestCase {
         let root = try makeTempDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let project = root.appendingPathComponent("Example.xcodeproj", isDirectory: true)
-        // A generated, gitignored project file (e.g. a Tuist-managed pbxproj that
-        // xcodebuild rewrites on every build) plus a tracked source file.
         try write("Example.xcodeproj/project.pbxproj", contents: "objects v1", root: root)
         try write("Sources/App.swift", contents: "struct App {}", root: root)
-        try write(".gitignore", contents: "*.xcodeproj\n", root: root)
+        // Generated sources (Tuist's `Derived/`) derive from tracked inputs.
+        try write("Derived/Sources/Bundle+Example.swift", contents: "// generated v1", root: root)
+        try write(".gitignore", contents: "Derived/\n", root: root)
         runGit(["init"], in: root)
         runGit(["add", "-A"], in: root)
 
         let selection = try SimulatorAppBuildSelection.validated(workspacePath: nil, projectPath: project.path, scheme: "Example")
         let before = try SimulatorAppBuildFingerprinter.fingerprint(selection: selection)
 
-        // Mutating the gitignored generated file must NOT change the checksum —
-        // this is exactly what broke cache reuse on Tuist projects.
-        try write("Example.xcodeproj/project.pbxproj", contents: "objects v2 CHANGED BY BUILD", root: root)
+        // Rewriting a gitignored generated file must NOT change the checksum —
+        // generators rewrite them on every run, which broke cache reuse.
+        try write("Derived/Sources/Bundle+Example.swift", contents: "// generated v2 CHANGED BY BUILD", root: root)
         let afterIgnoredChange = try SimulatorAppBuildFingerprinter.fingerprint(selection: selection)
         XCTAssertEqual(before.checksum, afterIgnoredChange.checksum, "gitignored generated files must not affect the source checksum")
 
@@ -156,6 +156,176 @@ final class SimulatorAppLifecycleTests: XCTestCase {
         try write("Sources/App.swift", contents: "struct App { let value = 1 }", root: root)
         let afterTrackedChange = try SimulatorAppBuildFingerprinter.fingerprint(selection: selection)
         XCTAssertNotEqual(before.checksum, afterTrackedChange.checksum, "tracked source changes must change the checksum")
+    }
+
+    // A generated workspace and its projects are gitignored, yet they are what
+    // xcodebuild builds: the same tracked inputs can generate another project.
+    func testGeneratedWorkspaceAndItsProjectsAreInputsEvenWhenGitIgnoresThem() throws {
+        try XCTSkipUnless(gitIsAvailable(), "git not available")
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let workspace = root.appendingPathComponent("Example.xcworkspace", isDirectory: true)
+        try write("Example.xcworkspace/contents.xcworkspacedata", contents: """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <Workspace version = "1.0">
+               <FileRef location = "group:Example.xcodeproj"></FileRef>
+               <Group location = "group:Modules" name = "Modules">
+                  <FileRef location = "group:Feature/Feature.xcodeproj"></FileRef>
+               </Group>
+            </Workspace>
+            """, root: root)
+        try write("Example.xcworkspace/xcshareddata/xcschemes/Example.xcscheme", contents: "scheme v1", root: root)
+        try write("Example.xcworkspace/xcuserdata/me.xcuserdatad/UserInterfaceState.xcuserstate", contents: "ui v1", root: root)
+        try write("Example.xcodeproj/project.pbxproj", contents: "objects v1", root: root)
+        try write("Example.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved", contents: "pins v1", root: root)
+        try write("Modules/Feature/Feature.xcodeproj/project.pbxproj", contents: "feature v1", root: root)
+        try write("Modules/Feature/Feature.xcodeproj/xcshareddata/xcschemes/Feature.xcscheme", contents: "feature scheme v1", root: root)
+        try write("Sources/App.swift", contents: "struct App {}", root: root)
+        try write(".gitignore", contents: "*.xcworkspace\n*.xcodeproj\n", root: root)
+        runGit(["init"], in: root)
+        runGit(["add", "-A"], in: root)
+
+        let selection = try SimulatorAppBuildSelection.validated(workspacePath: workspace.path, projectPath: nil, scheme: "Example")
+        let inputs = try SimulatorAppBuildFingerprinter.inputFiles(selection: selection).map(\.relativePath)
+        for expected in [
+            "Example.xcworkspace/contents.xcworkspacedata",
+            "Example.xcworkspace/xcshareddata/xcschemes/Example.xcscheme",
+            "Example.xcodeproj/project.pbxproj",
+            "Example.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved",
+            "Modules/Feature/Feature.xcodeproj/project.pbxproj",
+            "Modules/Feature/Feature.xcodeproj/xcshareddata/xcschemes/Feature.xcscheme",
+            "Sources/App.swift",
+        ] {
+            XCTAssertTrue(inputs.contains(expected), "missing \(expected) in \(inputs)")
+        }
+        XCTAssertFalse(inputs.contains { $0.contains("xcuserdata") }, "per-user state is no build input")
+        XCTAssertEqual(inputs.count, Set(inputs).count, "a file is hashed once")
+
+        let before = try SimulatorAppBuildFingerprinter.fingerprint(selection: selection)
+        // Regenerating with the same content is no change: mtimes do not count.
+        try write("Modules/Feature/Feature.xcodeproj/project.pbxproj", contents: "feature v1", root: root)
+        XCTAssertEqual(try SimulatorAppBuildFingerprinter.fingerprint(selection: selection), before)
+        // A project generated differently is.
+        try write("Modules/Feature/Feature.xcodeproj/project.pbxproj", contents: "feature v2 from the binary cache", root: root)
+        XCTAssertNotEqual(try SimulatorAppBuildFingerprinter.fingerprint(selection: selection).checksum, before.checksum)
+        try write("Modules/Feature/Feature.xcodeproj/project.pbxproj", contents: "feature v1", root: root)
+        try write("Example.xcworkspace/xcshareddata/xcschemes/Example.xcscheme", contents: "scheme v2", root: root)
+        XCTAssertNotEqual(try SimulatorAppBuildFingerprinter.fingerprint(selection: selection).checksum, before.checksum)
+    }
+
+    func testWorkspaceReferencesResolveTheWayXcodeResolvesThem() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let workspace = root.appendingPathComponent("App/App.xcworkspace", isDirectory: true)
+        try write("App/App.xcworkspace/contents.xcworkspacedata", contents: """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <Workspace version = "1.0">
+               <FileRef location = "group:App.xcodeproj"></FileRef>
+               <FileRef location = "container:../Shared/Shared.xcodeproj"></FileRef>
+               <FileRef location = "absolute:/opt/Vendor/Vendor.xcodeproj"></FileRef>
+               <FileRef location = "group:README.md"></FileRef>
+               <Group location = "container:Packages" name = "Packages">
+                  <Group location = "group:Core" name = "Core">
+                     <FileRef location = "group:Core.xcodeproj"></FileRef>
+                  </Group>
+                  <FileRef location = "group:Kit.xcodeproj"></FileRef>
+               </Group>
+               <Group name = "Unplaced">
+                  <FileRef location = "group:Loose.xcodeproj"></FileRef>
+               </Group>
+            </Workspace>
+            """, root: root)
+        let app = root.appendingPathComponent("App", isDirectory: true)
+        XCTAssertEqual(SimulatorAppBuildFingerprinter.workspaceProjects(workspace).map(\.path), [
+            app.appendingPathComponent("App.xcodeproj").path,
+            root.appendingPathComponent("Shared/Shared.xcodeproj").path,
+            "/opt/Vendor/Vendor.xcodeproj",
+            app.appendingPathComponent("Packages/Core/Core.xcodeproj").path,
+            app.appendingPathComponent("Packages/Kit.xcodeproj").path,
+            app.appendingPathComponent("Loose.xcodeproj").path,
+        ])
+
+        // A project's own embedded workspace refers to the project as `self:`.
+        let embedded = root.appendingPathComponent("App/App.xcodeproj/project.xcworkspace", isDirectory: true)
+        try write("App/App.xcodeproj/project.xcworkspace/contents.xcworkspacedata", contents: """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <Workspace version = "1.0"><FileRef location = "self:"></FileRef></Workspace>
+            """, root: root)
+        XCTAssertEqual(SimulatorAppBuildFingerprinter.workspaceProjects(embedded).map(\.path), [app.appendingPathComponent("App.xcodeproj").path])
+        XCTAssertEqual(SimulatorAppBuildFingerprinter.workspaceProjects(root.appendingPathComponent("Missing.xcworkspace")), [])
+    }
+
+    // Edits to any of these change what lands in the app, so each must miss
+    // the cache; the original list saw only code and a few resource types.
+    func testFingerprintSeesResourcesAndBuildFilesBeyondCode() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let project = root.appendingPathComponent("Example.xcodeproj", isDirectory: true)
+        try write("Example.xcodeproj/project.pbxproj", contents: "project", root: root)
+        let inputs = [
+            "Resources/Photo.heic", "Resources/Spinner.gif", "Resources/Intro.mp4", "Resources/Intro.mov",
+            "Resources/Ding.caf", "Resources/Ding.mp3", "Resources/Ding.wav", "Resources/Ding.m4a",
+            "Resources/Confetti.lottie", "Resources/Brand.ttf", "Resources/Brand.otf", "Resources/Brand.woff2",
+            "Resources/Legacy.nib", "Resources/Model.bin", "Resources/PrivacyInfo.xcprivacy", "Resources/Scene.scn",
+            "Resources/Art.scnassets/ship.dae", "Resources/Model.mom", "Protos/api.proto",
+            "Resources/Localizable.xcstrings", "Scripts/inputs.xcfilelist", "Scripts/generate.sh",
+            "Resources/Licenses.txt", "Resources/es.lproj/InfoPlist.unknownext", "Settings.bundle/Root.inc",
+            "Model.xcdatamodel/contents", "Resources/pinning.cer", "Vendor/Lib.xcframework/Info.plist",
+            "Vendor/libThing.a",
+        ]
+        for input in inputs { try write(input, contents: "v1 \(input)", root: root) }
+        try write("docs/Guide.md", contents: "v1", root: root)
+        let selection = try SimulatorAppBuildSelection.validated(workspacePath: nil, projectPath: project.path, scheme: "Example")
+        let baseline = try SimulatorAppBuildFingerprinter.fingerprint(selection: selection)
+
+        for input in inputs {
+            try write(input, contents: "v2 \(input)", root: root)
+            XCTAssertNotEqual(try SimulatorAppBuildFingerprinter.fingerprint(selection: selection).checksum, baseline.checksum, "\(input) is a build input")
+            try write(input, contents: "v1 \(input)", root: root)
+        }
+        XCTAssertEqual(try SimulatorAppBuildFingerprinter.fingerprint(selection: selection), baseline)
+        // Documentation edits do not rebuild the app.
+        try write("docs/Guide.md", contents: "v2", root: root)
+        XCTAssertEqual(try SimulatorAppBuildFingerprinter.fingerprint(selection: selection), baseline)
+    }
+
+    // A project whose .gitignore misses its build directories must get the
+    // walk's exclusions from git too: otherwise build products are "sources"
+    // — a cache that never hits, and gigabytes hashed on every run.
+    func testGitListingKeepsBuildProductsOutLikeTheWalk() throws {
+        try XCTSkipUnless(gitIsAvailable(), "git not available")
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let project = root.appendingPathComponent("Example.xcodeproj", isDirectory: true)
+        try write("Example.xcodeproj/project.pbxproj", contents: "project", root: root)
+        try write("Sources/App.swift", contents: "struct App {}", root: root)
+        try write("Tracked/build/Generated.swift", contents: "tracked under build/", root: root)
+        runGit(["init"], in: root)
+        runGit(["add", "-A"], in: root)
+        // Untracked and not ignored: products of builds into the project.
+        for product in [
+            "DerivedData/Build/Products/Debug-iphonesimulator/Example.app/Info.plist",
+            "build/Debug-iphonesimulator/Example.swiftmodule/arm64.json",
+            ".simtool/build/abc.json",
+            ".swiftpm/configuration/Package.resolved",
+            "Products/Build/Intermediates.noindex/Example.build/Objects.json",
+            "Products/SourcePackages/checkouts/Lib/Sources/Lib.swift",
+        ] {
+            try write(product, contents: "product", root: root)
+        }
+
+        let configuredDerivedData = root.appendingPathComponent("Products", isDirectory: true)
+        let selection = try SimulatorAppBuildSelection.validated(
+            workspacePath: nil, projectPath: project.path, scheme: "Example", derivedDataPath: configuredDerivedData.path
+        )
+        let cacheRoot = root.appendingPathComponent("managed", isDirectory: true)
+        try write("managed/abc/Build/Products/Example.swift", contents: "product", root: root)
+        let inputs = try SimulatorAppBuildFingerprinter.inputFiles(selection: selection, cacheRoot: cacheRoot).map(\.relativePath)
+        XCTAssertEqual(inputs, ["Example.xcodeproj/project.pbxproj", "Sources/App.swift"])
+
+        // The listing is git's: with git gone, the walk keeps the same set out.
+        try FileManager.default.removeItem(at: root.appendingPathComponent(".git"))
+        XCTAssertEqual(try SimulatorAppBuildFingerprinter.inputFiles(selection: selection, cacheRoot: cacheRoot).map(\.relativePath), inputs)
     }
 
     // What a test run asks before it records anything: is the build on the

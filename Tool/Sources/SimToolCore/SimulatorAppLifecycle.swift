@@ -506,20 +506,47 @@ public enum SimulatorAppBuildFingerprinter {
         return SimulatorAppBuildFingerprint(checksum: hex(hasher.finalize()), inputFileCount: files.count)
     }
 
+    /// The files whose content the fingerprint hashes: the project's sources
+    /// and resources, plus the Xcode containers the build reads — the
+    /// workspace or project, and every project the workspace references —
+    /// whether git tracks them or not.
     public static func inputFiles(selection: SimulatorAppBuildSelection, cacheRoot: URL? = nil) throws -> [SimulatorAppBuildInputFile] {
         let root = selection.projectRoot.standardizedFileURL
+        // Build products are never sources: SimTool's own DerivedData, and the
+        // configured one wherever it lives — inside the project, under any name.
+        let excludedRoots = [cacheRoot?.path, selection.identity.derivedDataPath]
+            .compactMap { $0 }
+            .map { URL(fileURLWithPath: $0).standardizedFileURL.path }
         // When the project lives in a git work tree, hash only non-ignored files.
-        // Generated artifacts (Tuist's `.xcodeproj`/`Derived/`, DerivedData, SPM
-        // checkouts) are gitignored; they get rewritten on every build and would
-        // otherwise destabilize the checksum, breaking cache reuse. Outside git,
-        // fall back to the filesystem walk.
-        if let gitFiles = gitInputFiles(root: root, cacheRoot: cacheRoot) {
-            return gitFiles
+        // Generated artifacts (Tuist's `Derived/`, DerivedData, SPM checkouts)
+        // are gitignored and derive from tracked inputs; they get rewritten on
+        // builds and would otherwise destabilize the checksum, breaking cache
+        // reuse. Outside git, fall back to the filesystem walk.
+        var files = gitInputFiles(root: root, excludedRoots: excludedRoots)
+            ?? walk(root, root: root, excludedRoots: excludedRoots)
+        // A generated workspace or project is gitignored too, yet it is what
+        // xcodebuild builds: the same generator inputs can produce another
+        // project (generator flags, a binary cache, a generator update). Its
+        // content is deterministic, so hashing it misses only when it changed.
+        var seen = Set(files.map(\.path))
+        for container in containers(of: selection) {
+            for file in walk(container, root: root, excludedRoots: excludedRoots) where seen.insert(file.path).inserted {
+                files.append(file)
+            }
         }
-        let excludedRoot = cacheRoot?.standardizedFileURL.path
+        return files.sorted { $0.relativePath < $1.relativePath }
+    }
+
+    public static func sha256Hex(_ data: Data) throws -> String {
+        hex(SHA256.hash(data: data))
+    }
+
+    /// The build-input files under `directory`, found by walking the
+    /// filesystem; excluded directory names count from `directory` down.
+    private static func walk(_ directory: URL, root: URL, excludedRoots: [String]) -> [SimulatorAppBuildInputFile] {
         let resourceKeys: [URLResourceKey] = [.isDirectoryKey, .fileSizeKey]
         guard let enumerator = FileManager.default.enumerator(
-            at: root,
+            at: directory,
             includingPropertiesForKeys: resourceKeys,
             options: [],
             errorHandler: nil
@@ -529,11 +556,7 @@ public enum SimulatorAppBuildFingerprinter {
         for case let url as URL in enumerator {
             let standardized = url.standardizedFileURL
             let path = standardized.path
-            if let excludedRoot, path == excludedRoot || path.hasPrefix(excludedRoot + "/") {
-                if isDirectory(standardized) { enumerator.skipDescendants() }
-                continue
-            }
-            if isExcludedPath(standardized, root: root) {
+            if isExcludedPath(standardized, root: directory) || isUnder(path, anyOf: excludedRoots) {
                 if isDirectory(standardized) { enumerator.skipDescendants() }
                 continue
             }
@@ -542,26 +565,30 @@ public enum SimulatorAppBuildFingerprinter {
             let byteCount = ((try? standardized.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init)) ?? 0
             files.append(SimulatorAppBuildInputFile(relativePath: relativePath, path: path, byteCount: byteCount))
         }
-        return files.sorted { $0.relativePath < $1.relativePath }
-    }
-
-    public static func sha256Hex(_ data: Data) throws -> String {
-        hex(SHA256.hash(data: data))
+        return files
     }
 
     /// Returns the build-input files known to git (tracked plus untracked but
     /// not ignored), or `nil` when `root` is not inside a git work tree (or git
     /// is unavailable) so the caller falls back to the filesystem walk. Listing
     /// via git is what excludes gitignored generated artifacts from the
-    /// fingerprint; the same type filter (`isBuildInputFile`) is then applied so
-    /// the included file set matches the filesystem walk for tracked files.
-    private static func gitInputFiles(root: URL, cacheRoot: URL?) -> [SimulatorAppBuildInputFile]? {
-        guard let output = runGit(
-            ["-C", root.path, "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
-            in: root
-        ), output.status == 0 else { return nil }
+    /// fingerprint; the walk's own exclusions — build directories by name, the
+    /// DerivedData roots — and its type filter (`isBuildInputFile`) then apply
+    /// as well, so a project whose `.gitignore` misses its DerivedData neither
+    /// misses the cache forever nor hashes gigabytes of build products.
+    private static func gitInputFiles(root: URL, excludedRoots: [String]) -> [SimulatorAppBuildInputFile]? {
+        // Ignored directories are not walked at all: excluded by name here,
+        // and by path through pathspecs (relative to `root`, where git runs).
+        var arguments = ["-C", root.path, "ls-files", "--cached", "--others", "--exclude-standard", "-z"]
+        arguments += excludedDirectoryNames.sorted().map { "--exclude=\($0)/" }
+        arguments += ["--", "."]
+        for excluded in excludedRoots {
+            let relative = URL(fileURLWithPath: excluded).pathRelative(to: root)
+            guard !relative.hasPrefix("/"), !relative.isEmpty else { continue }
+            arguments.append(":(exclude,literal)\(relative)")
+        }
+        guard let output = runGit(arguments, in: root), output.status == 0 else { return nil }
 
-        let excludedRoot = cacheRoot?.standardizedFileURL.path
         var files: [SimulatorAppBuildInputFile] = []
         var seen = Set<String>()
         for relative in String(decoding: output.stdout, as: UTF8.self).split(separator: "\0") {
@@ -570,7 +597,8 @@ public enum SimulatorAppBuildFingerprinter {
             let url = root.appendingPathComponent(relativePath).standardizedFileURL
             let path = url.path
             guard seen.insert(path).inserted else { continue }
-            if let excludedRoot, path == excludedRoot || path.hasPrefix(excludedRoot + "/") { continue }
+            // Tracked files are listed whatever the exclusions say.
+            if isExcludedPath(url, root: root) || isUnder(path, anyOf: excludedRoots) { continue }
             guard isBuildInputFile(url, root: root) else { continue }
             // Skip directories and stale index entries (deleted/renamed files).
             var isDirectory: ObjCBool = false
@@ -578,7 +606,29 @@ public enum SimulatorAppBuildFingerprinter {
             let byteCount = ((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init)) ?? 0
             files.append(SimulatorAppBuildInputFile(relativePath: url.pathRelative(to: root), path: path, byteCount: byteCount))
         }
-        return files.sorted { $0.relativePath < $1.relativePath }
+        return files
+    }
+
+    /// The Xcode containers the build reads: the selected workspace or
+    /// project, and for a workspace each project it references.
+    static func containers(of selection: SimulatorAppBuildSelection) -> [URL] {
+        let source = selection.sourceURL.standardizedFileURL
+        guard selection.identity.workspacePath != nil else { return [source] }
+        return [source] + workspaceProjects(source).filter { $0 != source }
+    }
+
+    /// The `.xcodeproj` references in a workspace's `contents.xcworkspacedata`,
+    /// resolved the way Xcode resolves them: `group:` against the enclosing
+    /// groups, `container:` against the workspace's directory, `absolute:` as
+    /// is, `self:` as the project an embedded workspace belongs to.
+    static func workspaceProjects(_ workspace: URL) -> [URL] {
+        let data = workspace.appendingPathComponent("contents.xcworkspacedata")
+        guard let parser = XMLParser(contentsOf: data) else { return [] }
+        let collector = WorkspaceReferenceCollector(workspace: workspace)
+        parser.delegate = collector
+        parser.parse()
+        var seen = Set<String>()
+        return collector.projects.filter { seen.insert($0.path).inserted }
     }
 
     /// Runs git synchronously, returning its exit status and stdout, or `nil` if
@@ -615,12 +665,16 @@ public enum SimulatorAppBuildFingerprinter {
         ((try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false) == true
     }
 
+    private static func isUnder(_ path: String, anyOf roots: [String]) -> Bool {
+        roots.contains { path == $0 || path.hasPrefix($0 + "/") }
+    }
+
     private static func isExcludedPath(_ url: URL, root: URL) -> Bool {
         let components = url.pathRelative(to: root).split(separator: "/").map(String.init)
         return components.contains { excludedDirectoryNames.contains($0) }
     }
 
-    private static func isBuildInputFile(_ url: URL, root: URL) -> Bool {
+    static func isBuildInputFile(_ url: URL, root: URL) -> Bool {
         let relativeComponents = url.pathRelative(to: root).split(separator: "/").map(String.init)
         if relativeComponents.contains(where: isBuildPackageComponent) { return true }
         let filename = url.lastPathComponent
@@ -637,20 +691,88 @@ public enum SimulatorAppBuildFingerprinter {
         ".build", ".git", ".hg", ".svn", ".swiftpm", ".simtool", "Build", "build", "DerivedData", "xcuserdata"
     ]
 
+    /// Directories whose every file is a build input: Xcode containers and
+    /// catalogs, resource bundles and localizations, compiled or vendored
+    /// bundles and frameworks.
     private static let buildPackageExtensions: Set<String> = [
-        "xcassets", "xcdatamodeld", "xcodeproj", "xcworkspace"
+        "bundle", "framework", "icon", "lproj", "mlmodelc", "mlpackage", "momd", "nib", "rcproject", "scnassets",
+        "storyboardc", "xcassets", "xcdatamodel", "xcdatamodeld", "xcframework", "xcmappingmodel", "xcodeproj",
+        "xcstickers", "xcworkspace"
     ]
 
     private static let includedFileNames: Set<String> = [
-        ".env", "Package.resolved", "Package.swift", "Podfile", "Podfile.lock", "Cartfile", "Cartfile.resolved",
-        "project.pbxproj", "contents.xcworkspacedata"
+        ".env", "Package.resolved", "Package.swift", "Podfile", "Podfile.lock", "Cartfile", "Cartfile.private",
+        "Cartfile.resolved", "project.pbxproj", "contents.xcworkspacedata"
     ]
 
+    /// What a build compiles, links or copies into the app. Shell scripts are
+    /// in, as what run-script phases run; documentation (`md`) is not, nor are
+    /// scripts in other languages, mostly tooling whose edits would only cost
+    /// rebuilds.
     private static let includedExtensions: Set<String> = [
-        "c", "cc", "cpp", "entitlements", "graphql", "h", "hpp", "html", "json", "m", "metal", "mm", "modulemap",
-        "plist", "png", "jpg", "jpeg", "pdf", "storyboard", "strings", "stringsdict", "swift", "svg", "toml", "webp",
-        "xalloc", "xcconfig", "xcdatamodel", "xcscheme", "xib", "xml", "yaml", "yml"
+        // Code, headers and build configuration
+        "a", "c", "cc", "cpp", "cxx", "dylib", "entitlements", "h", "hh", "hpp", "hxx", "m", "metal", "mm",
+        "modulemap", "pch", "s", "swift", "tbd", "xcconfig", "xcfilelist", "xcprivacy", "xcscheme", "sh",
+        // Data, configuration and generated-code inputs
+        "bin", "csv", "dat", "db", "geojson", "graphql", "intentdefinition", "json", "plist", "proto", "sqlite",
+        "toml", "txt", "xalloc", "xml", "yaml", "yml",
+        // Interface, localization and web content
+        "css", "htm", "html", "js", "nib", "rtf", "storyboard", "strings", "stringsdict", "xcstrings", "xib",
+        // Images, media, animations and fonts
+        "aac", "aif", "aiff", "bmp", "caf", "gif", "heic", "heif", "jpeg", "jpg", "lottie", "m4a", "m4v", "mov",
+        "mp3", "mp4", "otf", "pdf", "png", "riv", "svg", "tif", "tiff", "ttc", "ttf", "wav", "webp", "woff", "woff2",
+        // Models, 3D, certificates
+        "cer", "crt", "dae", "der", "mlmodel", "mom", "pem", "reality", "scn", "usdz", "xcdatamodel"
     ]
+}
+
+/// Collects the project references of a `contents.xcworkspacedata` — the
+/// nested `Group`s carry the base `group:` locations resolve against.
+private final class WorkspaceReferenceCollector: NSObject, XMLParserDelegate {
+    private let containerDirectory: URL
+    private let workspace: URL
+    private var bases: [URL]
+    private(set) var projects: [URL] = []
+
+    init(workspace: URL) {
+        self.workspace = workspace
+        self.containerDirectory = workspace.deletingLastPathComponent()
+        self.bases = [workspace.deletingLastPathComponent()]
+    }
+
+    func parser(_ parser: XMLParser, didStartElement element: String, namespaceURI: String?, qualifiedName: String?, attributes: [String: String] = [:]) {
+        let location = attributes["location"].flatMap(resolve)
+        switch element {
+        case "Group":
+            bases.append(location ?? bases[bases.count - 1])
+        case "FileRef":
+            if let location, location.pathExtension == "xcodeproj" { projects.append(location.standardizedFileURL) }
+        default:
+            break
+        }
+    }
+
+    func parser(_ parser: XMLParser, didEndElement element: String, namespaceURI: String?, qualifiedName: String?) {
+        if element == "Group", bases.count > 1 { bases.removeLast() }
+    }
+
+    private func resolve(_ location: String) -> URL? {
+        guard let colon = location.firstIndex(of: ":") else { return nil }
+        let kind = location[..<colon]
+        let path = String(location[location.index(after: colon)...])
+        switch kind {
+        case "group":
+            return path.isEmpty ? bases[bases.count - 1] : bases[bases.count - 1].appendingPathComponent(path)
+        case "container":
+            return path.isEmpty ? containerDirectory : containerDirectory.appendingPathComponent(path)
+        case "absolute":
+            return URL(fileURLWithPath: path)
+        case "self":
+            return workspace.deletingLastPathComponent().pathExtension == "xcodeproj" ? workspace.deletingLastPathComponent() : nil
+        default:
+            return nil
+        }
+    }
 }
 
 /// The result of the checksum stage: the source fingerprint plus the resolved
