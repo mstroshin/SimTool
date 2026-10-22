@@ -270,6 +270,23 @@ public struct SimulatorAppProductStamp: Codable, Equatable, Sendable {
         let digest = SHA256.hash(data: Data(entries.joined(separator: "\n").utf8))
         self.init(digest: digest.map { String(format: "%02x", $0) }.joined(), fileCount: entries.count)
     }
+
+    /// When anything in the bundle at `appBundleURL` last changed; nil when
+    /// there is no bundle there.
+    public static func newestModification(in appBundleURL: URL) -> Date? {
+        let root = appBundleURL.standardizedFileURL
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDirectory), isDirectory.boolValue,
+              let enumerator = FileManager.default.enumerator(atPath: root.path)
+        else { return nil }
+        var newest = 0.0
+        for case let relativePath as String in enumerator {
+            var info = stat()
+            guard lstat(root.appendingPathComponent(relativePath).path, &info) == 0 else { continue }
+            newest = max(newest, TimeInterval(info.st_mtimespec.tv_sec) + TimeInterval(info.st_mtimespec.tv_nsec) / 1e9)
+        }
+        return Date(timeIntervalSince1970: newest)
+    }
 }
 
 public struct SimulatorAppProcessStepSummary: Codable, Equatable, Sendable {
@@ -334,8 +351,13 @@ public struct SimulatorAppBuildCacheMetadata: Codable, Equatable, Sendable {
     public var bundleIdentifier: String
     /// The bundle at `appBundlePath` as it was built. A cache hit needs the
     /// bundle to still be exactly this; nil (metadata from before SimTool
-    /// stamped products) never hits.
+    /// stamped products) never hits — unless `awaitingStamp`.
     public var product: SimulatorAppProductStamp?
+    /// Recorded by `simtool checksum` from inside an Xcode build, before the
+    /// build signs the bundle and so rewrites it: the stamp is taken on first
+    /// use instead, provided nothing in the bundle changed long after the
+    /// record (`SimulatorAppBuildCache.stampWindow`).
+    public var awaitingStamp: Bool?
     public var builtAt: Date
     public var installRecords: [String: SimulatorAppInstallRecord]
 
@@ -346,6 +368,7 @@ public struct SimulatorAppBuildCacheMetadata: Codable, Equatable, Sendable {
         appBundlePath: String,
         bundleIdentifier: String,
         product: SimulatorAppProductStamp? = nil,
+        awaitingStamp: Bool? = nil,
         builtAt: Date = Date(),
         installRecords: [String: SimulatorAppInstallRecord] = [:]
     ) {
@@ -355,6 +378,7 @@ public struct SimulatorAppBuildCacheMetadata: Codable, Equatable, Sendable {
         self.appBundlePath = appBundlePath
         self.bundleIdentifier = bundleIdentifier
         self.product = product
+        self.awaitingStamp = awaitingStamp
         self.builtAt = builtAt
         self.installRecords = installRecords
     }
@@ -485,14 +509,19 @@ public struct SimulatorAppBuildCache {
     }
 
     /// Waits for, then holds, the locks of every directory a build of
-    /// `selection` writes: its DerivedData, and the project's directory.
-    func lockBuild(
-        of selection: SimulatorAppBuildSelection,
-        derivedDataPath: String?,
+    /// `identity` writes: the project's directory, and the DerivedData
+    /// xcodebuild builds into — Xcode picks its own, which the project's
+    /// lock covers.
+    func lock(
+        identity: SimulatorAppBuildIdentity,
         onWait: (String) -> Void
     ) async throws -> (lock: SimulatorAppBuildLock, waited: Bool) {
         var waited = false
-        let paths = [selection.projectRoot.standardizedFileURL.path, derivedDataPath].compactMap { $0 }
+        let source = URL(fileURLWithPath: identity.workspacePath ?? identity.projectPath ?? "/")
+        var paths = [source.deletingLastPathComponent().standardizedFileURL.path]
+        if (identity.builder ?? .xcodebuild) == .xcodebuild {
+            paths.append(try identity.derivedDataPath ?? derivedDataPath(for: identity))
+        }
         let lock = try await SimulatorAppBuildLock.acquire(paths: paths, in: lockRoot) { message in
             waited = true
             onWait(message)
@@ -545,12 +574,28 @@ public struct SimulatorAppBuildCache {
     /// `checksum` and its bundle is still the one that build produced — not
     /// rebuilt since by anything else that writes to the same path.
     public func validMetadata(for identity: SimulatorAppBuildIdentity, checksum: String) -> SimulatorAppBuildCacheMetadata? {
-        guard let metadata = readMetadata(for: identity), metadata.checksum == checksum,
-              let recorded = metadata.product,
-              SimulatorAppProductStamp(appBundleURL: URL(fileURLWithPath: metadata.appBundlePath)) == recorded
+        guard let metadata = readMetadata(for: identity), metadata.checksum == checksum else { return nil }
+        let bundle = URL(fileURLWithPath: metadata.appBundlePath)
+        if let recorded = metadata.product {
+            return SimulatorAppProductStamp(appBundleURL: bundle) == recorded ? metadata : nil
+        }
+        // Recorded mid-build: the build that signed it may have written the
+        // bundle since, but nothing much later may have.
+        guard metadata.awaitingStamp == true,
+              let newest = SimulatorAppProductStamp.newestModification(in: bundle),
+              newest <= metadata.builtAt.addingTimeInterval(Self.stampWindow),
+              let stamp = SimulatorAppProductStamp(appBundleURL: bundle)
         else { return nil }
-        return metadata
+        var sealed = metadata
+        sealed.product = stamp
+        sealed.awaitingStamp = nil
+        try? write(sealed)
+        return sealed
     }
+
+    /// How long after `simtool checksum` recorded a build its bundle may still
+    /// change — the rest of that build: later phases, signing.
+    public static let stampWindow: TimeInterval = 600
 
     public func write(_ metadata: SimulatorAppBuildCacheMetadata) throws {
         let url = try metadataURL(for: metadata.identity)
@@ -1000,6 +1045,11 @@ public enum SimulatorAppLifecycleClient {
         let selection = plan.selection
         let fingerprint = plan.fingerprint
         if let metadata = plan.cachedMetadata {
+            // In use, though no xcodebuild touched it: `app cache prune
+            // --older-than` must not take it for abandoned.
+            if selection.builder == .xcodebuild, selection.identity.derivedDataPath == nil {
+                try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: plan.derivedDataPath)
+            }
             return SimulatorAppBuildPayload(
                 identity: selection.identity,
                 checksum: fingerprint.checksum,
@@ -1013,9 +1063,7 @@ public enum SimulatorAppLifecycleClient {
             )
         }
 
-        // Xcode picks the DerivedData itself: the project's lock covers it.
-        let lockedDerivedData = selection.builder == .xcodebuild ? plan.derivedDataPath : nil
-        let (buildLock, waited) = try await cache.lockBuild(of: selection, derivedDataPath: lockedDerivedData) { message in
+        let (buildLock, waited) = try await cache.lock(identity: selection.identity) { message in
             report(message, to: progress)
         }
         defer { buildLock.release() }
@@ -1174,21 +1222,17 @@ public enum SimulatorAppLifecycleClient {
             hashCache: cache.inputHashesURL
         )
         let bundleIdentifier = try bundleIdentifier(appBundleURL: appBundleURL)
-        let stamp = try productStamp(appBundleURL: appBundleURL)
-        var metadata = SimulatorAppBuildCacheMetadata(
+        // A build phase runs before Xcode signs the bundle, which rewrites it:
+        // the stamp waits for the first use (`validMetadata`). Whatever a
+        // device has installed is another build than this one.
+        let metadata = SimulatorAppBuildCacheMetadata(
             identity: selection.identity,
             checksum: fingerprint.checksum,
             inputFileCount: fingerprint.inputFileCount,
             appBundlePath: appBundleURL.standardizedFileURL.path,
             bundleIdentifier: bundleIdentifier,
-            product: stamp
+            awaitingStamp: true
         )
-        // Drop install records of any other build: what a device has installed
-        // matches the externally built app only when it is this very bundle.
-        // A record of it (recording the same build twice) stays valid.
-        if let previous = cache.readMetadata(for: selection.identity) {
-            metadata.installRecords = previous.installRecords.filter { $0.value.checksum == fingerprint.checksum && $0.value.product == stamp }
-        }
         try cache.write(metadata)
 
         return SimulatorAppBuildPayload(
@@ -1199,7 +1243,6 @@ public enum SimulatorAppLifecycleClient {
             xcodebuildRan: false,
             appBundlePath: metadata.appBundlePath,
             bundleIdentifier: bundleIdentifier,
-            product: stamp,
             xcodebuild: SimulatorAppProcessStepSummary(name: "xcodebuild", ran: false)
         )
     }
@@ -1283,11 +1326,30 @@ public enum SimulatorAppLifecycleClient {
         ) else { return false }
 
         progress?("Installing…")
-        _ = try await installApp(
-            deviceUDID: device.udid,
-            appBundlePath: buildPayload.appBundlePath,
-            timeoutSeconds: timeoutSeconds
-        )
+        _ = try await installBuilt(buildPayload, device: device, cache: cache, timeoutSeconds: timeoutSeconds, progress: progress)
+        return true
+    }
+
+    /// Installs the payload's bundle — the very one its build produced, not
+    /// one rebuilt since — and records it. The build's locks are held while
+    /// `simctl` copies it, so no other build rewrites it halfway through and
+    /// no prune removes it.
+    private static func installBuilt(
+        _ buildPayload: SimulatorAppBuildPayload,
+        device: SimulatorDevice,
+        cache: SimulatorAppBuildCache,
+        timeoutSeconds: TimeInterval?,
+        progress: (@Sendable (String) -> Void)?
+    ) async throws -> SimulatorAppProcessStepSummary {
+        let (lock, _) = try await cache.lock(identity: buildPayload.identity) { message in
+            report(message, to: progress)
+        }
+        defer { lock.release() }
+        let bundle = URL(fileURLWithPath: buildPayload.appBundlePath)
+        if let built = buildPayload.product, SimulatorAppProductStamp(appBundleURL: bundle) != built {
+            throw SimToolError("\(bundle.path) is no longer the app SimTool built: another build has rewritten it since. Run again to build it anew.")
+        }
+        let step = try await installApp(deviceUDID: device.udid, appBundlePath: buildPayload.appBundlePath, timeoutSeconds: timeoutSeconds)
         try cache.recordInstall(
             identity: buildPayload.identity,
             checksum: buildPayload.checksum,
@@ -1295,7 +1357,7 @@ public enum SimulatorAppLifecycleClient {
             product: buildPayload.product,
             deviceUDID: device.udid
         )
-        return true
+        return step
     }
 
     /// Installs (only when the cache's install record does not match the
@@ -1328,19 +1390,8 @@ public enum SimulatorAppLifecycleClient {
         )
         if needsInstall {
             progress?("Installing…")
-            installStep = try await installApp(
-                deviceUDID: device.udid,
-                appBundlePath: buildPayload.appBundlePath,
-                timeoutSeconds: timeoutSeconds
-            )
+            installStep = try await installBuilt(buildPayload, device: device, cache: cache, timeoutSeconds: timeoutSeconds, progress: progress)
             installRan = true
-            try cache.recordInstall(
-                identity: buildPayload.identity,
-                checksum: buildPayload.checksum,
-                bundleIdentifier: buildPayload.bundleIdentifier,
-                product: buildPayload.product,
-                deviceUDID: device.udid
-            )
         }
 
         progress?("Launching…")
@@ -1353,19 +1404,8 @@ public enum SimulatorAppLifecycleClient {
         )
         if launchStep.status != 0, !installRan, isMissingInstallLaunchFailure(launchStep) {
             progress?("Reinstalling…")
-            installStep = try await installApp(
-                deviceUDID: device.udid,
-                appBundlePath: buildPayload.appBundlePath,
-                timeoutSeconds: timeoutSeconds
-            )
+            installStep = try await installBuilt(buildPayload, device: device, cache: cache, timeoutSeconds: timeoutSeconds, progress: progress)
             installRan = true
-            try cache.recordInstall(
-                identity: buildPayload.identity,
-                checksum: buildPayload.checksum,
-                bundleIdentifier: buildPayload.bundleIdentifier,
-                product: buildPayload.product,
-                deviceUDID: device.udid
-            )
             progress?("Launching…")
             launchStep = try await launchApp(
                 deviceUDID: device.udid,
@@ -1475,7 +1515,7 @@ public enum SimulatorAppLifecycleClient {
     ) async throws -> SimulatorAppTestPayload {
         let logURL = try cache.logURL(for: selection.identity, action: "test")
         try SimToolDirectory.ensureEnclosing(cache.metadataRoot)
-        let (testLock, _) = try await cache.lockBuild(of: selection, derivedDataPath: selection.identity.derivedDataPath) { message in
+        let (testLock, _) = try await cache.lock(identity: selection.identity) { message in
             report(message, to: nil)
         }
         defer { testLock.release() }
@@ -1576,24 +1616,27 @@ public enum SimulatorAppLifecycleClient {
         if let url = productInLog(logged, scheme: selection.identity.scheme, previous: previous) {
             return XcodeBuildProduct(appBundleURL: url)
         }
-        if logged.isEmpty, let previous, let recorded = previous.product,
+        // Nothing to do for it — or only for another app of the scheme.
+        if let previous, let recorded = previous.product,
            SimulatorAppProductStamp(appBundleURL: URL(fileURLWithPath: previous.appBundlePath)) == recorded {
             return XcodeBuildProduct(appBundleURL: URL(fileURLWithPath: previous.appBundlePath))
         }
         return try await builtProductFromSettings(selection: selection, derivedDataPath: derivedDataPath)
     }
 
-    /// The app among those the build log shows written: the one the previous
-    /// build of this identity produced, by name; else the only one; else the
-    /// one named after the scheme. Nil when that leaves more than one (an
-    /// app with an App Clip, say) or none.
+    /// The app among those the build log shows written. After a previous
+    /// build of this identity, only the one with its name: a scheme with two
+    /// apps may rewrite just the other one. On a first build, the only one,
+    /// else the one named after the scheme. Nil when that leaves more than one
+    /// (an app with an App Clip, say) or none.
     static func productInLog(_ logged: [URL], scheme: String, previous: SimulatorAppBuildCacheMetadata?) -> URL? {
         let apps = logged.filter { url in
             var isDirectory: ObjCBool = false
             return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) && isDirectory.boolValue
         }
-        if let previous, let same = apps.first(where: { $0.lastPathComponent == URL(fileURLWithPath: previous.appBundlePath).lastPathComponent }) {
-            return same
+        if let previous {
+            let name = URL(fileURLWithPath: previous.appBundlePath).lastPathComponent
+            return apps.first { $0.lastPathComponent == name }
         }
         if apps.count == 1 { return apps[0] }
         let named = apps.filter { $0.lastPathComponent == "\(scheme).app" }

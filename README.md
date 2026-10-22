@@ -649,7 +649,9 @@ another checkout's identity sharing a configured `derivedDataPath` — so SimToo
 records a stamp of the bundle (every file's size and modification time) with
 each build and checks it before reusing one. A bundle rebuilt since by anything
 else is a cache miss, and a device whose installed build is not that very
-bundle gets it reinstalled.
+bundle gets it reinstalled. The install holds the build's lock (below), so no
+other build rewrites the bundle while it is copied, and refuses a bundle that
+has changed since its build.
 
 Each xcodebuild run writes its full log to `.simtool/build/<key>.log` beside the
 cache metadata (`<key>-test.log` for `app test`), replacing the previous one for
@@ -1059,7 +1061,10 @@ sees a cache hit and reuses that `.app` instead of re-running xcodebuild. It
 reads the same `.simtool/config.yml` as `run` (so the recorded checksum and its
 cache key match what `run` looks up) and writes the metadata against the built
 bundle. The bundle path defaults to `$BUILT_PRODUCTS_DIR/$FULL_PRODUCT_NAME`
-(set inside Xcode build phases); pass `--app-path` to override.
+(set inside Xcode build phases); pass `--app-path` to override. A build phase
+runs before Xcode signs the bundle, which rewrites it, so the bundle's stamp is
+taken when a later `run` first reuses it — provided the bundle settled within
+ten minutes of the record; changed later than that, it is another build.
 
 ```sh
 # As an Xcode "Run Script" post-build phase, from $SRCROOT:

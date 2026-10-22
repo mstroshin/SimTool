@@ -18,6 +18,9 @@ final class SimulatorAppBuildCachePrunerTests: XCTestCase {
         let live = try entry("live", in: cache, workspace: workspace.path, lastAccessed: now)
         let orphan = try entry("orphan", in: cache, workspace: removedWorktree, lastAccessed: now)
         let idle = try entry("idle", in: cache, workspace: workspace.path, lastAccessed: now.addingTimeInterval(-40 * 86_400))
+        try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-40 * 86_400)], ofItemAtPath: idle.path)
+        // Built long ago, reused through cache hits since: not idle.
+        let reused = try entry("reused", in: cache, workspace: workspace.path, lastAccessed: now.addingTimeInterval(-40 * 86_400))
         let unknown = try entry("unknown", in: cache, workspace: nil, lastAccessed: nil)
         try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-90 * 86_400)], ofItemAtPath: unknown.path)
         let busy = try entry("busy", in: cache, workspace: removedWorktree, lastAccessed: now)
@@ -28,7 +31,7 @@ final class SimulatorAppBuildCachePrunerTests: XCTestCase {
         // By default: entries whose workspace is gone, and not the one a build uses.
         let dryRun = SimulatorAppBuildCachePruner.prune(cache: cache, now: now)
         XCTAssertFalse(dryRun.deleted)
-        XCTAssertEqual(dryRun.entries.map { URL(fileURLWithPath: $0.path).lastPathComponent }, ["busy", "idle", "live", "orphan", "unknown"])
+        XCTAssertEqual(dryRun.entries.map { URL(fileURLWithPath: $0.path).lastPathComponent }, ["busy", "idle", "live", "orphan", "reused", "unknown"])
         XCTAssertEqual(dryRun.removable.map(\.path), [orphan.path])
         XCTAssertEqual(dryRun.entries.first { $0.path == orphan.path }?.reason, "workspace gone")
         XCTAssertEqual(dryRun.entries.first { $0.path == busy.path }?.inUse, true)
@@ -42,8 +45,9 @@ final class SimulatorAppBuildCachePrunerTests: XCTestCase {
         XCTAssertEqual(aged.entries.first { $0.path == idle.path }?.reason, "unused for 40 days")
         XCTAssertEqual(aged.entries.first { $0.path == unknown.path }?.workspacePath, nil)
 
+        XCTAssertFalse(aged.removable.contains { $0.path == reused.path })
         XCTAssertEqual(Set(SimulatorAppBuildCachePruner.prune(cache: cache, all: true, now: now).removable.map(\.path)),
-                       [live.path, orphan.path, idle.path, unknown.path])
+                       [live.path, orphan.path, idle.path, reused.path, unknown.path])
 
         let pruned = SimulatorAppBuildCachePruner.prune(cache: cache, delete: true, now: now)
         XCTAssertTrue(pruned.deleted)

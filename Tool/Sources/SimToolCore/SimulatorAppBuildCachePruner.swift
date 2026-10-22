@@ -7,8 +7,9 @@ public struct SimulatorAppBuildCacheEntry: Codable, Equatable, Sendable {
     /// The workspace or project it was built from, as xcodebuild recorded it
     /// in the entry's `info.plist`; nil when it recorded none.
     public var workspacePath: String?
-    /// When a build last used it: xcodebuild's `LastAccessedDate`, else the
-    /// directory's modification date.
+    /// When a build last used it: the later of xcodebuild's
+    /// `LastAccessedDate` and the directory's modification date, which a
+    /// cache hit on it refreshes.
     public var lastUsed: Date?
     /// Why it goes: `workspace gone`, `unused for 45 days`, `all`. Nil for an
     /// entry the prune keeps.
@@ -123,7 +124,7 @@ public enum SimulatorAppBuildCachePruner {
         return SimulatorAppBuildCacheEntry(
             path: url.path,
             workspacePath: workspacePath,
-            lastUsed: (info?["LastAccessedDate"] as? Date) ?? modified
+            lastUsed: [info?["LastAccessedDate"] as? Date, modified].compactMap { $0 }.max()
         )
     }
 

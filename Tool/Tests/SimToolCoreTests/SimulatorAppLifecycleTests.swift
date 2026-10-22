@@ -634,8 +634,10 @@ final class SimulatorAppLifecycleTests: XCTestCase {
         let valid = try XCTUnwrap(cache.validMetadata(for: selection.identity, checksum: expected.checksum))
         XCTAssertEqual(valid.appBundlePath, app.standardizedFileURL.path)
         XCTAssertTrue(valid.installRecords.isEmpty)
-        XCTAssertEqual(payload.product, SimulatorAppProductStamp(appBundleURL: app))
-        XCTAssertEqual(valid.product, payload.product)
+        // Stamped on that first use, not when recorded mid-build.
+        XCTAssertNil(payload.product)
+        XCTAssertEqual(valid.product, SimulatorAppProductStamp(appBundleURL: app))
+        XCTAssertEqual(cache.readMetadata(for: selection.identity)?.awaitingStamp, nil, "sealed")
 
         // A missing bundle is a hard error.
         try FileManager.default.removeItem(at: app)
@@ -749,6 +751,9 @@ final class SimulatorAppLifecycleTests: XCTestCase {
         XCTAssertEqual(SimulatorAppLifecycleClient.productInLog([clip, app], scheme: "Example", previous: nil), app)
         XCTAssertNil(SimulatorAppLifecycleClient.productInLog([clip, app], scheme: "Other", previous: nil), "ambiguous: ask xcodebuild")
         XCTAssertNil(SimulatorAppLifecycleClient.productInLog([], scheme: "Example", previous: nil))
+        // After a build of the app, a build that rewrote only the clip did
+        // not make the clip the product.
+        XCTAssertNil(SimulatorAppLifecycleClient.productInLog([clip], scheme: "Other", previous: previous(at: app)))
     }
 
     // A build with nothing to do writes nothing, so its log names no app: the
@@ -769,6 +774,78 @@ final class SimulatorAppLifecycleTests: XCTestCase {
             selection: selection, derivedDataPath: root.appendingPathComponent("DD").path, logged: [], previous: previous
         )
         XCTAssertEqual(product.appBundleURL.path, app.path)
+        // Nor does a build that rewrote only another app of the scheme.
+        let clip = try makeApp(at: root.appendingPathComponent("Products/Debug-iphonesimulator/ExampleClip.app", isDirectory: true), executable: "ExampleClip")
+        let alongside = try await SimulatorAppLifecycleClient.builtProduct(
+            selection: selection, derivedDataPath: root.appendingPathComponent("DD").path, logged: [clip], previous: previous
+        )
+        XCTAssertEqual(alongside.appBundleURL.path, app.path)
+    }
+
+    // `simtool checksum` runs as a build phase, before Xcode signs — and so
+    // rewrites — the bundle: its record is stamped on first use, as long as
+    // the bundle settled soon after.
+    func testAnExternallyRecordedBuildIsStampedOnFirstUse() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let project = root.appendingPathComponent("Example.xcodeproj", isDirectory: true)
+        try write("Example.xcodeproj/project.pbxproj", contents: "project", root: root)
+        let cache = SimulatorAppBuildCache(
+            simtoolDirectory: root.appendingPathComponent(".simtool", isDirectory: true),
+            derivedDataRoot: root.appendingPathComponent("derived", isDirectory: true)
+        )
+        let selection = try SimulatorAppBuildSelection.validated(workspacePath: nil, projectPath: project.path, scheme: "Example")
+        let app = try makeApp(at: root.appendingPathComponent("Build/Example.app", isDirectory: true))
+        let executable = app.appendingPathComponent("Example")
+
+        let recorded = try SimulatorAppLifecycleClient.recordExternalBuild(selection: selection, appBundleURL: app, cache: cache)
+        // Signing, after the phase.
+        try Data("binary v1 signed".utf8).write(to: executable)
+        XCTAssertTrue(try SimulatorAppLifecycleClient.plan(selection: selection, cache: cache).isCacheHit)
+        XCTAssertEqual(cache.readMetadata(for: selection.identity)?.product, SimulatorAppProductStamp(appBundleURL: app))
+        // Sealed: a rebuild after that is someone else's.
+        try Data("binary v2".utf8).write(to: executable)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: 5)], ofItemAtPath: executable.path)
+        XCTAssertFalse(try SimulatorAppLifecycleClient.plan(selection: selection, cache: cache).isCacheHit)
+
+        // A bundle changed long after the record is not that build.
+        _ = try SimulatorAppLifecycleClient.recordExternalBuild(selection: selection, appBundleURL: app, cache: cache)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSinceNow: SimulatorAppBuildCache.stampWindow + 60)],
+            ofItemAtPath: executable.path
+        )
+        XCTAssertFalse(try SimulatorAppLifecycleClient.plan(selection: selection, cache: cache).isCacheHit)
+        XCTAssertEqual(cache.readMetadata(for: selection.identity)?.awaitingStamp, true, "not sealed on a miss")
+        XCTAssertEqual(recorded.checksum, try SimulatorAppLifecycleClient.plan(selection: selection, cache: cache).fingerprint.checksum)
+    }
+
+    // A bundle rewritten between its build and the install is not installed
+    // as that build.
+    func testAnInstallRefusesABundleRebuiltSinceItsBuild() async throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cache = SimulatorAppBuildCache(
+            simtoolDirectory: root.appendingPathComponent(".simtool", isDirectory: true),
+            derivedDataRoot: root.appendingPathComponent("derived", isDirectory: true)
+        )
+        try write("Example.xcodeproj/project.pbxproj", contents: "project", root: root)
+        let app = try makeApp(at: root.appendingPathComponent("Build/Example.app", isDirectory: true))
+        let identity = SimulatorAppBuildIdentity(projectPath: root.appendingPathComponent("Example.xcodeproj").path, scheme: "Example")
+        let payload = SimulatorAppBuildPayload(
+            identity: identity, checksum: "abc", inputFileCount: 1, cacheHit: true, xcodebuildRan: false,
+            appBundlePath: app.path, bundleIdentifier: "com.example.app", product: SimulatorAppProductStamp(appBundleURL: app),
+            xcodebuild: SimulatorAppProcessStepSummary(name: "xcodebuild", ran: false)
+        )
+        let executable = app.appendingPathComponent("Example")
+        try Data("binary from another build".utf8).write(to: executable)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: 5)], ofItemAtPath: executable.path)
+        let device = SimulatorDevice(udid: "DEVICE", name: "iPhone", runtime: "iOS", state: "Booted", isAvailable: true)
+        do {
+            _ = try await SimulatorAppLifecycleClient.install(build: payload, device: device, cache: cache)
+            XCTFail("installed a bundle another build rewrote")
+        } catch {
+            XCTAssertTrue("\(error)".contains("no longer the app SimTool built"), "\(error)")
+        }
     }
 
     func testBuildLogsLiveBesideTheMetadataOneReplacedPerIdentity() throws {
