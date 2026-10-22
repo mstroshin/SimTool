@@ -47,7 +47,9 @@ final class SignalTrap: @unchecked Sendable {
     /// Runs on the dispatch queue (a normal thread), not in the signal handler,
     /// so awaiting async work and blocking on a semaphore are both safe here.
     fileprivate func runCleanupAndExit(_ signalNumber: Int32) {
-        ProcessRunner.stopChildren()
+        ProcessRunner.stopChildren {
+            FileHandle.standardError.write(Data("\nsimtool: stopping the build — press Ctrl-C again to kill it at once\n".utf8))
+        }
         lock.lock()
         let cleanup = self.cleanup
         lock.unlock()
@@ -75,6 +77,7 @@ final class SignalTrap: @unchecked Sendable {
         // allocate, which is not async-signal-safe.
         _ = cursorShowSequence.count
         _ = SignalTrap.shared
+        ProcessRunner.prepareForSignalHandlers()
 
         // Self-pipe: the C handler writes the signal number here; the dispatch
         // source below reads it on a normal thread and runs the real cleanup.
@@ -100,6 +103,9 @@ final class SignalTrap: @unchecked Sendable {
                 // Async-signal-safe only. A second signal (e.g. impatient Ctrl-C
                 // while cleanup runs) bails out immediately.
                 if signalAlreadyHandled != 0 {
+                    // Not waiting for the build to stop: kill it, or it would
+                    // go on writing its DerivedData unlocked.
+                    ProcessRunner.killChildrenNow()
                     _exit(128 + signalNumber)
                 }
                 signalAlreadyHandled = 1

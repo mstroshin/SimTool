@@ -678,6 +678,7 @@ runs in a process group of its own that Ctrl-C at the terminal does not reach,
 so SimTool, interrupted, interrupts it (and what it started) and waits for it
 to cancel before exiting — and before letting go of the lock. The same happens
 past a build's time limit; either way the log ends with `** BUILD INTERRUPTED **`.
+A second Ctrl-C does not wait for the cancel: it kills the build outright.
 
 The managed cache in `~/Library/Caches/SimTool` keeps one DerivedData per
 build identity without a configured `derivedDataPath` — gigabytes each — and no

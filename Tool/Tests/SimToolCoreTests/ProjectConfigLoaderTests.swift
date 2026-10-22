@@ -410,7 +410,8 @@ final class ProjectConfigLoaderTests: XCTestCase {
         XCTAssertEqual(try SimulatorAppBuildSelection.parseTimeout("1.5h"), 5_400)
         XCTAssertEqual(try SimulatorAppBuildSelection.parseTimeout(" 2H "), 7_200)
         XCTAssertEqual(try SimulatorAppBuildSelection.parseTimeout("0"), 0)
-        for invalid in ["", "m", "soon", "-5", "10x", "nan", "inf"] {
+        XCTAssertEqual(try SimulatorAppBuildSelection.parseTimeout("168h"), 604_800)
+        for invalid in ["", "m", "soon", "-5", "10x", "nan", "inf", "169h", "1e16"] {
             XCTAssertThrowsError(try SimulatorAppBuildSelection.parseTimeout(invalid), invalid)
         }
     }

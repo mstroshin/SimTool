@@ -70,6 +70,9 @@ public struct SimulatorAppBuildSelection: Codable, Equatable, Sendable {
         timeoutSeconds.flatMap { $0 > 0 ? $0 : nil }
     }
 
+    /// The longest time limit a build takes; past it, 0 says "none".
+    static let maximumTimeout: TimeInterval = 7 * 24 * 3_600
+
     /// Parses a build timeout: seconds (`2700`), or a number with an `s`,
     /// `m` or `h` unit (`45m`, `1.5h`). `0` means no limit.
     public static func parseTimeout(_ text: String) throws -> TimeInterval {
@@ -81,8 +84,8 @@ public struct SimulatorAppBuildSelection: Codable, Equatable, Sendable {
             number = number.dropLast()
             multiplier = unit
         }
-        guard let value = TimeInterval(number), value.isFinite, value >= 0 else {
-            throw SimToolError("Invalid build timeout '\(text)': use seconds or a number with s, m or h, as in 2700, 45m or 1.5h; 0 for no limit.")
+        guard let value = TimeInterval(number), value.isFinite, value >= 0, value * multiplier <= maximumTimeout else {
+            throw SimToolError("Invalid build timeout '\(text)': use seconds or a number with s, m or h, as in 2700, 45m or 1.5h, up to a week; 0 for no limit.")
         }
         return value * multiplier
     }

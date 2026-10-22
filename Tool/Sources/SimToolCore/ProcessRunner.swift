@@ -176,37 +176,58 @@ public enum ProcessRunner {
 
     /// Stops every running child started with `stopsWithSimTool` and returns
     /// once they are gone: for SimTool's own exit on a signal. Their runs never
-    /// return. Blocks the calling thread for up to `grace` plus a moment.
-    public static func stopChildren(grace: TimeInterval = 10) {
-        stop(RunningChildren.shared.beginStopping(), grace: grace)
+    /// return, and a child started from now on is killed at once. Blocks the
+    /// calling thread for up to `grace` plus a moment. `onStopping` hears
+    /// first, when there is anything to stop.
+    public static func stopChildren(grace: TimeInterval = 10, onStopping: () -> Void = {}) {
+        let children = RunningChildren.shared.beginStopping()
+        guard children.contains(where: \.isRunning) else { return }
+        onStopping()
+        stop(children, grace: grace)
+    }
+
+    /// Kills every running `stopsWithSimTool` child's process group outright.
+    /// Async-signal-safe — a bare `kill` per slot — for a signal handler that
+    /// is about to `_exit` without waiting: Ctrl-C pressed again while the
+    /// children are being stopped.
+    public static func killChildrenNow() {
+        RunningChildren.killAllNow()
+    }
+
+    /// Readies `killChildrenNow` for a signal handler: nothing may be
+    /// initialized lazily from inside one.
+    public static func prepareForSignalHandlers() {
+        RunningChildren.prepare()
     }
 
     /// Interrupts `processes` as Ctrl-C at their terminal would — SIGINT to
     /// each one's process group, so xcodebuild cancels its build and the
-    /// compilers under it stop too — then kills what is left after `grace`.
+    /// compilers under it stop too — then kills what is left of each group
+    /// after `grace`, even when the child itself has already gone.
     static func stop(_ processes: [Process], grace: TimeInterval = 10) {
-        let running = processes.filter(\.isRunning)
-        guard !running.isEmpty else { return }
-        for process in running { deliver(SIGINT, to: process) }
+        let targets = processes.filter(\.isRunning).map { (process: $0, target: signalTarget(for: $0)) }
+        guard !targets.isEmpty else { return }
+        func alive(_ entry: (process: Process, target: pid_t)) -> Bool {
+            entry.process.isRunning || (entry.target < 0 && kill(entry.target, 0) == 0)
+        }
+        for entry in targets { kill(entry.target, SIGINT) }
         let deadline = Date().addingTimeInterval(grace)
-        while running.contains(where: \.isRunning), Date() < deadline {
+        while targets.contains(where: alive), Date() < deadline {
             usleep(50_000)
         }
-        for process in running where process.isRunning { deliver(SIGKILL, to: process) }
+        for entry in targets where alive(entry) { kill(entry.target, SIGKILL) }
         let killed = Date().addingTimeInterval(2)
-        while running.contains(where: \.isRunning), Date() < killed {
+        while targets.contains(where: alive), Date() < killed {
             usleep(20_000)
         }
     }
 
-    private static func deliver(_ signal: Int32, to process: Process) {
+    /// What `kill` signals to reach a child and what it started: its process
+    /// group (`-pgid`) when it leads one, as `Process` children do, else itself.
+    static func signalTarget(for process: Process) -> pid_t {
         let pid = process.processIdentifier
-        guard pid > 0 else { return }
-        if getpgid(pid) == pid {
-            killpg(pid, signal)
-        } else {
-            kill(pid, signal)
-        }
+        guard pid > 0 else { return 0 }
+        return getpgid(pid) == pid ? -pid : pid
     }
 
     public static func runXcrun(_ arguments: [String]) async throws -> ProcessOutput {
@@ -275,22 +296,49 @@ public enum ProcessRunner {
 private final class RunningChildren: @unchecked Sendable {
     static let shared = RunningChildren()
 
+    /// The `kill` targets of running children, in fixed slots a signal
+    /// handler can read without locking or allocating; 0 is a free slot.
+    private static let slotCount = 32
+    private static let slots: UnsafeMutablePointer<pid_t> = {
+        let slots = UnsafeMutablePointer<pid_t>.allocate(capacity: slotCount)
+        slots.initialize(repeating: 0, count: slotCount)
+        return slots
+    }()
+
     private let lock = NSLock()
-    private var processes: [ObjectIdentifier: Process] = [:]
+    private var processes: [ObjectIdentifier: (process: Process, slot: Int?)] = [:]
     private var stopping = false
     private var parked: [Any] = []
 
+    static func prepare() {
+        _ = slots
+        _ = shared
+    }
+
+    static func killAllNow() {
+        for index in 0..<slotCount where slots[index] != 0 {
+            kill(slots[index], SIGKILL)
+        }
+    }
+
     func add(_ process: Process) {
+        let target = ProcessRunner.signalTarget(for: process)
         lock.lock()
-        processes[ObjectIdentifier(process)] = process
+        let slot = (0..<Self.slotCount).first { Self.slots[$0] == 0 }
+        if let slot { Self.slots[slot] = target }
+        processes[ObjectIdentifier(process)] = (process, slot)
+        let late = stopping
         lock.unlock()
+        // Started after SimTool began stopping its children: SimTool is about
+        // to exit, and this one must not stay behind.
+        if late, target != 0 { kill(target, SIGKILL) }
     }
 
     /// Forgets an exited child; true when SimTool is stopping it.
     func remove(_ process: Process) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        processes[ObjectIdentifier(process)] = nil
+        if let slot = processes.removeValue(forKey: ObjectIdentifier(process))?.slot { Self.slots[slot] = 0 }
         return stopping
     }
 
@@ -305,7 +353,7 @@ private final class RunningChildren: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         stopping = true
-        return Array(processes.values)
+        return processes.values.map(\.process)
     }
 }
 

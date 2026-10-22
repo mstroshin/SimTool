@@ -103,6 +103,40 @@ final class ProcessRunnerTests: XCTestCase {
         XCTAssertEqual(kill(grandchild, 0), -1, "the child's own child is gone too")
         XCTAssertEqual(errno, ESRCH)
     }
+
+    // A script phase that traps Ctrl-C outlives xcodebuild's own exit: after
+    // the grace, what is left of the group is killed.
+    func testStoppingKillsWhatIsLeftOfTheGroupOnceItsLeaderHasGone() throws {
+        try XCTSkipUnless(FileManager.default.isExecutableFile(atPath: "/usr/bin/perl"), "perl not available")
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/perl")
+        process.arguments = ["-e", "my $p = fork(); if ($p == 0) { $SIG{INT} = 'IGNORE'; sleep 30; exit 0 } $| = 1; print \"$p\\n\"; waitpid($p, 0)"]
+        let output = Pipe()
+        process.standardOutput = output
+        try process.run()
+        let line = String(decoding: output.fileHandleForReading.availableData, as: UTF8.self)
+        let child = try XCTUnwrap(Int32(line.trimmingCharacters(in: .whitespacesAndNewlines)))
+        let started = Date()
+        ProcessRunner.stop([process], grace: 0.5)
+        XCTAssertFalse(process.isRunning)
+        XCTAssertEqual(kill(child, 0), -1, "the member that ignored SIGINT is gone too")
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5)
+    }
+
+    // A second Ctrl-C does not wait: every child that must not outlive
+    // SimTool is killed on the spot.
+    func testKillingChildrenNowEndsTheirRunsAtOnce() async throws {
+        ProcessRunner.prepareForSignalHandlers()
+        let run = Task {
+            try await ProcessRunner.run(executable: URL(fileURLWithPath: "/bin/sleep"), arguments: ["30"], stopsWithSimTool: true)
+        }
+        try await Task.sleep(for: .milliseconds(300))
+        let started = Date()
+        ProcessRunner.killChildrenNow()
+        let output = try await run.value
+        XCTAssertNotEqual(output.status, 0)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5)
+    }
 }
 
 private final class LineCollector: @unchecked Sendable {
