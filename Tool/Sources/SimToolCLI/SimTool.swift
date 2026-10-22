@@ -1034,6 +1034,9 @@ struct AppBuildOptions: ParsableArguments {
     @Option(help: builderHelp)
     var builder: SimulatorAppBuilder?
 
+    @Option(name: .customLong("build-timeout"), help: buildTimeoutHelp)
+    var buildTimeout: String?
+
     @Flag(help: "Force a new build even when the checksum cache is valid.")
     var force = false
 
@@ -1045,7 +1048,8 @@ struct AppBuildOptions: ParsableArguments {
             configuration: configuration,
             derivedDataPath: derivedDataPath,
             buildSettings: buildSettings,
-            builder: builder
+            builder: builder,
+            timeout: buildTimeout
         )
     }
 }
@@ -1069,6 +1073,9 @@ struct AppTestOptions: ParsableArguments {
     @Option(name: .customLong("build-setting"), help: buildSettingHelp)
     var buildSettings: [String] = []
 
+    @Option(name: .customLong("build-timeout"), help: buildTimeoutHelp)
+    var buildTimeout: String?
+
     func selection() throws -> SimulatorAppBuildSelection {
         // `xcodebuild test` runs the tests whatever `build.builder` says.
         try appBuildSelection(
@@ -1078,7 +1085,8 @@ struct AppTestOptions: ParsableArguments {
             configuration: configuration,
             derivedDataPath: derivedDataPath,
             buildSettings: buildSettings,
-            builder: .xcodebuild
+            builder: .xcodebuild,
+            timeout: buildTimeout
         )
     }
 }
@@ -1088,6 +1096,11 @@ extension SimulatorAppBuilder: ExpressibleByArgument {}
 private let buildSettingHelp = ArgumentHelp(
     "xcodebuild build setting, KEY=VALUE (e.g. MACOSX_DEPLOYMENT_TARGET=15.0). Repeatable.",
     discussion: "Adds to `build.settings` from .simtool/config.yml, which applies on its own whenever this builds the configured workspace or project; a flag wins over the config for the same key."
+)
+
+let buildTimeoutHelp = ArgumentHelp(
+    "Stop the build once it runs this long: seconds, or with a unit — 45m, 1.5h. 0 for no limit.",
+    discussion: "Defaults to `build.timeout` from .simtool/config.yml when building the configured workspace or project, else no limit."
 )
 
 private let builderHelp = ArgumentHelp(
@@ -1108,9 +1121,11 @@ private func appBuildSelection(
     configuration: String?,
     derivedDataPath: String?,
     buildSettings: [String],
-    builder: SimulatorAppBuilder?
+    builder: SimulatorAppBuilder?,
+    timeout: String?
 ) throws -> SimulatorAppBuildSelection {
     let explicit = try SimulatorAppBuildSelection.parseBuildSettings(buildSettings)
+    let timeout = try timeout.map(SimulatorAppBuildSelection.parseTimeout)
     let configBuild = try ProjectConfigLoader.loadIfPresent()?.build
     if workspace == nil, project == nil {
         guard let configBuild else {
@@ -1121,7 +1136,8 @@ private func appBuildSelection(
             scheme: scheme,
             configuration: configuration,
             derivedDataPath: derivedDataPath,
-            settings: explicit
+            settings: explicit,
+            timeout: timeout
         )
     }
     return try ProjectConfig.Build.explicitSelection(
@@ -1132,7 +1148,8 @@ private func appBuildSelection(
         configuration: configuration,
         derivedDataPath: derivedDataPath,
         settings: explicit,
-        builder: builder
+        builder: builder,
+        timeout: timeout
     )
 }
 
@@ -2556,6 +2573,9 @@ struct Run: AsyncParsableCommand {
     @Option(help: builderHelp)
     var builder: SimulatorAppBuilder?
 
+    @Option(name: .customLong("build-timeout"), help: buildTimeoutHelp)
+    var buildTimeout: String?
+
     @Flag(name: .long, help: "Print verbose diagnostic output to stderr.")
     var verbose = false
 
@@ -2571,6 +2591,7 @@ struct Run: AsyncParsableCommand {
         DebugLog.isEnabled = verbose
         let projectConfig = try ProjectConfigLoader.load(explicitPath: config)
         let buildCache = SimulatorAppBuildCache(simtoolDirectory: projectConfig.simtoolDirectory)
+        let buildTimeout = try buildTimeout.map(SimulatorAppBuildSelection.parseTimeout)
 
         // Enable the app-side SimTool network and state loggers by default. Set
         // them on this process via the SIMCTL_CHILD_ prefix so simctl forwards
@@ -2593,7 +2614,7 @@ struct Run: AsyncParsableCommand {
             let resolved = try await SimulatorDeviceClient.resolve(simulatorSelector)
             booted = try await SimulatorDeviceClient.ensureBooted(resolved)
             launch = try await SimulatorAppLifecycleClient.launch(
-                selection: try projectConfig.buildSelection(for: booted, builder: builder),
+                selection: try projectConfig.buildSelection(for: booted, builder: builder, timeout: buildTimeout),
                 device: booted,
                 force: force,
                 cache: buildCache
@@ -2602,7 +2623,7 @@ struct Run: AsyncParsableCommand {
             let resolved = try await resolveSimulatorWithProgress(simulatorSelector)
             booted = try await bootSimulatorWithProgress(resolved)
             let buildPayload = try await buildAppWithProgress(
-                selection: try projectConfig.buildSelection(for: booted, builder: builder),
+                selection: try projectConfig.buildSelection(for: booted, builder: builder, timeout: buildTimeout),
                 force: force,
                 cache: buildCache
             )

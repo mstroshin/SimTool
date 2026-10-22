@@ -20,6 +20,9 @@ public struct ProjectConfig: Codable, Equatable, Sendable {
         /// an Xcode build leaves them out rather than failing on them — the
         /// same config can build either way.
         public var builder: SimulatorAppBuilder
+        /// How long a build may run (`timeout:`), in seconds; nil or 0 — as
+        /// long as it takes.
+        public var timeout: TimeInterval?
 
         public init(
             workspace: String? = nil,
@@ -28,7 +31,8 @@ public struct ProjectConfig: Codable, Equatable, Sendable {
             configuration: String? = nil,
             derivedDataPath: String? = nil,
             settings: [String: String] = [:],
-            builder: SimulatorAppBuilder = .xcodebuild
+            builder: SimulatorAppBuilder = .xcodebuild,
+            timeout: TimeInterval? = nil
         ) {
             self.workspace = workspace
             self.project = project
@@ -37,10 +41,11 @@ public struct ProjectConfig: Codable, Equatable, Sendable {
             self.derivedDataPath = derivedDataPath
             self.settings = settings
             self.builder = builder
+            self.timeout = timeout
         }
 
         private enum CodingKeys: String, CodingKey {
-            case workspace, project, scheme, configuration, derivedDataPath, settings, builder
+            case workspace, project, scheme, configuration, derivedDataPath, settings, builder, timeout
         }
 
         public init(from decoder: Decoder) throws {
@@ -52,6 +57,7 @@ public struct ProjectConfig: Codable, Equatable, Sendable {
             derivedDataPath = try container.decodeIfPresent(String.self, forKey: .derivedDataPath)
             settings = try container.decodeIfPresent([String: String].self, forKey: .settings) ?? [:]
             builder = try container.decodeIfPresent(SimulatorAppBuilder.self, forKey: .builder) ?? .xcodebuild
+            timeout = try container.decodeIfPresent(TimeInterval.self, forKey: .timeout)
         }
 
         /// Maps the config build block onto the shared build selection so build
@@ -69,12 +75,13 @@ public struct ProjectConfig: Codable, Equatable, Sendable {
             scheme: String? = nil,
             configuration: String? = nil,
             derivedDataPath: String? = nil,
-            settings extraSettings: [String: String] = [:]
+            settings extraSettings: [String: String] = [:],
+            timeout: TimeInterval? = nil
         ) throws -> SimulatorAppBuildSelection {
             let builder = builder ?? self.builder
             let usesXcodebuild = builder == .xcodebuild
             let configuredSettings = usesXcodebuild ? settings : [:]
-            return try SimulatorAppBuildSelection.validated(
+            var selection = try SimulatorAppBuildSelection.validated(
                 workspacePath: workspace,
                 projectPath: project,
                 scheme: scheme ?? self.scheme,
@@ -83,6 +90,8 @@ public struct ProjectConfig: Codable, Equatable, Sendable {
                 buildSettings: configuredSettings.merging(extraSettings) { _, flag in flag },
                 builder: builder
             )
+            selection.timeoutSeconds = timeout ?? self.timeout
+            return selection
         }
 
         /// The configured settings when `selection` builds this block's
@@ -110,11 +119,11 @@ public struct ProjectConfig: Codable, Equatable, Sendable {
         }
 
         /// What a command line with `--workspace` or `--project` builds: that
-        /// workspace or project, with `configured`'s builder, settings and
-        /// DerivedData path when the block describes the same one — the flags
-        /// over them, key by key. Xcode takes no build settings or DerivedData
-        /// path, so with `xcode-mcp` the configured ones stay out and a flag
-        /// for either is an error.
+        /// workspace or project, with `configured`'s builder, settings,
+        /// DerivedData path and timeout when the block describes the same one
+        /// — the flags over them, key by key. Xcode takes no build settings or
+        /// DerivedData path, so with `xcode-mcp` the configured ones stay out
+        /// and a flag for either is an error.
         public static func explicitSelection(
             configured: Build?,
             workspace: String?,
@@ -123,7 +132,8 @@ public struct ProjectConfig: Codable, Equatable, Sendable {
             configuration: String?,
             derivedDataPath: String?,
             settings explicit: [String: String],
-            builder: SimulatorAppBuilder?
+            builder: SimulatorAppBuilder?,
+            timeout: TimeInterval? = nil
         ) throws -> SimulatorAppBuildSelection {
             let base = try SimulatorAppBuildSelection.validated(
                 workspacePath: workspace,
@@ -134,7 +144,7 @@ public struct ProjectConfig: Codable, Equatable, Sendable {
             let builder = builder ?? configured?.builder(for: base) ?? .xcodebuild
             let usesXcodebuild = builder == .xcodebuild
             let settings = (usesXcodebuild ? configured?.settings(for: base) ?? [:] : [:]).merging(explicit) { _, flag in flag }
-            return try SimulatorAppBuildSelection.validated(
+            var selection = try SimulatorAppBuildSelection.validated(
                 workspacePath: workspace,
                 projectPath: project,
                 scheme: scheme,
@@ -143,6 +153,8 @@ public struct ProjectConfig: Codable, Equatable, Sendable {
                 buildSettings: settings,
                 builder: builder
             )
+            selection.timeoutSeconds = timeout ?? (configured?.describes(base) == true ? configured?.timeout : nil)
+            return selection
         }
 
         private func describes(_ selection: SimulatorAppBuildSelection) -> Bool {
@@ -268,14 +280,18 @@ public struct ProjectConfig: Codable, Equatable, Sendable {
         simtoolDirectory.deletingLastPathComponent().resolvingSymlinksInPath().path
     }
 
-    public func buildSelection(builder: SimulatorAppBuilder? = nil) throws -> SimulatorAppBuildSelection {
-        try build.selection(builder: builder)
+    public func buildSelection(builder: SimulatorAppBuilder? = nil, timeout: TimeInterval? = nil) throws -> SimulatorAppBuildSelection {
+        try build.selection(builder: builder, timeout: timeout)
     }
 
     /// The configured build, for the simulator it is about to be installed on —
     /// what `run` and `test run` build. Same cache entry as `buildSelection()`.
-    public func buildSelection(for device: SimulatorDevice, builder: SimulatorAppBuilder? = nil) throws -> SimulatorAppBuildSelection {
-        try buildSelection(builder: builder).targeting(device)
+    public func buildSelection(
+        for device: SimulatorDevice,
+        builder: SimulatorAppBuilder? = nil,
+        timeout: TimeInterval? = nil
+    ) throws -> SimulatorAppBuildSelection {
+        try buildSelection(builder: builder, timeout: timeout).targeting(device)
     }
 
     /// Looks up a configured launch profile by name, throwing a clear error that
@@ -381,6 +397,7 @@ public enum ProjectConfigTemplate {
           #   MACOSX_DEPLOYMENT_TARGET: "15.0"  # cannot build without, on every build of it
           # builder: xcode-mcp            # optional; build in Xcode over its MCP tools
           #                               #   (xcrun mcpbridge) instead of xcodebuild
+          # timeout: 90m                  # optional; stop a build running longer (default: no limit)
 
         # deeplinks:                      # optional; open by name with `simtool open <name>`
         #   - name: Home
@@ -506,7 +523,14 @@ public enum ProjectConfigLoader {
             configuration: rawBuild.configuration?.trimmed,
             derivedDataPath: resolvePath(rawBuild.derivedDataPath, relativeTo: projectRoot),
             settings: (rawBuild.settings ?? [:]).mapValues(\.text),
-            builder: builder
+            builder: builder,
+            timeout: try rawBuild.timeout.map { raw in
+                do {
+                    return try SimulatorAppBuildSelection.parseTimeout(raw.text)
+                } catch {
+                    throw SimToolError("Invalid `build.timeout` '\(raw.text)' in \(fileName): use seconds or a number with s, m or h, as in 2700, 45m or 1.5h; 0 for no limit.")
+                }
+            }
         )
         // Reuse the shared build-selection validation (workspace XOR project).
         _ = try build.selection()
@@ -596,6 +620,8 @@ struct RawProjectConfig: Decodable {
         /// not become a Bool.
         var settings: [String: YAMLScalarText]?
         var builder: String?
+        /// `2700`, `45m`, `1.5h`: text, so a unit can follow the number.
+        var timeout: YAMLScalarText?
     }
 
     struct RawServer: Decodable {

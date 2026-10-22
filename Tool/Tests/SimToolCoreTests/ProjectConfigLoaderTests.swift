@@ -351,6 +351,69 @@ final class ProjectConfigLoaderTests: XCTestCase {
         XCTAssertThrowsError(try explicit(derivedDataPath: "/tmp/Elsewhere", builder: .xcodeMCP))
     }
 
+    func testABuildRunsUnderTheConfiguredTimeoutOrNone() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try writeConfig("""
+        simulator: booted
+        bundleId: com.example.MyApp
+        build:
+          workspace: App.xcworkspace
+          scheme: App
+          timeout: 90m
+        """, in: root)
+        let config = try ProjectConfigLoader.load(startDirectory: root)
+        XCTAssertEqual(config.build.timeout, 5_400)
+        XCTAssertEqual(try config.buildSelection().buildTimeLimit, 5_400)
+        let device = SimulatorDevice(udid: "DEVICE", name: "iPhone", runtime: "iOS", state: "Booted", isAvailable: true)
+        XCTAssertEqual(try config.buildSelection(for: device).buildTimeLimit, 5_400, "run and test run build under it too")
+        // A flag wins; 0 lifts the limit.
+        XCTAssertEqual(try config.buildSelection(timeout: 60).buildTimeLimit, 60)
+        XCTAssertNil(try config.buildSelection(timeout: 0).buildTimeLimit)
+        // The configured workspace by its path takes it; another project does not.
+        func explicit(workspace: String?, project: String?, timeout: TimeInterval? = nil) throws -> SimulatorAppBuildSelection {
+            try ProjectConfig.Build.explicitSelection(
+                configured: config.build, workspace: workspace, project: project, scheme: "App", configuration: nil,
+                derivedDataPath: nil, settings: [:], builder: nil, timeout: timeout
+            )
+        }
+        XCTAssertEqual(try explicit(workspace: root.appendingPathComponent("App.xcworkspace").path, project: nil).buildTimeLimit, 5_400)
+        XCTAssertNil(try explicit(workspace: nil, project: root.appendingPathComponent("App.xcodeproj").path).buildTimeLimit)
+        XCTAssertEqual(try explicit(workspace: nil, project: root.appendingPathComponent("App.xcodeproj").path, timeout: 30).buildTimeLimit, 30)
+        // The time limit is no part of what was built: one cache entry.
+        XCTAssertEqual(try config.buildSelection(timeout: 60).identity, try config.buildSelection().identity)
+
+        try writeConfig("""
+        simulator: booted
+        bundleId: com.example.MyApp
+        build:
+          workspace: App.xcworkspace
+          scheme: App
+        """, in: root)
+        XCTAssertNil(try ProjectConfigLoader.load(startDirectory: root).buildSelection().buildTimeLimit, "no limit unless one is set")
+
+        try assertLoadThrows("""
+        simulator: booted
+        bundleId: com.example.MyApp
+        build:
+          workspace: App.xcworkspace
+          scheme: App
+          timeout: soon
+        """, contains: "Invalid `build.timeout`")
+    }
+
+    func testBuildTimeoutsReadAsSecondsOrWithAUnit() throws {
+        XCTAssertEqual(try SimulatorAppBuildSelection.parseTimeout("2700"), 2_700)
+        XCTAssertEqual(try SimulatorAppBuildSelection.parseTimeout("30s"), 30)
+        XCTAssertEqual(try SimulatorAppBuildSelection.parseTimeout("45m"), 2_700)
+        XCTAssertEqual(try SimulatorAppBuildSelection.parseTimeout("1.5h"), 5_400)
+        XCTAssertEqual(try SimulatorAppBuildSelection.parseTimeout(" 2H "), 7_200)
+        XCTAssertEqual(try SimulatorAppBuildSelection.parseTimeout("0"), 0)
+        for invalid in ["", "m", "soon", "-5", "10x", "nan", "inf"] {
+            XCTAssertThrowsError(try SimulatorAppBuildSelection.parseTimeout(invalid), invalid)
+        }
+    }
+
     func testFlagsOverrideTheConfiguredBuildKeyByKey() throws {
         let root = try makeTempDirectory()
         defer { try? FileManager.default.removeItem(at: root) }

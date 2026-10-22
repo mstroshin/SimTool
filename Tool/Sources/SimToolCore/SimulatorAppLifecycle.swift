@@ -53,10 +53,38 @@ public struct SimulatorAppBuildSelection: Codable, Equatable, Sendable {
     /// Builds for this simulator only — its architecture — instead of any iOS
     /// simulator. Not part of the identity: the product is the same `.app`.
     public var deviceUDID: String?
+    /// How long the build may run before it is stopped, in seconds: nil (not
+    /// set) or 0 for as long as it takes. Not part of the identity.
+    public var timeoutSeconds: TimeInterval?
 
     public init(identity: SimulatorAppBuildIdentity) throws {
         try Self.validate(identity)
         self.identity = identity
+    }
+
+    /// The time limit a build of this selection runs under, nil for none.
+    /// A cold build of a large project, sharing the machine with other
+    /// builds, can take well over an hour; stopping a build that is merely
+    /// slow throws its work away, so there is no limit unless one is set.
+    public var buildTimeLimit: TimeInterval? {
+        timeoutSeconds.flatMap { $0 > 0 ? $0 : nil }
+    }
+
+    /// Parses a build timeout: seconds (`2700`), or a number with an `s`,
+    /// `m` or `h` unit (`45m`, `1.5h`). `0` means no limit.
+    public static func parseTimeout(_ text: String) throws -> TimeInterval {
+        let trimmed = text.trimmingCharacters(in: .whitespaces).lowercased()
+        let units: [Character: TimeInterval] = ["s": 1, "m": 60, "h": 3_600]
+        var number = Substring(trimmed)
+        var multiplier: TimeInterval = 1
+        if let last = trimmed.last, let unit = units[last] {
+            number = number.dropLast()
+            multiplier = unit
+        }
+        guard let value = TimeInterval(number), value.isFinite, value >= 0 else {
+            throw SimToolError("Invalid build timeout '\(text)': use seconds or a number with s, m or h, as in 2700, 45m or 1.5h; 0 for no limit.")
+        }
+        return value * multiplier
     }
 
     /// This selection, built for `device` alone. Whatever installs the build on
@@ -827,16 +855,16 @@ public enum SimulatorAppLifecycleClient {
 
     /// `progress` receives short build statuses ("Compiling Foo.swift") parsed
     /// from xcodebuild output. It is invoked on a background thread as output
-    /// arrives; blocking inside it backpressures pipe reads.
+    /// arrives; blocking inside it backpressures pipe reads. The build runs
+    /// under the selection's time limit (`buildTimeLimit`).
     public static func build(
         selection: SimulatorAppBuildSelection,
         force: Bool = false,
         cache: SimulatorAppBuildCache = SimulatorAppBuildCache(simtoolDirectory: SimToolDirectory.resolve()),
-        timeoutSeconds: TimeInterval? = 1_800,
         progress: (@Sendable (String) -> Void)? = nil
     ) async throws -> SimulatorAppBuildPayload {
         let plan = try plan(selection: selection, force: force, cache: cache)
-        return try await build(plan: plan, cache: cache, timeoutSeconds: timeoutSeconds, progress: progress)
+        return try await build(plan: plan, cache: cache, progress: progress)
     }
 
     /// Build stage: runs xcodebuild for a planned build, or returns a cache-hit
@@ -845,7 +873,6 @@ public enum SimulatorAppLifecycleClient {
     public static func build(
         plan: SimulatorAppBuildPlan,
         cache: SimulatorAppBuildCache = SimulatorAppBuildCache(simtoolDirectory: SimToolDirectory.resolve()),
-        timeoutSeconds: TimeInterval? = 1_800,
         progress: (@Sendable (String) -> Void)? = nil
     ) async throws -> SimulatorAppBuildPayload {
         let selection = plan.selection
@@ -880,7 +907,7 @@ public enum SimulatorAppLifecycleClient {
             let buildOutput = try await ProcessRunner.run(
                 executable: URL(fileURLWithPath: "/usr/bin/xcrun"),
                 arguments: buildArguments,
-                timeoutSeconds: timeoutSeconds,
+                timeoutSeconds: selection.buildTimeLimit,
                 onStdoutLine: onStdoutLine
             )
             buildStep = SimulatorAppProcessStepSummary(name: "xcodebuild", output: buildOutput)
@@ -893,7 +920,7 @@ public enum SimulatorAppLifecycleClient {
             let outcome = try await XcodeMCPBuilder.build(
                 selection: selection,
                 device: try await device(udid: selection.deviceUDID),
-                timeoutSeconds: timeoutSeconds,
+                timeoutSeconds: selection.buildTimeLimit,
                 progress: progress
             )
             try checkConfiguration(outcome.configuration, of: selection)
@@ -987,7 +1014,8 @@ public enum SimulatorAppLifecycleClient {
     }
 
     /// Builds for `device` only (see `SimulatorAppBuildSelection.targeting`),
-    /// then installs and launches there.
+    /// then installs and launches there. The build runs under the selection's
+    /// time limit; `timeoutSeconds` bounds install and launch.
     public static func launch(
         selection: SimulatorAppBuildSelection,
         device: SimulatorDevice,
@@ -1003,7 +1031,6 @@ public enum SimulatorAppLifecycleClient {
             selection: selection.targeting(device),
             force: force,
             cache: cache,
-            timeoutSeconds: timeoutSeconds,
             progress: buildProgress
         )
         return try await installAndLaunch(
@@ -1243,10 +1270,10 @@ public enum SimulatorAppLifecycleClient {
         return arguments
     }
 
+    /// Runs `xcodebuild test` under the selection's time limit.
     public static func test(
         selection: SimulatorAppBuildSelection,
-        device: SimulatorDevice,
-        timeoutSeconds: TimeInterval? = 1_800
+        device: SimulatorDevice
     ) async throws -> SimulatorAppTestPayload {
         let output = try await ProcessRunner.run(
             executable: URL(fileURLWithPath: "/usr/bin/xcrun"),
@@ -1255,7 +1282,7 @@ public enum SimulatorAppLifecycleClient {
                 device: device,
                 derivedDataPath: selection.identity.derivedDataPath
             ),
-            timeoutSeconds: timeoutSeconds
+            timeoutSeconds: selection.buildTimeLimit
         )
         let step = SimulatorAppProcessStepSummary(name: "xcodebuild test", output: output)
         return SimulatorAppTestPayload(

@@ -120,6 +120,14 @@ final class SimToolCommandSurfaceTests: XCTestCase {
         XCTAssertTrue(names.contains("app"))
     }
 
+    func testBuildingCommandsTakeABuildTimeout() throws {
+        XCTAssertEqual(try AppCommand.Build.parse(["--build-timeout", "45m"]).buildOptions.buildTimeout, "45m")
+        XCTAssertEqual(try AppCommand.Launch.parse(["--build-timeout", "2700"]).buildOptions.buildTimeout, "2700")
+        XCTAssertEqual(try AppCommand.Test.parse(["--build-timeout", "1.5h"]).testOptions.buildTimeout, "1.5h")
+        XCTAssertEqual(try Run.parse(["--build-timeout", "0"]).buildTimeout, "0")
+        XCTAssertNil(try AppCommand.Build.parse([]).buildOptions.buildTimeout, "no flag: the config decides")
+    }
+
     func testTopLevelCommandIncludesRunAndOpen() {
         let names = SimTool.configuration.subcommands.map { commandName(for: $0) }
         XCTAssertTrue(names.contains("run"))

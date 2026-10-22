@@ -573,11 +573,20 @@ swift run simtool app build --workspace MyApp.xcworkspace --scheme MyApp \
 A flag wins over the config for the same key. Settings are part of the build
 cache key, so a build with other settings never reuses a cached one.
 
+A build runs as long as it takes: a cold build of a large project, sharing the
+machine with other builds, can take well over an hour, and stopping one that is
+merely slow throws its work away. To bound it anyway, set `build.timeout` in the
+config (`2700`, `45m`, `1.5h`) or pass `--build-timeout` to `run`, `app build`,
+`app launch` or `app test` (`0` lifts a configured limit); a build that runs
+past it is stopped and fails. It applies to xcodebuild and to Xcode's build
+with `xcode-mcp` alike, and is not part of the cache key.
+
 Naming the configured workspace or project with `--workspace` / `--project`
 still builds the configured app: the command takes `build.settings`,
-`build.builder` and `build.derivedDataPath` from the config, so it lands in the
-DerivedData `run` builds into and shares its cache entry instead of starting a
-second cold build. A build of any other workspace or project takes none of them.
+`build.builder`, `build.derivedDataPath` and `build.timeout` from the config,
+so it lands in the DerivedData `run` builds into and shares its cache entry
+instead of starting a second cold build. A build of any other workspace or
+project takes none of them.
 
 ### Building in Xcode over MCP
 
@@ -872,6 +881,7 @@ build:
   # settings:                       # optional xcodebuild build settings for every build
   #   MACOSX_DEPLOYMENT_TARGET: "15.0"
   # builder: xcode-mcp              # optional: build in Xcode over MCP, not xcodebuild
+  # timeout: 90m                    # optional: stop a build running longer (default: no limit)
 server:                             # optional viewer settings
   host: 127.0.0.1                   # the address it listens on; 0.0.0.0 opens it to the network
   port: 3200
