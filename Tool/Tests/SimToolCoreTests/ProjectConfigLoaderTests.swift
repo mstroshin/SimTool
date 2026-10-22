@@ -222,6 +222,7 @@ final class ProjectConfigLoaderTests: XCTestCase {
             "-configuration", "Debug",
             "-destination", "platform=iOS Simulator,id=5A1C0DE0-0000-4000-8000-00000000BEEF",
             "-derivedDataPath", derivedData,
+            "-hideShellScriptEnvironment",
             "MACOSX_DEPLOYMENT_TARGET=15.0",
             "build",
         ])

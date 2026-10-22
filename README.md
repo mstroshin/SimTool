@@ -642,6 +642,17 @@ each build and checks it before reusing one. A bundle rebuilt since by anything
 else is a cache miss, and a device whose installed build is not that very
 bundle gets it reinstalled.
 
+Each xcodebuild run writes its full log to `.simtool/build/<key>.log` beside the
+cache metadata (`<key>-test.log` for `app test`), replacing the previous one for
+the same build; a failure names it (`Full log: …`) after the errors it picked
+out, and `--json` reports it as `logPath` (Xcode's own log with `xcode-mcp`).
+Only the end of the output is kept in memory, and run-script phases leave the
+build environment out of it (`-hideShellScriptEnvironment`). The built `.app`
+is located from that log — where the build wrote it, whichever products
+directory Xcode's build location settings chose — so locating it costs no
+second xcodebuild run; only when the log cannot tell is xcodebuild asked for
+its build settings.
+
 ```sh
 swift run simtool app launch --device <udid-or-name> --workspace MyApp.xcworkspace --scheme MyApp --json
 swift run simtool app launch --device <udid-or-name> --workspace MyApp.xcworkspace --scheme MyApp --json

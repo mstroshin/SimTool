@@ -1320,6 +1320,9 @@ extension AppCommand {
             if payload.identity.builder == .xcodeMCP {
                 takeaways.append("Built by: Xcode (MCP)")
             }
+            if let logPath = payload.logPath {
+                takeaways.append("Log: \(logPath)")
+            }
             return takeaways
         }
     }
@@ -1406,7 +1409,8 @@ extension AppCommand {
                     "Scheme: \(payload.identity.scheme)",
                 ]))
             } else {
-                makeNoora().warning("Tests failed for scheme \(payload.identity.scheme) on \(payload.device.name). Status: \(payload.xcodebuild.status ?? -1)")
+                let log = payload.logPath.map { " Full log: \($0)" } ?? ""
+                makeNoora().warning("Tests failed for scheme \(payload.identity.scheme) on \(payload.device.name). Status: \(payload.xcodebuild.status ?? -1).\(log)")
             }
         }
     }

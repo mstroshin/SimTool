@@ -41,8 +41,14 @@ final class SimulatorAppLifecycleTests: XCTestCase {
             "-configuration", "Debug",
             "-destination", "generic/platform=iOS Simulator",
             "-derivedDataPath", selection.identity.derivedDataPath!,
+            "-hideShellScriptEnvironment",
             "build",
         ])
+        // Asking for settings is no build: nothing to hide.
+        XCTAssertFalse(
+            SimulatorAppLifecycleClient.xcodebuildArguments(selection: selection, derivedDataPath: nil, showBuildSettings: true)
+                .contains("-hideShellScriptEnvironment")
+        )
     }
 
     func testBuildSettingsAndADeviceReachTheXcodebuildCommandLine() throws {
@@ -66,6 +72,7 @@ final class SimulatorAppLifecycleTests: XCTestCase {
             "-scheme", "Example",
             "-configuration", "Debug",
             "-destination", "platform=iOS Simulator,id=DEVICE",
+            "-hideShellScriptEnvironment",
             "MACOSX_DEPLOYMENT_TARGET=15.0",
             "SWIFT_ACTIVE_COMPILATION_CONDITIONS=DEBUG FLAG",
             "build",
@@ -657,6 +664,73 @@ final class SimulatorAppLifecycleTests: XCTestCase {
         )
     }
 
+    // `-derivedDataPath` does not decide where the .app lands: Xcode's build
+    // location settings can put products next to the workspace. The build's
+    // own log says where it wrote it.
+    func testTheProductIsTheAppTheBuildLogShowsWritten() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let products = root.appendingPathComponent("DerivedData/Build/Products/Debug-iphonesimulator", isDirectory: true)
+        let app = try makeApp(at: products.appendingPathComponent("Example.app", isDirectory: true))
+        let clip = try makeApp(at: products.appendingPathComponent("ExampleClip.app", isDirectory: true), executable: "ExampleClip")
+        let gone = products.appendingPathComponent("Gone.app", isDirectory: true)
+        let identity = SimulatorAppBuildIdentity(projectPath: root.appendingPathComponent("Example.xcodeproj").path, scheme: "Example")
+        func previous(at url: URL) -> SimulatorAppBuildCacheMetadata {
+            SimulatorAppBuildCacheMetadata(identity: identity, checksum: "old", inputFileCount: 1, appBundlePath: url.path, bundleIdentifier: "com.example.app")
+        }
+
+        XCTAssertEqual(SimulatorAppLifecycleClient.productInLog([app], scheme: "Other", previous: nil), app)
+        XCTAssertEqual(SimulatorAppLifecycleClient.productInLog([gone, app], scheme: "Other", previous: nil), app, "only bundles that exist")
+        // An app and its App Clip: the one built before, else the scheme's.
+        XCTAssertEqual(SimulatorAppLifecycleClient.productInLog([clip, app], scheme: "Other", previous: previous(at: URL(fileURLWithPath: "/elsewhere/Example.app"))), app)
+        XCTAssertEqual(SimulatorAppLifecycleClient.productInLog([clip, app], scheme: "Example", previous: nil), app)
+        XCTAssertNil(SimulatorAppLifecycleClient.productInLog([clip, app], scheme: "Other", previous: nil), "ambiguous: ask xcodebuild")
+        XCTAssertNil(SimulatorAppLifecycleClient.productInLog([], scheme: "Example", previous: nil))
+    }
+
+    // A build with nothing to do writes nothing, so its log names no app: the
+    // previous build's bundle is still the product while nothing rebuilt it.
+    func testABuildWithNothingToDoKeepsThePreviousProduct() async throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try write("Example.xcodeproj/project.pbxproj", contents: "project", root: root)
+        let selection = try SimulatorAppBuildSelection.validated(
+            workspacePath: nil, projectPath: root.appendingPathComponent("Example.xcodeproj").path, scheme: "Example"
+        )
+        let app = try makeApp(at: root.appendingPathComponent("Products/Debug-iphonesimulator/Example.app", isDirectory: true))
+        let previous = SimulatorAppBuildCacheMetadata(
+            identity: selection.identity, checksum: "old", inputFileCount: 1, appBundlePath: app.path,
+            bundleIdentifier: "com.example.app", product: SimulatorAppProductStamp(appBundleURL: app)
+        )
+        let product = try await SimulatorAppLifecycleClient.builtProduct(
+            selection: selection, derivedDataPath: root.appendingPathComponent("DD").path, logged: [], previous: previous
+        )
+        XCTAssertEqual(product.appBundleURL.path, app.path)
+    }
+
+    func testBuildLogsLiveBesideTheMetadataOneReplacedPerIdentity() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let simtool = root.appendingPathComponent(".simtool", isDirectory: true)
+        let cache = SimulatorAppBuildCache(simtoolDirectory: simtool, derivedDataRoot: root.appendingPathComponent("derived"))
+        let identity = SimulatorAppBuildIdentity(projectPath: "/p/App.xcodeproj", scheme: "App")
+        let key = try cache.identityKey(for: identity)
+        XCTAssertEqual(try cache.logURL(for: identity).path, simtool.appendingPathComponent("build/\(key).log").path)
+        XCTAssertEqual(try cache.logURL(for: identity, action: "test").lastPathComponent, "\(key)-test.log")
+        XCTAssertNotEqual(
+            try cache.logURL(for: SimulatorAppBuildIdentity(projectPath: "/p/App.xcodeproj", scheme: "App", buildSettings: ["A=1"])),
+            try cache.logURL(for: identity)
+        )
+    }
+
+    func testTimeLimitsReadInTheirUnits() {
+        XCTAssertEqual(SimulatorAppLifecycleClient.formatDuration(5_400), "1h 30m")
+        XCTAssertEqual(SimulatorAppLifecycleClient.formatDuration(2_700), "45m")
+        XCTAssertEqual(SimulatorAppLifecycleClient.formatDuration(3_600), "1h")
+        XCTAssertEqual(SimulatorAppLifecycleClient.formatDuration(90), "1m 30s")
+        XCTAssertEqual(SimulatorAppLifecycleClient.formatDuration(0.2), "0s")
+    }
+
     func testXcodeBuildsKeepACacheEntryOfTheirOwn() throws {
         let root = try makeTempDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -858,6 +932,7 @@ final class SimulatorAppLifecycleTests: XCTestCase {
             "-configuration", "Debug",
             "-destination", "platform=iOS Simulator,id=DEVICE",
             "-derivedDataPath", derivedData,
+            "-hideShellScriptEnvironment",
             "test",
         ])
 

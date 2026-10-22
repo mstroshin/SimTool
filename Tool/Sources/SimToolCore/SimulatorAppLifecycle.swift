@@ -361,7 +361,12 @@ public struct SimulatorAppBuildPayload: Codable, Equatable, Sendable {
     public var bundleIdentifier: String
     /// The bundle at `appBundlePath`, as an install record keeps it.
     public var product: SimulatorAppProductStamp?
-    /// The build step: xcodebuild's output, or Xcode's `BuildProject` result.
+    /// The build's full log when one ran: xcodebuild's, written to
+    /// `.simtool/build/<identity key>.log` and replaced by the next build of
+    /// the same identity, or Xcode's own for `xcode-mcp`.
+    public var logPath: String?
+    /// The build step: xcodebuild's output (its end), or Xcode's
+    /// `BuildProject` result.
     public var xcodebuild: SimulatorAppProcessStepSummary
 
     public init(
@@ -373,6 +378,7 @@ public struct SimulatorAppBuildPayload: Codable, Equatable, Sendable {
         appBundlePath: String,
         bundleIdentifier: String,
         product: SimulatorAppProductStamp? = nil,
+        logPath: String? = nil,
         xcodebuild: SimulatorAppProcessStepSummary
     ) {
         self.identity = identity
@@ -383,6 +389,7 @@ public struct SimulatorAppBuildPayload: Codable, Equatable, Sendable {
         self.appBundlePath = appBundlePath
         self.bundleIdentifier = bundleIdentifier
         self.product = product
+        self.logPath = logPath
         self.xcodebuild = xcodebuild
     }
 }
@@ -429,6 +436,8 @@ public struct SimulatorAppTestPayload: Codable, Equatable, Sendable {
     public var device: SimulatorDevice
     public var passed: Bool
     public var xcodebuildRan: Bool
+    /// The run's full log, `.simtool/build/<identity key>-test.log`.
+    public var logPath: String?
     public var xcodebuild: SimulatorAppProcessStepSummary
 
     public init(
@@ -436,12 +445,14 @@ public struct SimulatorAppTestPayload: Codable, Equatable, Sendable {
         device: SimulatorDevice,
         passed: Bool,
         xcodebuildRan: Bool,
+        logPath: String? = nil,
         xcodebuild: SimulatorAppProcessStepSummary
     ) {
         self.identity = identity
         self.device = device
         self.passed = passed
         self.xcodebuildRan = xcodebuildRan
+        self.logPath = logPath
         self.xcodebuild = xcodebuild
     }
 }
@@ -478,6 +489,13 @@ public struct SimulatorAppBuildCache {
         try metadataRoot
             .appendingPathComponent(identityKey(for: identity))
             .appendingPathExtension("json")
+    }
+
+    /// Where the full log of the last xcodebuild run of `identity` is kept,
+    /// beside its metadata; each build replaces it.
+    public func logURL(for identity: SimulatorAppBuildIdentity, action: String = "build") throws -> URL {
+        let key = try identityKey(for: identity)
+        return metadataRoot.appendingPathComponent(action == "build" ? "\(key).log" : "\(key)-\(action).log")
     }
 
     public func readMetadata(for identity: SimulatorAppBuildIdentity) -> SimulatorAppBuildCacheMetadata? {
@@ -891,31 +909,51 @@ public enum SimulatorAppLifecycleClient {
             )
         }
 
+        let previous = cache.readMetadata(for: selection.identity)
         let product: XcodeBuildProduct
         let buildStep: SimulatorAppProcessStepSummary
+        let logPath: String?
         switch selection.builder {
         case .xcodebuild:
             let derivedDataPath = plan.derivedDataPath
             let buildArguments = xcodebuildArguments(selection: selection, derivedDataPath: derivedDataPath)
-            let onStdoutLine: (@Sendable (String) -> Void)? = progress.map { progress in
-                { @Sendable line in
-                    if let status = XcodebuildProgress.status(forLine: line) {
-                        progress(status)
-                    }
+            let logURL = try cache.logURL(for: selection.identity)
+            try SimToolDirectory.ensureEnclosing(cache.metadataRoot)
+            let scanner = XcodebuildLogScanner(configuration: selection.identity.configuration)
+            let onStdoutLine: @Sendable (String) -> Void = { line in
+                scanner.consume(line)
+                if let progress, let status = XcodebuildProgress.status(forLine: line) {
+                    progress(status)
                 }
             }
-            let buildOutput = try await ProcessRunner.run(
-                executable: URL(fileURLWithPath: "/usr/bin/xcrun"),
-                arguments: buildArguments,
-                timeoutSeconds: selection.buildTimeLimit,
-                onStdoutLine: onStdoutLine
-            )
+            let buildOutput: ProcessOutput
+            do {
+                buildOutput = try await ProcessRunner.run(
+                    executable: URL(fileURLWithPath: "/usr/bin/xcrun"),
+                    arguments: buildArguments,
+                    timeoutSeconds: selection.buildTimeLimit,
+                    log: ProcessOutputLog(url: logURL),
+                    onStdoutLine: onStdoutLine
+                )
+            } catch let timeout as ProcessTimeoutError {
+                throw SimToolError("xcodebuild ran past the \(formatDuration(timeout.seconds)) time limit for scheme \(selection.identity.scheme) and was stopped; raise or lift it with build.timeout or --build-timeout (0 for no limit).\nFull log: \(logURL.path)")
+            }
             buildStep = SimulatorAppProcessStepSummary(name: "xcodebuild", output: buildOutput)
             guard buildOutput.status == 0 else {
-                let detail = XcodebuildFailure.detail(from: buildOutput)
-                throw SimToolError("xcodebuild failed for scheme \(selection.identity.scheme): \(detail)")
+                let detail = XcodebuildFailure.detail(
+                    stdoutErrorLines: scanner.failureLines,
+                    stdoutTail: buildOutput.stdoutString,
+                    stderr: buildOutput.stderrString
+                )
+                throw SimToolError("xcodebuild failed for scheme \(selection.identity.scheme): \(detail)\nFull log: \(logURL.path)")
             }
-            product = try await builtProduct(selection: selection, derivedDataPath: derivedDataPath)
+            product = try await builtProduct(
+                selection: selection,
+                derivedDataPath: derivedDataPath,
+                logged: scanner.builtApps,
+                previous: previous
+            )
+            logPath = logURL.path
         case .xcodeMCP:
             let outcome = try await XcodeMCPBuilder.build(
                 selection: selection,
@@ -926,6 +964,7 @@ public enum SimulatorAppLifecycleClient {
             try checkConfiguration(outcome.configuration, of: selection)
             buildStep = outcome.stepSummary
             product = XcodeBuildProduct(appBundleURL: outcome.appBundleURL)
+            logPath = outcome.fullLogPath
         }
 
         let bundleIdentifier = try bundleIdentifier(appBundleURL: product.appBundleURL)
@@ -938,7 +977,7 @@ public enum SimulatorAppLifecycleClient {
             bundleIdentifier: bundleIdentifier,
             product: stamp
         )
-        if let previous = cache.readMetadata(for: selection.identity) {
+        if let previous {
             metadata.installRecords = previous.installRecords.filter { $0.value.checksum == fingerprint.checksum && $0.value.product == stamp }
         }
         try cache.write(metadata)
@@ -952,8 +991,20 @@ public enum SimulatorAppLifecycleClient {
             appBundlePath: product.appBundleURL.path,
             bundleIdentifier: bundleIdentifier,
             product: stamp,
+            logPath: logPath,
             xcodebuild: buildStep
         )
+    }
+
+    /// `90m`, `1h 30m`, `45s`: a time limit as the error naming it reads.
+    static func formatDuration(_ seconds: TimeInterval) -> String {
+        let total = Int(seconds.rounded())
+        let hours = total / 3_600, minutes = total % 3_600 / 60, rest = total % 60
+        var parts: [String] = []
+        if hours > 0 { parts.append("\(hours)h") }
+        if minutes > 0 { parts.append("\(minutes)m") }
+        if rest > 0 || parts.isEmpty { parts.append("\(rest)s") }
+        return parts.joined(separator: " ")
     }
 
     private static func productStamp(appBundleURL: URL) throws -> SimulatorAppProductStamp {
@@ -1237,6 +1288,11 @@ public enum SimulatorAppLifecycleClient {
         if let derivedDataPath, !derivedDataPath.isEmpty {
             arguments += ["-derivedDataPath", derivedDataPath]
         }
+        if !showBuildSettings {
+            // Each run-script phase would otherwise print the whole build
+            // environment, hundreds of lines a phase, into the log.
+            arguments.append("-hideShellScriptEnvironment")
+        }
         arguments += selection.identity.buildSettings ?? []
         if showBuildSettings {
             arguments += ["-showBuildSettings", "-json"]
@@ -1265,6 +1321,7 @@ public enum SimulatorAppLifecycleClient {
         if let derivedDataPath, !derivedDataPath.isEmpty {
             arguments += ["-derivedDataPath", derivedDataPath]
         }
+        arguments.append("-hideShellScriptEnvironment")
         arguments += selection.identity.buildSettings ?? []
         arguments.append("test")
         return arguments
@@ -1273,23 +1330,33 @@ public enum SimulatorAppLifecycleClient {
     /// Runs `xcodebuild test` under the selection's time limit.
     public static func test(
         selection: SimulatorAppBuildSelection,
-        device: SimulatorDevice
+        device: SimulatorDevice,
+        cache: SimulatorAppBuildCache = SimulatorAppBuildCache(simtoolDirectory: SimToolDirectory.resolve())
     ) async throws -> SimulatorAppTestPayload {
-        let output = try await ProcessRunner.run(
-            executable: URL(fileURLWithPath: "/usr/bin/xcrun"),
-            arguments: xcodebuildTestArguments(
-                selection: selection,
-                device: device,
-                derivedDataPath: selection.identity.derivedDataPath
-            ),
-            timeoutSeconds: selection.buildTimeLimit
-        )
+        let logURL = try cache.logURL(for: selection.identity, action: "test")
+        try SimToolDirectory.ensureEnclosing(cache.metadataRoot)
+        let output: ProcessOutput
+        do {
+            output = try await ProcessRunner.run(
+                executable: URL(fileURLWithPath: "/usr/bin/xcrun"),
+                arguments: xcodebuildTestArguments(
+                    selection: selection,
+                    device: device,
+                    derivedDataPath: selection.identity.derivedDataPath
+                ),
+                timeoutSeconds: selection.buildTimeLimit,
+                log: ProcessOutputLog(url: logURL)
+            )
+        } catch let timeout as ProcessTimeoutError {
+            throw SimToolError("xcodebuild test ran past the \(formatDuration(timeout.seconds)) time limit for scheme \(selection.identity.scheme) and was stopped; raise or lift it with build.timeout or --build-timeout (0 for no limit).\nFull log: \(logURL.path)")
+        }
         let step = SimulatorAppProcessStepSummary(name: "xcodebuild test", output: output)
         return SimulatorAppTestPayload(
             identity: selection.identity,
             device: device,
             passed: output.status == 0,
             xcodebuildRan: true,
+            logPath: logURL.path,
             xcodebuild: step
         )
     }
@@ -1348,7 +1415,47 @@ public enum SimulatorAppLifecycleClient {
         throw SimToolError("Xcode built scheme \(selection.identity.scheme) in its Run configuration \(built), not \(expected). Set the scheme's Run configuration to \(expected) in Xcode, or ask for configuration \(built).")
     }
 
-    private static func builtProduct(selection: SimulatorAppBuildSelection, derivedDataPath: String) async throws -> XcodeBuildProduct {
+    /// The `.app` a successful xcodebuild run produced. The build's own log
+    /// says where it wrote it, whatever products root Xcode's build location
+    /// settings chose — `-derivedDataPath` does not decide that on its own.
+    /// A build with nothing to do writes nothing; then the bundle this
+    /// identity's previous build made is still the product, provided nothing
+    /// has rebuilt it since. Only when neither tells is xcodebuild asked for
+    /// its build settings: a second run that loads the workspace again.
+    static func builtProduct(
+        selection: SimulatorAppBuildSelection,
+        derivedDataPath: String,
+        logged: [URL],
+        previous: SimulatorAppBuildCacheMetadata?
+    ) async throws -> XcodeBuildProduct {
+        if let url = productInLog(logged, scheme: selection.identity.scheme, previous: previous) {
+            return XcodeBuildProduct(appBundleURL: url)
+        }
+        if logged.isEmpty, let previous, let recorded = previous.product,
+           SimulatorAppProductStamp(appBundleURL: URL(fileURLWithPath: previous.appBundlePath)) == recorded {
+            return XcodeBuildProduct(appBundleURL: URL(fileURLWithPath: previous.appBundlePath))
+        }
+        return try await builtProductFromSettings(selection: selection, derivedDataPath: derivedDataPath)
+    }
+
+    /// The app among those the build log shows written: the one the previous
+    /// build of this identity produced, by name; else the only one; else the
+    /// one named after the scheme. Nil when that leaves more than one (an
+    /// app with an App Clip, say) or none.
+    static func productInLog(_ logged: [URL], scheme: String, previous: SimulatorAppBuildCacheMetadata?) -> URL? {
+        let apps = logged.filter { url in
+            var isDirectory: ObjCBool = false
+            return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) && isDirectory.boolValue
+        }
+        if let previous, let same = apps.first(where: { $0.lastPathComponent == URL(fileURLWithPath: previous.appBundlePath).lastPathComponent }) {
+            return same
+        }
+        if apps.count == 1 { return apps[0] }
+        let named = apps.filter { $0.lastPathComponent == "\(scheme).app" }
+        return named.count == 1 ? named[0] : nil
+    }
+
+    private static func builtProductFromSettings(selection: SimulatorAppBuildSelection, derivedDataPath: String) async throws -> XcodeBuildProduct {
         let settingsArguments = xcodebuildArguments(selection: selection, derivedDataPath: derivedDataPath, showBuildSettings: true)
         let settingsOutput = try await ProcessRunner.runXcrun(settingsArguments)
         if settingsOutput.status == 0, let product = try? parseBuildSettings(settingsOutput.stdout) {
@@ -1451,7 +1558,7 @@ public enum SimulatorAppLifecycleClient {
     }
 }
 
-private struct XcodeBuildProduct: Equatable {
+struct XcodeBuildProduct: Equatable {
     var appBundleURL: URL
 }
 
