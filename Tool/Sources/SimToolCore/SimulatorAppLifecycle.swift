@@ -22,8 +22,9 @@ public struct SimulatorAppBuildIdentity: Codable, Equatable, Sendable {
     public var buildSettings: [String]?
     /// `xcode-mcp` for a build Xcode makes; nil for xcodebuild, so its
     /// identities keep the cache keys they always had. Part of the identity:
-    /// Xcode builds with its own settings into its own DerivedData, so the two
-    /// builders never hand each other a product.
+    /// Xcode builds with its own settings, so the two builders keep cache
+    /// entries of their own — even when, as Xcode's build location settings
+    /// may have it, both write the same `.app` (the product stamp tells).
     public var builder: SimulatorAppBuilder?
 
     public init(
@@ -193,6 +194,45 @@ public struct SimulatorAppBuildFingerprint: Codable, Equatable, Sendable {
     }
 }
 
+/// What a built `.app` is on disk: every file in the bundle by path, size and
+/// modification time, digested. One `.app` path can be rebuilt behind a cache
+/// entry's back — by a build with other settings, by Xcode, or by another
+/// identity sharing the DerivedData — while the sources come back to the
+/// checksum the entry was recorded for. The checksum alone would then hand out
+/// someone else's build; the stamp says whether the bundle is still the one
+/// that was built. Any rebuild relinks or re-signs, which rewrites files in
+/// the bundle, so it changes the stamp; reading it is a stat per file.
+public struct SimulatorAppProductStamp: Codable, Equatable, Sendable {
+    public var digest: String
+    public var fileCount: Int
+
+    public init(digest: String, fileCount: Int) {
+        self.digest = digest
+        self.fileCount = fileCount
+    }
+
+    /// The stamp of the bundle at `appBundleURL`, or nil when there is no
+    /// bundle directory there.
+    public init?(appBundleURL: URL) {
+        let root = appBundleURL.standardizedFileURL
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDirectory), isDirectory.boolValue,
+              let enumerator = FileManager.default.enumerator(atPath: root.path)
+        else { return nil }
+        var entries: [String] = []
+        for case let relativePath as String in enumerator {
+            var info = stat()
+            guard lstat(root.appendingPathComponent(relativePath).path, &info) == 0,
+                  (info.st_mode & S_IFMT) != S_IFDIR
+            else { continue }
+            entries.append("\(relativePath)\0\(info.st_size)\0\(info.st_mtimespec.tv_sec).\(info.st_mtimespec.tv_nsec)")
+        }
+        entries.sort()
+        let digest = SHA256.hash(data: Data(entries.joined(separator: "\n").utf8))
+        self.init(digest: digest.map { String(format: "%02x", $0) }.joined(), fileCount: entries.count)
+    }
+}
+
 public struct SimulatorAppProcessStepSummary: Codable, Equatable, Sendable {
     public var name: String
     public var ran: Bool
@@ -227,12 +267,22 @@ public struct SimulatorAppInstallRecord: Codable, Equatable, Sendable {
     public var deviceUDID: String
     public var checksum: String
     public var bundleIdentifier: String
+    /// The bundle that was installed. Nil in records written before SimTool
+    /// stamped products, which therefore never match a build.
+    public var product: SimulatorAppProductStamp?
     public var installedAt: Date
 
-    public init(deviceUDID: String, checksum: String, bundleIdentifier: String, installedAt: Date = Date()) {
+    public init(
+        deviceUDID: String,
+        checksum: String,
+        bundleIdentifier: String,
+        product: SimulatorAppProductStamp? = nil,
+        installedAt: Date = Date()
+    ) {
         self.deviceUDID = deviceUDID
         self.checksum = checksum
         self.bundleIdentifier = bundleIdentifier
+        self.product = product
         self.installedAt = installedAt
     }
 }
@@ -243,6 +293,10 @@ public struct SimulatorAppBuildCacheMetadata: Codable, Equatable, Sendable {
     public var inputFileCount: Int
     public var appBundlePath: String
     public var bundleIdentifier: String
+    /// The bundle at `appBundlePath` as it was built. A cache hit needs the
+    /// bundle to still be exactly this; nil (metadata from before SimTool
+    /// stamped products) never hits.
+    public var product: SimulatorAppProductStamp?
     public var builtAt: Date
     public var installRecords: [String: SimulatorAppInstallRecord]
 
@@ -252,6 +306,7 @@ public struct SimulatorAppBuildCacheMetadata: Codable, Equatable, Sendable {
         inputFileCount: Int,
         appBundlePath: String,
         bundleIdentifier: String,
+        product: SimulatorAppProductStamp? = nil,
         builtAt: Date = Date(),
         installRecords: [String: SimulatorAppInstallRecord] = [:]
     ) {
@@ -260,6 +315,7 @@ public struct SimulatorAppBuildCacheMetadata: Codable, Equatable, Sendable {
         self.inputFileCount = inputFileCount
         self.appBundlePath = appBundlePath
         self.bundleIdentifier = bundleIdentifier
+        self.product = product
         self.builtAt = builtAt
         self.installRecords = installRecords
     }
@@ -275,6 +331,8 @@ public struct SimulatorAppBuildPayload: Codable, Equatable, Sendable {
     public var xcodebuildRan: Bool
     public var appBundlePath: String
     public var bundleIdentifier: String
+    /// The bundle at `appBundlePath`, as an install record keeps it.
+    public var product: SimulatorAppProductStamp?
     /// The build step: xcodebuild's output, or Xcode's `BuildProject` result.
     public var xcodebuild: SimulatorAppProcessStepSummary
 
@@ -286,6 +344,7 @@ public struct SimulatorAppBuildPayload: Codable, Equatable, Sendable {
         xcodebuildRan: Bool,
         appBundlePath: String,
         bundleIdentifier: String,
+        product: SimulatorAppProductStamp? = nil,
         xcodebuild: SimulatorAppProcessStepSummary
     ) {
         self.identity = identity
@@ -295,6 +354,7 @@ public struct SimulatorAppBuildPayload: Codable, Equatable, Sendable {
         self.xcodebuildRan = xcodebuildRan
         self.appBundlePath = appBundlePath
         self.bundleIdentifier = bundleIdentifier
+        self.product = product
         self.xcodebuild = xcodebuild
     }
 }
@@ -398,12 +458,14 @@ public struct SimulatorAppBuildCache {
         return try? JSON.decoder.decode(SimulatorAppBuildCacheMetadata.self, from: data)
     }
 
+    /// The entry for `identity` when it was built from sources with this
+    /// `checksum` and its bundle is still the one that build produced — not
+    /// rebuilt since by anything else that writes to the same path.
     public func validMetadata(for identity: SimulatorAppBuildIdentity, checksum: String) -> SimulatorAppBuildCacheMetadata? {
-        guard let metadata = readMetadata(for: identity), metadata.checksum == checksum else { return nil }
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: metadata.appBundlePath, isDirectory: &isDirectory), isDirectory.boolValue else {
-            return nil
-        }
+        guard let metadata = readMetadata(for: identity), metadata.checksum == checksum,
+              let recorded = metadata.product,
+              SimulatorAppProductStamp(appBundleURL: URL(fileURLWithPath: metadata.appBundlePath)) == recorded
+        else { return nil }
         return metadata
     }
 
@@ -418,13 +480,15 @@ public struct SimulatorAppBuildCache {
         identity: SimulatorAppBuildIdentity,
         checksum: String,
         bundleIdentifier: String,
+        product: SimulatorAppProductStamp? = nil,
         deviceUDID: String
     ) throws {
         guard var metadata = readMetadata(for: identity) else { return }
         metadata.installRecords[deviceUDID] = SimulatorAppInstallRecord(
             deviceUDID: deviceUDID,
             checksum: checksum,
-            bundleIdentifier: bundleIdentifier
+            bundleIdentifier: bundleIdentifier,
+            product: product
         )
         try write(metadata)
     }
@@ -673,6 +737,7 @@ public enum SimulatorAppLifecycleClient {
                 xcodebuildRan: false,
                 appBundlePath: metadata.appBundlePath,
                 bundleIdentifier: metadata.bundleIdentifier,
+                product: metadata.product,
                 xcodebuild: SimulatorAppProcessStepSummary(name: "xcodebuild", ran: false)
             )
         }
@@ -715,15 +780,17 @@ public enum SimulatorAppLifecycleClient {
         }
 
         let bundleIdentifier = try bundleIdentifier(appBundleURL: product.appBundleURL)
+        let stamp = try productStamp(appBundleURL: product.appBundleURL)
         var metadata = SimulatorAppBuildCacheMetadata(
             identity: selection.identity,
             checksum: fingerprint.checksum,
             inputFileCount: fingerprint.inputFileCount,
             appBundlePath: product.appBundleURL.path,
-            bundleIdentifier: bundleIdentifier
+            bundleIdentifier: bundleIdentifier,
+            product: stamp
         )
         if let previous = cache.readMetadata(for: selection.identity) {
-            metadata.installRecords = previous.installRecords.filter { $0.value.checksum == fingerprint.checksum }
+            metadata.installRecords = previous.installRecords.filter { $0.value.checksum == fingerprint.checksum && $0.value.product == stamp }
         }
         try cache.write(metadata)
 
@@ -735,8 +802,16 @@ public enum SimulatorAppLifecycleClient {
             xcodebuildRan: true,
             appBundlePath: product.appBundleURL.path,
             bundleIdentifier: bundleIdentifier,
+            product: stamp,
             xcodebuild: buildStep
         )
+    }
+
+    private static func productStamp(appBundleURL: URL) throws -> SimulatorAppProductStamp {
+        guard let stamp = SimulatorAppProductStamp(appBundleURL: appBundleURL) else {
+            throw SimToolError("App bundle not found: \(appBundleURL.path)")
+        }
+        return stamp
     }
 
     /// Records checksum-cache metadata for an app built outside SimTool — for
@@ -759,18 +834,20 @@ public enum SimulatorAppLifecycleClient {
         }
         let fingerprint = try SimulatorAppBuildFingerprinter.fingerprint(selection: selection, cacheRoot: cache.derivedDataRoot)
         let bundleIdentifier = try bundleIdentifier(appBundleURL: appBundleURL)
+        let stamp = try productStamp(appBundleURL: appBundleURL)
         var metadata = SimulatorAppBuildCacheMetadata(
             identity: selection.identity,
             checksum: fingerprint.checksum,
             inputFileCount: fingerprint.inputFileCount,
             appBundlePath: appBundleURL.standardizedFileURL.path,
-            bundleIdentifier: bundleIdentifier
+            bundleIdentifier: bundleIdentifier,
+            product: stamp
         )
-        // Drop install records for older checksums: the externally built app no
-        // longer matches what any device has installed. Records matching the new
-        // checksum (a rebuild with no source change) stay valid.
+        // Drop install records of any other build: what a device has installed
+        // matches the externally built app only when it is this very bundle.
+        // A record of it (recording the same build twice) stays valid.
         if let previous = cache.readMetadata(for: selection.identity) {
-            metadata.installRecords = previous.installRecords.filter { $0.value.checksum == fingerprint.checksum }
+            metadata.installRecords = previous.installRecords.filter { $0.value.checksum == fingerprint.checksum && $0.value.product == stamp }
         }
         try cache.write(metadata)
 
@@ -782,6 +859,7 @@ public enum SimulatorAppLifecycleClient {
             xcodebuildRan: false,
             appBundlePath: metadata.appBundlePath,
             bundleIdentifier: bundleIdentifier,
+            product: stamp,
             xcodebuild: SimulatorAppProcessStepSummary(name: "xcodebuild", ran: false)
         )
     }
@@ -821,18 +899,25 @@ public enum SimulatorAppLifecycleClient {
     /// Whether the bundle recorded as installed on this device is the one we are
     /// about to run. `force` reinstalls regardless; a fresh `xcodebuild` means
     /// whatever is on the device is stale even when the checksum matches, because
-    /// the record was written for the previous bundle.
+    /// the record was written for the previous bundle. Sources with the same
+    /// checksum do not make the same bundle either — a build with other
+    /// settings, or Xcode's, may have replaced it since — so the record must
+    /// name this very `product`.
     public static func needsInstall(
         checksum: String,
         bundleIdentifier: String,
+        product: SimulatorAppProductStamp?,
         installed: SimulatorAppInstallRecord?,
         xcodebuildRan: Bool,
         force: Bool
     ) -> Bool {
-        force
+        guard let installed else { return true }
+        return force
             || xcodebuildRan
-            || installed?.checksum != checksum
-            || installed?.bundleIdentifier != bundleIdentifier
+            || installed.checksum != checksum
+            || installed.bundleIdentifier != bundleIdentifier
+            || product == nil
+            || installed.product != product
     }
 
     /// Brings the app on the device up to date without launching it — what a
@@ -851,6 +936,7 @@ public enum SimulatorAppLifecycleClient {
         guard needsInstall(
             checksum: buildPayload.checksum,
             bundleIdentifier: buildPayload.bundleIdentifier,
+            product: buildPayload.product,
             installed: installRecord,
             xcodebuildRan: buildPayload.xcodebuildRan,
             force: force
@@ -866,6 +952,7 @@ public enum SimulatorAppLifecycleClient {
             identity: buildPayload.identity,
             checksum: buildPayload.checksum,
             bundleIdentifier: buildPayload.bundleIdentifier,
+            product: buildPayload.product,
             deviceUDID: device.udid
         )
         return true
@@ -894,6 +981,7 @@ public enum SimulatorAppLifecycleClient {
         let needsInstall = needsInstall(
             checksum: buildPayload.checksum,
             bundleIdentifier: buildPayload.bundleIdentifier,
+            product: buildPayload.product,
             installed: installRecord,
             xcodebuildRan: buildPayload.xcodebuildRan,
             force: force
@@ -910,6 +998,7 @@ public enum SimulatorAppLifecycleClient {
                 identity: buildPayload.identity,
                 checksum: buildPayload.checksum,
                 bundleIdentifier: buildPayload.bundleIdentifier,
+                product: buildPayload.product,
                 deviceUDID: device.udid
             )
         }
@@ -934,6 +1023,7 @@ public enum SimulatorAppLifecycleClient {
                 identity: buildPayload.identity,
                 checksum: buildPayload.checksum,
                 bundleIdentifier: buildPayload.bundleIdentifier,
+                product: buildPayload.product,
                 deviceUDID: device.udid
             )
             progress?("Launching…")

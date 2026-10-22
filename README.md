@@ -613,9 +613,19 @@ after each upgrade.
 
 Launch builds only when the build-input checksum changes. If the checksum matches
 the last successful build, SimTool reuses the cached `.app`; if the selected
-simulator does not have that checksum installed yet, SimTool installs it before
+simulator does not have that build installed yet, SimTool installs it before
 launching. Checksum metadata is stored in `.simtool/build/` inside the project;
 build products (DerivedData) stay in `~/Library/Caches/SimTool`.
+
+A cache hit also needs the `.app` to still be the one that build produced.
+One bundle path is often written by more than one build — a build with other
+`--build-setting`s into the same DerivedData, Xcode (with `xcode-mcp` or from
+its UI) when its build location settings put products next to the workspace,
+another checkout's identity sharing a configured `derivedDataPath` — so SimTool
+records a stamp of the bundle (every file's size and modification time) with
+each build and checks it before reusing one. A bundle rebuilt since by anything
+else is a cache miss, and a device whose installed build is not that very
+bundle gets it reinstalled.
 
 ```sh
 swift run simtool app launch --device <udid-or-name> --workspace MyApp.xcworkspace --scheme MyApp --json

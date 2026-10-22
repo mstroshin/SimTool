@@ -161,30 +161,111 @@ final class SimulatorAppLifecycleTests: XCTestCase {
     // What a test run asks before it records anything: is the build on the
     // device the one we are about to judge?
     func testInstallIsNeededOnlyWhenTheDeviceHasSomethingElse() {
+        let product = SimulatorAppProductStamp(digest: "p1", fileCount: 3)
         let record = SimulatorAppInstallRecord(
             deviceUDID: "UDID",
             checksum: "abc",
-            bundleIdentifier: "com.example.app"
+            bundleIdentifier: "com.example.app",
+            product: product
         )
+        func needsInstall(
+            checksum: String = "abc",
+            bundleIdentifier: String = "com.example.app",
+            product: SimulatorAppProductStamp? = product,
+            installed: SimulatorAppInstallRecord? = record,
+            xcodebuildRan: Bool = false,
+            force: Bool = false
+        ) -> Bool {
+            SimulatorAppLifecycleClient.needsInstall(
+                checksum: checksum, bundleIdentifier: bundleIdentifier, product: product,
+                installed: installed, xcodebuildRan: xcodebuildRan, force: force
+            )
+        }
 
-        XCTAssertFalse(SimulatorAppLifecycleClient.needsInstall(
-            checksum: "abc", bundleIdentifier: "com.example.app", installed: record, xcodebuildRan: false, force: false
-        ))
-        XCTAssertTrue(SimulatorAppLifecycleClient.needsInstall(
-            checksum: "def", bundleIdentifier: "com.example.app", installed: record, xcodebuildRan: false, force: false
-        ), "a changed checksum is a different build")
-        XCTAssertTrue(SimulatorAppLifecycleClient.needsInstall(
-            checksum: "abc", bundleIdentifier: "com.example.other", installed: record, xcodebuildRan: false, force: false
-        ), "a different bundle id is a different app")
-        XCTAssertTrue(SimulatorAppLifecycleClient.needsInstall(
-            checksum: "abc", bundleIdentifier: "com.example.app", installed: record, xcodebuildRan: true, force: false
-        ), "a fresh xcodebuild means the bundle on the device is stale")
-        XCTAssertTrue(SimulatorAppLifecycleClient.needsInstall(
-            checksum: "abc", bundleIdentifier: "com.example.app", installed: SimulatorAppInstallRecord?.none, xcodebuildRan: false, force: false
-        ), "nothing recorded means nothing installed")
-        XCTAssertTrue(SimulatorAppLifecycleClient.needsInstall(
-            checksum: "abc", bundleIdentifier: "com.example.app", installed: record, xcodebuildRan: false, force: true
-        ))
+        XCTAssertFalse(needsInstall())
+        XCTAssertTrue(needsInstall(checksum: "def"), "a changed checksum is a different build")
+        XCTAssertTrue(needsInstall(bundleIdentifier: "com.example.other"), "a different bundle id is a different app")
+        XCTAssertTrue(needsInstall(xcodebuildRan: true), "a fresh xcodebuild means the bundle on the device is stale")
+        XCTAssertTrue(needsInstall(installed: nil), "nothing recorded means nothing installed")
+        XCTAssertTrue(needsInstall(force: true))
+        // The same sources do not make the same bundle: one rebuilt with other
+        // settings, or by Xcode, since it was installed is another build.
+        XCTAssertTrue(needsInstall(product: SimulatorAppProductStamp(digest: "p2", fileCount: 3)), "another bundle at the same checksum")
+        XCTAssertTrue(needsInstall(product: nil), "an unknown bundle cannot be the installed one")
+        var legacy = record
+        legacy.product = nil
+        XCTAssertTrue(needsInstall(installed: legacy), "a record from before product stamps names no bundle")
+    }
+
+    func testProductStampChangesWhenAnythingInTheBundleIsRewritten() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let app = try makeApp(at: root.appendingPathComponent("Example.app", isDirectory: true))
+        try Data("dylib v1".utf8).write(to: app.appendingPathComponent("Example.debug.dylib"))
+        try FileManager.default.createDirectory(at: app.appendingPathComponent("Base.lproj"), withIntermediateDirectories: true)
+        try Data("strings".utf8).write(to: app.appendingPathComponent("Base.lproj/Main.strings"))
+
+        let stamp = try XCTUnwrap(SimulatorAppProductStamp(appBundleURL: app))
+        XCTAssertEqual(stamp.fileCount, 4)
+        XCTAssertEqual(SimulatorAppProductStamp(appBundleURL: app), stamp, "reading it twice reads the same bundle")
+
+        // With ENABLE_DEBUG_DYLIB the executable is a stub: a rebuild relinks
+        // the dylib beside it and leaves the stub alone.
+        let dylib = app.appendingPathComponent("Example.debug.dylib")
+        try Data("dylib v2".utf8).write(to: dylib)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: 5)], ofItemAtPath: dylib.path)
+        let relinked = try XCTUnwrap(SimulatorAppProductStamp(appBundleURL: app))
+        XCTAssertNotEqual(relinked, stamp)
+
+        // A resource rewritten with the same size, at another time.
+        let strings = app.appendingPathComponent("Base.lproj/Main.strings")
+        try Data("STRINGS".utf8).write(to: strings)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: 10)], ofItemAtPath: strings.path)
+        XCTAssertNotEqual(SimulatorAppProductStamp(appBundleURL: app), relinked)
+
+        XCTAssertNil(SimulatorAppProductStamp(appBundleURL: root.appendingPathComponent("Missing.app")))
+        XCTAssertNil(SimulatorAppProductStamp(appBundleURL: strings), "a file is no bundle")
+    }
+
+    // The .app one checksum was recorded for can be rebuilt behind the cache's
+    // back — by a build with other settings or by Xcode into the same
+    // DerivedData — while the sources come back to that checksum.
+    func testACacheEntryMissesOnceItsBundleIsRebuiltByAnythingElse() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let project = root.appendingPathComponent("Example.xcodeproj", isDirectory: true)
+        try write("Example.xcodeproj/project.pbxproj", contents: "project", root: root)
+        let cache = SimulatorAppBuildCache(
+            simtoolDirectory: root.appendingPathComponent(".simtool", isDirectory: true),
+            derivedDataRoot: root.appendingPathComponent("derived", isDirectory: true)
+        )
+        let selection = try SimulatorAppBuildSelection.validated(workspacePath: nil, projectPath: project.path, scheme: "Example")
+        let app = try makeApp(at: root.appendingPathComponent("Shared/Build/Products/Debug-iphonesimulator/Example.app", isDirectory: true))
+        let fingerprint = try SimulatorAppBuildFingerprinter.fingerprint(selection: selection, cacheRoot: cache.derivedDataRoot)
+        var metadata = SimulatorAppBuildCacheMetadata(
+            identity: selection.identity,
+            checksum: fingerprint.checksum,
+            inputFileCount: fingerprint.inputFileCount,
+            appBundlePath: app.path,
+            bundleIdentifier: "com.example.app",
+            product: SimulatorAppProductStamp(appBundleURL: app)
+        )
+        try cache.write(metadata)
+        XCTAssertTrue(try SimulatorAppLifecycleClient.plan(selection: selection, cache: cache).isCacheHit)
+
+        // Another build relinks the executable in place.
+        let executable = app.appendingPathComponent("Example")
+        try Data("binary v2 other settings".utf8).write(to: executable)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: 5)], ofItemAtPath: executable.path)
+        let plan = try SimulatorAppLifecycleClient.plan(selection: selection, cache: cache)
+        XCTAssertEqual(plan.fingerprint.checksum, fingerprint.checksum, "the sources are where they were")
+        XCTAssertFalse(plan.isCacheHit, "but the bundle is someone else's build")
+
+        // Metadata from before SimTool stamped products cannot tell, so it misses.
+        metadata.product = nil
+        try cache.write(metadata)
+        XCTAssertFalse(try SimulatorAppLifecycleClient.plan(selection: selection, cache: cache).isCacheHit)
+        XCTAssertFalse(try JSON.string(metadata).contains("\"product\""), "an absent stamp is left out, not written as null")
     }
 
     func testCacheMetadataReadWriteValidationCorruptMissesAndInstallRecords() throws {
@@ -197,15 +278,15 @@ final class SimulatorAppLifecycleTests: XCTestCase {
         )
         let project = root.appendingPathComponent("Example.xcodeproj", isDirectory: true)
         try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
-        let app = root.appendingPathComponent("Build/Example.app", isDirectory: true)
-        try FileManager.default.createDirectory(at: app, withIntermediateDirectories: true)
+        let app = try makeApp(at: root.appendingPathComponent("Build/Example.app", isDirectory: true))
         let selection = try SimulatorAppBuildSelection.validated(workspacePath: nil, projectPath: project.path, scheme: "Example")
         let metadata = SimulatorAppBuildCacheMetadata(
             identity: selection.identity,
             checksum: "abc",
             inputFileCount: 2,
             appBundlePath: app.path,
-            bundleIdentifier: "com.example.app"
+            bundleIdentifier: "com.example.app",
+            product: SimulatorAppProductStamp(appBundleURL: app)
         )
 
         try cache.write(metadata)
@@ -276,22 +357,31 @@ final class SimulatorAppLifecycleTests: XCTestCase {
 
         // The external .app lives under Build/, which the fingerprinter excludes,
         // so its Info.plist never perturbs the source checksum.
-        let app = root.appendingPathComponent("Build/Example.app", isDirectory: true)
-        try FileManager.default.createDirectory(at: app, withIntermediateDirectories: true)
+        let app = try makeApp(at: root.appendingPathComponent("Build/Example.app", isDirectory: true))
         let plist = try PropertyListSerialization.data(fromPropertyList: ["CFBundleIdentifier": "com.example.app"], format: .xml, options: 0)
         try plist.write(to: app.appendingPathComponent("Info.plist"))
 
-        // A pre-existing install record for a different checksum must be pruned.
+        let expected = try SimulatorAppBuildFingerprinter.fingerprint(selection: selection, cacheRoot: cache.derivedDataRoot)
+        // Pre-existing install records of other builds must be pruned: one for
+        // a different checksum, and one for the same checksum but another
+        // bundle — what the external build just replaced.
         try cache.write(SimulatorAppBuildCacheMetadata(
             identity: selection.identity,
             checksum: "stale",
             inputFileCount: 0,
             appBundlePath: app.path,
             bundleIdentifier: "com.example.app",
-            installRecords: ["DEVICE": SimulatorAppInstallRecord(deviceUDID: "DEVICE", checksum: "stale", bundleIdentifier: "com.example.app")]
+            installRecords: [
+                "DEVICE": SimulatorAppInstallRecord(deviceUDID: "DEVICE", checksum: "stale", bundleIdentifier: "com.example.app"),
+                "OTHER": SimulatorAppInstallRecord(
+                    deviceUDID: "OTHER",
+                    checksum: expected.checksum,
+                    bundleIdentifier: "com.example.app",
+                    product: SimulatorAppProductStamp(digest: "replaced", fileCount: 2)
+                ),
+            ]
         ))
 
-        let expected = try SimulatorAppBuildFingerprinter.fingerprint(selection: selection, cacheRoot: cache.derivedDataRoot)
         let payload = try SimulatorAppLifecycleClient.recordExternalBuild(selection: selection, appBundleURL: app, cache: cache)
 
         XCTAssertEqual(payload.checksum, expected.checksum)
@@ -304,6 +394,8 @@ final class SimulatorAppLifecycleTests: XCTestCase {
         let valid = try XCTUnwrap(cache.validMetadata(for: selection.identity, checksum: expected.checksum))
         XCTAssertEqual(valid.appBundlePath, app.standardizedFileURL.path)
         XCTAssertTrue(valid.installRecords.isEmpty)
+        XCTAssertEqual(payload.product, SimulatorAppProductStamp(appBundleURL: app))
+        XCTAssertEqual(valid.product, payload.product)
 
         // A missing bundle is a hard error.
         try FileManager.default.removeItem(at: app)
@@ -322,8 +414,7 @@ final class SimulatorAppLifecycleTests: XCTestCase {
             derivedDataRoot: root.appendingPathComponent("derived", isDirectory: true)
         )
         let selection = try SimulatorAppBuildSelection.validated(workspacePath: nil, projectPath: project.path, scheme: "Example")
-        let app = root.appendingPathComponent("Build/Example.app", isDirectory: true)
-        try FileManager.default.createDirectory(at: app, withIntermediateDirectories: true)
+        let app = try makeApp(at: root.appendingPathComponent("Build/Example.app", isDirectory: true))
 
         let fingerprint = try SimulatorAppBuildFingerprinter.fingerprint(selection: selection, cacheRoot: cache.derivedDataRoot)
         try cache.write(SimulatorAppBuildCacheMetadata(
@@ -331,7 +422,8 @@ final class SimulatorAppLifecycleTests: XCTestCase {
             checksum: fingerprint.checksum,
             inputFileCount: fingerprint.inputFileCount,
             appBundlePath: app.path,
-            bundleIdentifier: "com.example.app"
+            bundleIdentifier: "com.example.app",
+            product: SimulatorAppProductStamp(appBundleURL: app)
         ))
 
         // Planning is the checksum stage: it fingerprints sources and resolves
@@ -373,8 +465,7 @@ final class SimulatorAppLifecycleTests: XCTestCase {
 
         // A build for any simulator — say `app build` without --device — is
         // reused by a run that builds for one, and the other way round.
-        let app = root.appendingPathComponent("Build/Example.app", isDirectory: true)
-        try FileManager.default.createDirectory(at: app, withIntermediateDirectories: true)
+        let app = try makeApp(at: root.appendingPathComponent("Build/Example.app", isDirectory: true))
         let fingerprint = try SimulatorAppBuildFingerprinter.fingerprint(selection: anySimulator, cacheRoot: cache.derivedDataRoot)
         XCTAssertEqual(try SimulatorAppBuildFingerprinter.fingerprint(selection: oneSimulator, cacheRoot: cache.derivedDataRoot), fingerprint)
         try cache.write(SimulatorAppBuildCacheMetadata(
@@ -382,7 +473,8 @@ final class SimulatorAppLifecycleTests: XCTestCase {
             checksum: fingerprint.checksum,
             inputFileCount: fingerprint.inputFileCount,
             appBundlePath: app.path,
-            bundleIdentifier: "com.example.app"
+            bundleIdentifier: "com.example.app",
+            product: SimulatorAppProductStamp(appBundleURL: app)
         ))
         XCTAssertTrue(try SimulatorAppLifecycleClient.plan(selection: oneSimulator, cache: cache).isCacheHit)
         XCTAssertTrue(try SimulatorAppLifecycleClient.plan(selection: anySimulator, cache: cache).isCacheHit)
@@ -460,15 +552,15 @@ final class SimulatorAppLifecycleTests: XCTestCase {
             derivedDataRoot: root.appendingPathComponent("derived", isDirectory: true)
         )
         let selection = try SimulatorAppBuildSelection.validated(workspacePath: nil, projectPath: project.path, scheme: "Example")
-        let app = root.appendingPathComponent("Build/Example.app", isDirectory: true)
-        try FileManager.default.createDirectory(at: app, withIntermediateDirectories: true)
+        let app = try makeApp(at: root.appendingPathComponent("Build/Example.app", isDirectory: true))
         let fingerprint = try SimulatorAppBuildFingerprinter.fingerprint(selection: selection, cacheRoot: cache.derivedDataRoot)
         try cache.write(SimulatorAppBuildCacheMetadata(
             identity: selection.identity,
             checksum: fingerprint.checksum,
             inputFileCount: fingerprint.inputFileCount,
             appBundlePath: app.path,
-            bundleIdentifier: "com.example.app"
+            bundleIdentifier: "com.example.app",
+            product: SimulatorAppProductStamp(appBundleURL: app)
         ))
 
         XCTAssertTrue(try SimulatorAppLifecycleClient.plan(selection: selection, cache: cache).isCacheHit)
@@ -611,6 +703,21 @@ final class SimulatorAppLifecycleTests: XCTestCase {
         XCTAssertTrue(json.contains("\"xcodebuildRan\":true"))
         XCTAssertTrue(json.contains("\"scheme\":\"ExampleUITests\""))
         XCTAssertTrue(json.contains("\"status\":65"))
+    }
+
+    /// A bundle with what a built app has at least: an Info.plist naming the
+    /// executable, and the executable.
+    @discardableResult
+    private func makeApp(at app: URL, executable: String = "Example", bundleIdentifier: String = "com.example.app") throws -> URL {
+        try FileManager.default.createDirectory(at: app, withIntermediateDirectories: true)
+        let plist = try PropertyListSerialization.data(
+            fromPropertyList: ["CFBundleIdentifier": bundleIdentifier, "CFBundleExecutable": executable],
+            format: .xml,
+            options: 0
+        )
+        try plist.write(to: app.appendingPathComponent("Info.plist"))
+        try Data("binary v1".utf8).write(to: app.appendingPathComponent(executable))
+        return app
     }
 
     private func makeTempDirectory() throws -> URL {
