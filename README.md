@@ -573,14 +573,29 @@ swift run simtool app build --workspace MyApp.xcworkspace --scheme MyApp \
 A flag wins over the config for the same key. Settings are part of the build
 cache key, so a build with other settings never reuses a cached one.
 
+A build runs as long as it takes: a cold build of a large project, sharing the
+machine with other builds, can take well over an hour, and stopping one that is
+merely slow throws its work away. To bound it anyway, set `build.timeout` in the
+config (`2700`, `45m`, `1.5h`) or pass `--build-timeout` to `run`, `app build`,
+`app launch` or `app test` (`0` lifts a configured limit); a build that runs
+past it is stopped and fails. It applies to xcodebuild and to Xcode's build
+with `xcode-mcp` alike, and is not part of the cache key.
+
+Naming the configured workspace or project with `--workspace` / `--project`
+still builds the configured app: the command takes `build.settings`,
+`build.builder`, `build.derivedDataPath` and `build.timeout` from the config,
+so it lands in the DerivedData `run` builds into and shares its cache entry
+instead of starting a second cold build. A build of any other workspace or
+project takes none of them.
+
 ### Building in Xcode over MCP
 
 Xcode 27 offers its build to agents as MCP tools (`xcrun mcpbridge`), and SimTool
 can build through them instead of running xcodebuild: set `builder: xcode-mcp`
 in the config's `build:` block, or pass `--builder xcode-mcp` to `run`,
 `app build` or `app launch` (`--builder xcodebuild` switches back for one
-command). Xcode keeps the workspace loaded between builds and builds into the
-DerivedData its own UI uses, so a build there is often far faster than a cold
+command). Xcode keeps the workspace loaded between builds and builds where a
+build from its own UI would, so a build there is often far faster than a cold
 xcodebuild.
 
 ```sh
@@ -596,12 +611,16 @@ Xcode where the `.app` landed. The workspace stays open for the next build;
 opened.
 
 Xcode decides the build itself: the scheme's Run configuration, the project's
-own settings, its own DerivedData. So an Xcode build leaves the config's
-`derivedDataPath` and `settings` out (they still apply to xcodebuild), refuses
-`--derived-data-path` and `--build-setting`, and fails when the scheme's Run
-configuration is not the `configuration` asked for. Its builds get a cache
-entry of their own: switching builders builds once rather than reusing the
-other builder's `.app`.
+own settings, and where it builds — the DerivedData its own build location
+settings name. That is not necessarily a folder of its own: with Xcode set to
+put build products next to the workspace (Settings → Locations → Advanced),
+xcodebuild's products land in the very same place, whatever `-derivedDataPath`
+says. So an Xcode build leaves the config's `derivedDataPath` and `settings` out
+(they still apply to xcodebuild), refuses `--derived-data-path` and
+`--build-setting`, and fails when the scheme's Run configuration is not the
+`configuration` asked for. Its builds get a cache entry of their own, and
+whichever builder last wrote a shared `.app`, the other's cache entry sees the
+bundle changed and builds again rather than reusing it.
 
 The first time, Xcode asks you to approve SimTool as an agent and to let it
 open the project's folder — from the Xcode MCP menu bar icon, or with
@@ -613,13 +632,67 @@ after each upgrade.
 
 Launch builds only when the build-input checksum changes. If the checksum matches
 the last successful build, SimTool reuses the cached `.app`; if the selected
-simulator does not have that checksum installed yet, SimTool installs it before
+simulator does not have that build installed yet, SimTool installs it before
 launching. Checksum metadata is stored in `.simtool/build/` inside the project;
 build products (DerivedData) stay in `~/Library/Caches/SimTool`.
 
 ```sh
 swift run simtool app launch --device <udid-or-name> --workspace MyApp.xcworkspace --scheme MyApp --json
 swift run simtool app launch --device <udid-or-name> --workspace MyApp.xcworkspace --scheme MyApp --json
+```
+
+A cache hit also needs the `.app` to still be the one that build produced.
+One bundle path is often written by more than one build — a build with other
+`--build-setting`s into the same DerivedData, Xcode (with `xcode-mcp` or from
+its UI) when its build location settings put products next to the workspace,
+another checkout's identity sharing a configured `derivedDataPath` — so SimTool
+records a stamp of the bundle (every file's size and modification time) with
+each build and checks it before reusing one. A bundle rebuilt since by anything
+else is a cache miss, and a device whose installed build is not that very
+bundle gets it reinstalled. The install holds the build's lock (below), so no
+other build rewrites the bundle while it is copied, and refuses a bundle that
+has changed since its build.
+
+Each xcodebuild run writes its full log to `.simtool/build/<key>.log` beside the
+cache metadata (`<key>-test.log` for `app test`), replacing the previous one for
+the same build; a failure names it (`Full log: …`) after the errors it picked
+out, and `--json` reports it as `logPath` (Xcode's own log with `xcode-mcp`).
+Only the end of the output is kept in memory, and run-script phases leave the
+build environment out of it (`-hideShellScriptEnvironment`). The built `.app`
+is located from that log — where the build wrote it, whichever products
+directory Xcode's build location settings chose — so locating it costs no
+second xcodebuild run; only when the log cannot tell is xcodebuild asked for
+its build settings.
+
+Two builds never write one DerivedData at once — two xcodebuild runs there fail
+with "database is locked". A build (and `app test`) takes a lock on its
+DerivedData and on the project's directory, where Xcode's build location
+settings can put products whatever `-derivedDataPath` says; a second build —
+`test run` in one terminal while `run` builds in another — waits for the first
+and says whom it waits for (on the progress line, or on stderr with `--json`).
+If the build it waited for was of the same sources, it reuses that one instead
+of building again. The locks live in `~/Library/Caches/SimTool/app-builds/locks`
+and vanish with the process that holds them, so a killed build leaves none
+behind. Nor does an interrupted one leave its xcodebuild running: xcodebuild
+runs in a process group of its own that Ctrl-C at the terminal does not reach,
+so SimTool, interrupted, interrupts it (and what it started) and waits for it
+to cancel before exiting — and before letting go of the lock. The same happens
+past a build's time limit; either way the log ends with `** BUILD INTERRUPTED **`.
+A second Ctrl-C does not wait for the cancel: it kills the build outright.
+
+The managed cache in `~/Library/Caches/SimTool` keeps one DerivedData per
+build identity without a configured `derivedDataPath` — gigabytes each — and no
+build removes one, so they outlive the worktrees and checkouts they were built
+for. `simtool app cache prune` clears them out: an entry goes when the workspace
+or project it was built from no longer exists, when no build has used it for
+`--older-than <days>`, or with `--all`; one a running build uses stays. It is a
+dry run that lists what would go and the space it frees until you pass
+`--delete`. A `derivedDataPath` set in a project's config is the project's own
+and never touched.
+
+```sh
+swift run simtool app cache prune                       # what would go, and how much
+swift run simtool app cache prune --older-than 30 --delete
 ```
 
 Pass runtime flags to the launched app with repeatable `--env KEY=VALUE`
@@ -856,6 +929,7 @@ build:
   # settings:                       # optional xcodebuild build settings for every build
   #   MACOSX_DEPLOYMENT_TARGET: "15.0"
   # builder: xcode-mcp              # optional: build in Xcode over MCP, not xcodebuild
+  # timeout: 90m                    # optional: stop a build running longer (default: no limit)
 server:                             # optional viewer settings
   host: 127.0.0.1                   # the address it listens on; 0.0.0.0 opens it to the network
   port: 3200
@@ -939,10 +1013,43 @@ build served this way fills the Network and State panels without `run`.
 
 The source fingerprint hashes only git-tracked (and untracked-but-not-ignored)
 files when the project is in a git work tree, falling back to a filesystem walk
-otherwise. This keeps gitignored, generated artifacts — a Tuist-managed
-`.xcodeproj`/`Derived/` that xcodebuild rewrites on every build, DerivedData,
+otherwise. This keeps gitignored, generated artifacts — Tuist's `Derived/`,
 SPM checkouts — out of the checksum, so they don't spuriously invalidate the
-cache.
+cache. Untracked build directories stay out even when `.gitignore` misses them:
+anything git does not track under a directory named `DerivedData`, `build`,
+`Build`, `.build`, `.swiftpm`, `.simtool` or `xcuserdata`, and the configured
+`derivedDataPath` under any name. A tracked file counts wherever it sits — an
+xcconfig committed under `Build/` is a source. So does configuration kept out of
+git on purpose — an ignored `.env`, `.xcconfig`, `.plist`, `.json`,
+`.entitlements` or `.xcprivacy` file such as a secrets xcconfig or
+`GoogleService-Info.plist` — unless it lies inside an ignored directory, which is
+never read.
+
+What it hashes is what a build compiles, links or copies into the app: code,
+headers and build configuration (`.xcconfig`, `.xcfilelist`, `.entitlements`,
+`.xcprivacy`, schemes, package manifests and pins), resources — images, video,
+audio, animations (`.lottie`, `.riv`), fonts, interface files (`.storyboard`,
+`.xib`, `.nib`), strings and String Catalogs (`.xcstrings`), data (`.json`,
+`.plist`, `.bin`, `.txt`, `.proto`…), models, certificates — every file inside
+asset catalogs, `.lproj`, `.bundle`, `.framework`/`.xcframework` and other
+package directories, and shell scripts, as what run-script phases run.
+Documentation (`.md`) and scripts in other languages are left out: their edits
+would only cost rebuilds.
+
+The workspace or project being built — and every project the workspace
+references in its `contents.xcworkspacedata` — is hashed even when git ignores
+it, as a generated one usually is: it is what xcodebuild builds, and the same
+tracked inputs can generate another one (generator flags, a binary cache, a
+generator update). Hashing is by content, so regenerating an identical project
+does not invalidate the cache.
+
+Content hashes are remembered between runs in `.simtool/build/input-hashes.tsv`,
+keyed by each file's size, modification and change times and inode: a file is
+read again only when one of those changed, so checking a large project's
+sources costs a `stat` per file rather than reading all of them. The change
+time cannot be set back, so content rewritten behind restored timestamps is
+still seen; a file changed within two seconds of its hashing is read again
+next time.
 
 `run --force` skips the checksum cache: it always builds (xcodebuild, or Xcode
 with `xcode-mcp`) and reinstalls the app. Use it when a dependency the fingerprint cannot see
@@ -955,7 +1062,10 @@ sees a cache hit and reuses that `.app` instead of re-running xcodebuild. It
 reads the same `.simtool/config.yml` as `run` (so the recorded checksum and its
 cache key match what `run` looks up) and writes the metadata against the built
 bundle. The bundle path defaults to `$BUILT_PRODUCTS_DIR/$FULL_PRODUCT_NAME`
-(set inside Xcode build phases); pass `--app-path` to override.
+(set inside Xcode build phases); pass `--app-path` to override. A build phase
+runs before Xcode signs the bundle, which rewrites it, so the bundle's stamp is
+taken when a later `run` first reuses it — provided the bundle settled within
+ten minutes of the record; changed later than that, it is another build.
 
 ```sh
 # As an Xcode "Run Script" post-build phase, from $SRCROOT:

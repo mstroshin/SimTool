@@ -1008,7 +1008,7 @@ struct AppCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "app",
         abstract: "Build, install, and launch simulator apps.",
-        subcommands: [Build.self, Launch.self, Test.self, Info.self, Install.self]
+        subcommands: [Build.self, Launch.self, Test.self, Info.self, Install.self, Cache.self]
     )
 }
 
@@ -1025,7 +1025,7 @@ struct AppBuildOptions: ParsableArguments {
     @Option(help: "Build configuration. Defaults to `build.configuration` for the configured app, else Debug.")
     var configuration: String?
 
-    @Option(name: .customLong("derived-data-path"), help: "DerivedData path for xcodebuild products. Defaults to `build.derivedDataPath` for the configured app.")
+    @Option(name: .customLong("derived-data-path"), help: "DerivedData path for xcodebuild products. Defaults to `build.derivedDataPath` when building the configured workspace or project.")
     var derivedDataPath: String?
 
     @Option(name: .customLong("build-setting"), help: buildSettingHelp)
@@ -1033,6 +1033,9 @@ struct AppBuildOptions: ParsableArguments {
 
     @Option(help: builderHelp)
     var builder: SimulatorAppBuilder?
+
+    @Option(name: .customLong("build-timeout"), help: buildTimeoutHelp)
+    var buildTimeout: String?
 
     @Flag(help: "Force a new build even when the checksum cache is valid.")
     var force = false
@@ -1045,7 +1048,8 @@ struct AppBuildOptions: ParsableArguments {
             configuration: configuration,
             derivedDataPath: derivedDataPath,
             buildSettings: buildSettings,
-            builder: builder
+            builder: builder,
+            timeout: buildTimeout
         )
     }
 }
@@ -1063,11 +1067,14 @@ struct AppTestOptions: ParsableArguments {
     @Option(help: "Build configuration. Defaults to `build.configuration` for the configured app, else Debug.")
     var configuration: String?
 
-    @Option(name: .customLong("derived-data-path"), help: "DerivedData path for xcodebuild products. Defaults to `build.derivedDataPath` for the configured app.")
+    @Option(name: .customLong("derived-data-path"), help: "DerivedData path for xcodebuild products. Defaults to `build.derivedDataPath` when building the configured workspace or project.")
     var derivedDataPath: String?
 
     @Option(name: .customLong("build-setting"), help: buildSettingHelp)
     var buildSettings: [String] = []
+
+    @Option(name: .customLong("build-timeout"), help: buildTimeoutHelp)
+    var buildTimeout: String?
 
     func selection() throws -> SimulatorAppBuildSelection {
         // `xcodebuild test` runs the tests whatever `build.builder` says.
@@ -1078,7 +1085,8 @@ struct AppTestOptions: ParsableArguments {
             configuration: configuration,
             derivedDataPath: derivedDataPath,
             buildSettings: buildSettings,
-            builder: .xcodebuild
+            builder: .xcodebuild,
+            timeout: buildTimeout
         )
     }
 }
@@ -1090,18 +1098,22 @@ private let buildSettingHelp = ArgumentHelp(
     discussion: "Adds to `build.settings` from .simtool/config.yml, which applies on its own whenever this builds the configured workspace or project; a flag wins over the config for the same key."
 )
 
+let buildTimeoutHelp = ArgumentHelp(
+    "Stop the build once it runs this long: seconds, or with a unit — 45m, 1.5h. 0 for no limit.",
+    discussion: "Defaults to `build.timeout` from .simtool/config.yml when building the configured workspace or project, else no limit."
+)
+
 private let builderHelp = ArgumentHelp(
     "What builds the app: xcodebuild, or xcode-mcp — Xcode itself, over its MCP tools (`xcrun mcpbridge`).",
-    discussion: "Defaults to `build.builder` from .simtool/config.yml, else xcodebuild. Xcode keeps the workspace loaded and builds into its own DerivedData, often much faster than a cold xcodebuild; it builds the scheme's Run configuration with the project's own settings, so --derived-data-path and --build-setting do not apply. Xcode asks to approve SimTool on first use."
+    discussion: "Defaults to `build.builder` from .simtool/config.yml, else xcodebuild. Xcode keeps the workspace loaded and builds where a build from its UI would, often much faster than a cold xcodebuild; it builds the scheme's Run configuration with the project's own settings into the DerivedData its own settings name, so --derived-data-path and --build-setting do not apply. Xcode asks to approve SimTool on first use."
 )
 
 /// The build selection a command line asks for. Without `--workspace` or
 /// `--project` that is the project config's `build:` block — the app `run`
 /// builds — with each flag over its key. With one, it is that workspace or
-/// project, with the config's `build.settings` and `build.builder` when it
-/// describes the same one, and the flags on top. Xcode takes no build
-/// settings, so with `xcode-mcp` the configured ones stay out and a
-/// `--build-setting` is an error.
+/// project, with the config's `build.settings`, `build.builder` and
+/// `build.derivedDataPath` when it describes the same one, and the flags on
+/// top (`ProjectConfig.Build.explicitSelection`).
 private func appBuildSelection(
     workspace: String?,
     project: String?,
@@ -1109,9 +1121,11 @@ private func appBuildSelection(
     configuration: String?,
     derivedDataPath: String?,
     buildSettings: [String],
-    builder: SimulatorAppBuilder?
+    builder: SimulatorAppBuilder?,
+    timeout: String?
 ) throws -> SimulatorAppBuildSelection {
     let explicit = try SimulatorAppBuildSelection.parseBuildSettings(buildSettings)
+    let timeout = try timeout.map(SimulatorAppBuildSelection.parseTimeout)
     let configBuild = try ProjectConfigLoader.loadIfPresent()?.build
     if workspace == nil, project == nil {
         guard let configBuild else {
@@ -1122,28 +1136,20 @@ private func appBuildSelection(
             scheme: scheme,
             configuration: configuration,
             derivedDataPath: derivedDataPath,
-            settings: explicit
+            settings: explicit,
+            timeout: timeout
         )
     }
-    let base = try SimulatorAppBuildSelection.validated(
-        workspacePath: workspace,
-        projectPath: project,
-        scheme: scheme,
-        configuration: configuration,
-        derivedDataPath: derivedDataPath
-    )
-    let builder = builder ?? configBuild?.builder(for: base) ?? .xcodebuild
-    let configured = builder == .xcodebuild ? configBuild?.settings(for: base) ?? [:] : [:]
-    let settings = configured.merging(explicit) { _, flag in flag }
-    guard !settings.isEmpty || builder != .xcodebuild else { return base }
-    return try SimulatorAppBuildSelection.validated(
-        workspacePath: workspace,
-        projectPath: project,
+    return try ProjectConfig.Build.explicitSelection(
+        configured: configBuild,
+        workspace: workspace,
+        project: project,
         scheme: scheme,
         configuration: configuration,
         derivedDataPath: derivedDataPath,
-        buildSettings: settings,
-        builder: builder
+        settings: explicit,
+        builder: builder,
+        timeout: timeout
     )
 }
 
@@ -1279,6 +1285,8 @@ extension AppCommand {
         @OptionGroup var common: CommonJSON
 
         func run() async throws {
+            // A build it starts must not outlive it (`SignalTrap`).
+            SignalTrap.shared.installOnce()
             var selection = try buildOptions.selection()
             if let device {
                 selection.deviceUDID = try await resolveConfiguredDevice(device).udid
@@ -1314,6 +1322,9 @@ extension AppCommand {
             if payload.identity.builder == .xcodeMCP {
                 takeaways.append("Built by: Xcode (MCP)")
             }
+            if let logPath = payload.logPath {
+                takeaways.append("Log: \(logPath)")
+            }
             return takeaways
         }
     }
@@ -1334,6 +1345,8 @@ extension AppCommand {
         @OptionGroup var common: CommonJSON
 
         func run() async throws {
+            // A build it starts must not outlive it (`SignalTrap`).
+            SignalTrap.shared.installOnce()
             let launchEnvironment = try SimulatorAppLifecycleClient.parseLaunchEnvironment(environment)
             let selection = try buildOptions.selection()
             let buildCache = SimulatorAppBuildCache(simtoolDirectory: SimToolDirectory.resolve())
@@ -1387,6 +1400,8 @@ extension AppCommand {
         @OptionGroup var common: CommonJSON
 
         func run() async throws {
+            // A build it starts must not outlive it (`SignalTrap`).
+            SignalTrap.shared.installOnce()
             let resolved = try await resolveConfiguredDevice(device)
             let payload = try await SimulatorAppLifecycleClient.test(
                 selection: try testOptions.selection(),
@@ -1400,7 +1415,8 @@ extension AppCommand {
                     "Scheme: \(payload.identity.scheme)",
                 ]))
             } else {
-                makeNoora().warning("Tests failed for scheme \(payload.identity.scheme) on \(payload.device.name). Status: \(payload.xcodebuild.status ?? -1)")
+                let log = payload.logPath.map { " Full log: \($0)" } ?? ""
+                makeNoora().warning("Tests failed for scheme \(payload.identity.scheme) on \(payload.device.name). Status: \(payload.xcodebuild.status ?? -1).\(log)")
             }
         }
     }
@@ -1685,6 +1701,8 @@ struct TestCommand: AsyncParsableCommand {
         @OptionGroup var common: CommonJSON
 
         func run() async throws {
+            // A build it starts must not outlive it (`SignalTrap`).
+            SignalTrap.shared.installOnce()
             do {
                 try await runOrThrow()
             } catch let failure as TestRunPreflightError {
@@ -2567,6 +2585,9 @@ struct Run: AsyncParsableCommand {
     @Option(help: builderHelp)
     var builder: SimulatorAppBuilder?
 
+    @Option(name: .customLong("build-timeout"), help: buildTimeoutHelp)
+    var buildTimeout: String?
+
     @Flag(name: .long, help: "Print verbose diagnostic output to stderr.")
     var verbose = false
 
@@ -2579,9 +2600,12 @@ struct Run: AsyncParsableCommand {
     @OptionGroup var common: CommonJSON
 
     func run() async throws {
+        // A build it starts must not outlive it (`SignalTrap`).
+        SignalTrap.shared.installOnce()
         DebugLog.isEnabled = verbose
         let projectConfig = try ProjectConfigLoader.load(explicitPath: config)
         let buildCache = SimulatorAppBuildCache(simtoolDirectory: projectConfig.simtoolDirectory)
+        let buildTimeout = try buildTimeout.map(SimulatorAppBuildSelection.parseTimeout)
 
         // Enable the app-side SimTool network and state loggers by default. Set
         // them on this process via the SIMCTL_CHILD_ prefix so simctl forwards
@@ -2604,7 +2628,7 @@ struct Run: AsyncParsableCommand {
             let resolved = try await SimulatorDeviceClient.resolve(simulatorSelector)
             booted = try await SimulatorDeviceClient.ensureBooted(resolved)
             launch = try await SimulatorAppLifecycleClient.launch(
-                selection: try projectConfig.buildSelection(for: booted, builder: builder),
+                selection: try projectConfig.buildSelection(for: booted, builder: builder, timeout: buildTimeout),
                 device: booted,
                 force: force,
                 cache: buildCache
@@ -2613,7 +2637,7 @@ struct Run: AsyncParsableCommand {
             let resolved = try await resolveSimulatorWithProgress(simulatorSelector)
             booted = try await bootSimulatorWithProgress(resolved)
             let buildPayload = try await buildAppWithProgress(
-                selection: try projectConfig.buildSelection(for: booted, builder: builder),
+                selection: try projectConfig.buildSelection(for: booted, builder: builder, timeout: buildTimeout),
                 force: force,
                 cache: buildCache
             )

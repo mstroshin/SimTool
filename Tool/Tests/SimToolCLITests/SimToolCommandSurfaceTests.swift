@@ -120,6 +120,40 @@ final class SimToolCommandSurfaceTests: XCTestCase {
         XCTAssertTrue(names.contains("app"))
     }
 
+    func testBuildingCommandsTakeABuildTimeout() throws {
+        XCTAssertEqual(try AppCommand.Build.parse(["--build-timeout", "45m"]).buildOptions.buildTimeout, "45m")
+        XCTAssertEqual(try AppCommand.Launch.parse(["--build-timeout", "2700"]).buildOptions.buildTimeout, "2700")
+        XCTAssertEqual(try AppCommand.Test.parse(["--build-timeout", "1.5h"]).testOptions.buildTimeout, "1.5h")
+        XCTAssertEqual(try Run.parse(["--build-timeout", "0"]).buildTimeout, "0")
+        XCTAssertNil(try AppCommand.Build.parse([]).buildOptions.buildTimeout, "no flag: the config decides")
+    }
+
+    func testAppCachePruneIsADryRunUnlessToldToDelete() throws {
+        let names = AppCommand.configuration.subcommands.map { commandName(for: $0) }
+        XCTAssertTrue(names.contains("cache"))
+        let dryRun = try AppCommand.Cache.Prune.parse([])
+        XCTAssertFalse(dryRun.delete)
+        XCTAssertFalse(dryRun.all)
+        XCTAssertNil(dryRun.olderThan)
+        let prune = try AppCommand.Cache.Prune.parse(["--older-than", "30", "--delete", "--json"])
+        XCTAssertEqual(prune.olderThan, 30)
+        XCTAssertTrue(prune.delete)
+        XCTAssertTrue(prune.common.json)
+        XCTAssertThrowsError(try AppCommand.Cache.Prune.parse(["--older-than", "-1"]))
+
+        let payload = SimulatorAppBuildCachePrunePayload(root: "/Caches/DerivedData", entries: [
+            SimulatorAppBuildCacheEntry(path: "/Caches/DerivedData/0123456789abcdef", workspacePath: "/gone/App.xcworkspace", reason: "workspace gone", bytes: 2_000_000_000),
+            SimulatorAppBuildCacheEntry(path: "/Caches/DerivedData/fedcba9876543210", workspacePath: "/gone/B.xcworkspace", reason: "workspace gone", bytes: 1_000, inUse: true),
+            SimulatorAppBuildCacheEntry(path: "/Caches/DerivedData/aaaaaaaaaaaaaaaa", workspacePath: "/live/C.xcworkspace"),
+        ], bytes: 2_000_000_000, deleted: false)
+        let report = AppCommand.Cache.Prune.report(payload)
+        XCTAssertTrue(report.hasPrefix("Would remove 1 of 3 cached DerivedData in /Caches/DerivedData"), report)
+        XCTAssertTrue(report.contains("0123456789ab…  /gone/App.xcworkspace — workspace gone"), report)
+        XCTAssertTrue(report.contains("kept, a build is using it:"), report)
+        XCTAssertTrue(report.hasSuffix("Pass --delete to remove them."), report)
+        XCTAssertFalse(report.contains("/live/C.xcworkspace"), "kept entries are not listed")
+    }
+
     func testTopLevelCommandIncludesRunAndOpen() {
         let names = SimTool.configuration.subcommands.map { commandName(for: $0) }
         XCTAssertTrue(names.contains("run"))

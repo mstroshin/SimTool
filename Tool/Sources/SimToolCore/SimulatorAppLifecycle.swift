@@ -22,8 +22,9 @@ public struct SimulatorAppBuildIdentity: Codable, Equatable, Sendable {
     public var buildSettings: [String]?
     /// `xcode-mcp` for a build Xcode makes; nil for xcodebuild, so its
     /// identities keep the cache keys they always had. Part of the identity:
-    /// Xcode builds with its own settings into its own DerivedData, so the two
-    /// builders never hand each other a product.
+    /// Xcode builds with its own settings, so the two builders keep cache
+    /// entries of their own — even when, as Xcode's build location settings
+    /// may have it, both write the same `.app` (the product stamp tells).
     public var builder: SimulatorAppBuilder?
 
     public init(
@@ -52,10 +53,41 @@ public struct SimulatorAppBuildSelection: Codable, Equatable, Sendable {
     /// Builds for this simulator only — its architecture — instead of any iOS
     /// simulator. Not part of the identity: the product is the same `.app`.
     public var deviceUDID: String?
+    /// How long the build may run before it is stopped, in seconds: nil (not
+    /// set) or 0 for as long as it takes. Not part of the identity.
+    public var timeoutSeconds: TimeInterval?
 
     public init(identity: SimulatorAppBuildIdentity) throws {
         try Self.validate(identity)
         self.identity = identity
+    }
+
+    /// The time limit a build of this selection runs under, nil for none.
+    /// A cold build of a large project, sharing the machine with other
+    /// builds, can take well over an hour; stopping a build that is merely
+    /// slow throws its work away, so there is no limit unless one is set.
+    public var buildTimeLimit: TimeInterval? {
+        timeoutSeconds.flatMap { $0 > 0 ? $0 : nil }
+    }
+
+    /// The longest time limit a build takes; past it, 0 says "none".
+    static let maximumTimeout: TimeInterval = 7 * 24 * 3_600
+
+    /// Parses a build timeout: seconds (`2700`), or a number with an `s`,
+    /// `m` or `h` unit (`45m`, `1.5h`). `0` means no limit.
+    public static func parseTimeout(_ text: String) throws -> TimeInterval {
+        let trimmed = text.trimmingCharacters(in: .whitespaces).lowercased()
+        let units: [Character: TimeInterval] = ["s": 1, "m": 60, "h": 3_600]
+        var number = Substring(trimmed)
+        var multiplier: TimeInterval = 1
+        if let last = trimmed.last, let unit = units[last] {
+            number = number.dropLast()
+            multiplier = unit
+        }
+        guard let value = TimeInterval(number), value.isFinite, value >= 0, value * multiplier <= maximumTimeout else {
+            throw SimToolError("Invalid build timeout '\(text)': use seconds or a number with s, m or h, as in 2700, 45m or 1.5h, up to a week; 0 for no limit.")
+        }
+        return value * multiplier
     }
 
     /// This selection, built for `device` alone. Whatever installs the build on
@@ -75,8 +107,8 @@ public struct SimulatorAppBuildSelection: Codable, Equatable, Sendable {
     }
 
     /// `xcode-mcp` takes no DerivedData path and no build settings: Xcode
-    /// builds the project as it stands, into its own DerivedData. Asking for
-    /// either is an error rather than a silent drop.
+    /// builds the project as it stands, into the DerivedData its own settings
+    /// name. Asking for either is an error rather than a silent drop.
     public static func validated(
         workspacePath: String?,
         projectPath: String?,
@@ -93,7 +125,7 @@ public struct SimulatorAppBuildSelection: Codable, Equatable, Sendable {
         }
         if builder == .xcodeMCP {
             if canonicalPath(derivedDataPath) != nil {
-                throw SimToolError("With builder xcode-mcp, Xcode builds into its own DerivedData: a DerivedData path applies to xcodebuild builds only.")
+                throw SimToolError("With builder xcode-mcp, Xcode builds into the DerivedData its own settings name: a DerivedData path applies to xcodebuild builds only.")
             }
             if !buildSettings.isEmpty {
                 throw SimToolError("With builder xcode-mcp, Xcode builds the project with its own settings: build settings apply to xcodebuild builds only.")
@@ -164,10 +196,21 @@ public struct SimulatorAppBuildSelection: Codable, Equatable, Sendable {
         }
     }
 
-    private static func canonicalPath(_ value: String?) -> String? {
+    /// The one spelling of a path its identity keys on. Standardizing drops a
+    /// leading `/private` only from a path that exists, so a DerivedData path
+    /// not created yet would read otherwise than the same one after its first
+    /// build, and key a cache entry of its own: the deepest existing ancestor
+    /// is standardized, and the rest appended.
+    static func canonicalPath(_ value: String?) -> String? {
         guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         let expanded = NSString(string: value).expandingTildeInPath
-        return URL(fileURLWithPath: expanded).standardizedFileURL.path
+        var existing = URL(fileURLWithPath: expanded).absoluteURL.standardized
+        var missing: [String] = []
+        while existing.path != "/", !FileManager.default.fileExists(atPath: existing.path) {
+            missing.insert(existing.lastPathComponent, at: 0)
+            existing.deleteLastPathComponent()
+        }
+        return missing.reduce(existing.standardizedFileURL) { $0.appendingPathComponent($1) }.path
     }
 }
 
@@ -190,6 +233,62 @@ public struct SimulatorAppBuildFingerprint: Codable, Equatable, Sendable {
     public init(checksum: String, inputFileCount: Int) {
         self.checksum = checksum
         self.inputFileCount = inputFileCount
+    }
+}
+
+/// What a built `.app` is on disk: every file in the bundle by path, size and
+/// modification time, digested. One `.app` path can be rebuilt behind a cache
+/// entry's back — by a build with other settings, by Xcode, or by another
+/// identity sharing the DerivedData — while the sources come back to the
+/// checksum the entry was recorded for. The checksum alone would then hand out
+/// someone else's build; the stamp says whether the bundle is still the one
+/// that was built. Any rebuild relinks or re-signs, which rewrites files in
+/// the bundle, so it changes the stamp; reading it is a stat per file.
+public struct SimulatorAppProductStamp: Codable, Equatable, Sendable {
+    public var digest: String
+    public var fileCount: Int
+
+    public init(digest: String, fileCount: Int) {
+        self.digest = digest
+        self.fileCount = fileCount
+    }
+
+    /// The stamp of the bundle at `appBundleURL`, or nil when there is no
+    /// bundle directory there.
+    public init?(appBundleURL: URL) {
+        let root = appBundleURL.standardizedFileURL
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDirectory), isDirectory.boolValue,
+              let enumerator = FileManager.default.enumerator(atPath: root.path)
+        else { return nil }
+        var entries: [String] = []
+        for case let relativePath as String in enumerator {
+            var info = stat()
+            guard lstat(root.appendingPathComponent(relativePath).path, &info) == 0,
+                  (info.st_mode & S_IFMT) != S_IFDIR
+            else { continue }
+            entries.append("\(relativePath)\0\(info.st_size)\0\(info.st_mtimespec.tv_sec).\(info.st_mtimespec.tv_nsec)")
+        }
+        entries.sort()
+        let digest = SHA256.hash(data: Data(entries.joined(separator: "\n").utf8))
+        self.init(digest: digest.map { String(format: "%02x", $0) }.joined(), fileCount: entries.count)
+    }
+
+    /// When anything in the bundle at `appBundleURL` last changed; nil when
+    /// there is no bundle there.
+    public static func newestModification(in appBundleURL: URL) -> Date? {
+        let root = appBundleURL.standardizedFileURL
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDirectory), isDirectory.boolValue,
+              let enumerator = FileManager.default.enumerator(atPath: root.path)
+        else { return nil }
+        var newest = 0.0
+        for case let relativePath as String in enumerator {
+            var info = stat()
+            guard lstat(root.appendingPathComponent(relativePath).path, &info) == 0 else { continue }
+            newest = max(newest, TimeInterval(info.st_mtimespec.tv_sec) + TimeInterval(info.st_mtimespec.tv_nsec) / 1e9)
+        }
+        return Date(timeIntervalSince1970: newest)
     }
 }
 
@@ -227,12 +326,22 @@ public struct SimulatorAppInstallRecord: Codable, Equatable, Sendable {
     public var deviceUDID: String
     public var checksum: String
     public var bundleIdentifier: String
+    /// The bundle that was installed. Nil in records written before SimTool
+    /// stamped products, which therefore never match a build.
+    public var product: SimulatorAppProductStamp?
     public var installedAt: Date
 
-    public init(deviceUDID: String, checksum: String, bundleIdentifier: String, installedAt: Date = Date()) {
+    public init(
+        deviceUDID: String,
+        checksum: String,
+        bundleIdentifier: String,
+        product: SimulatorAppProductStamp? = nil,
+        installedAt: Date = Date()
+    ) {
         self.deviceUDID = deviceUDID
         self.checksum = checksum
         self.bundleIdentifier = bundleIdentifier
+        self.product = product
         self.installedAt = installedAt
     }
 }
@@ -243,6 +352,15 @@ public struct SimulatorAppBuildCacheMetadata: Codable, Equatable, Sendable {
     public var inputFileCount: Int
     public var appBundlePath: String
     public var bundleIdentifier: String
+    /// The bundle at `appBundlePath` as it was built. A cache hit needs the
+    /// bundle to still be exactly this; nil (metadata from before SimTool
+    /// stamped products) never hits — unless `awaitingStamp`.
+    public var product: SimulatorAppProductStamp?
+    /// Recorded by `simtool checksum` from inside an Xcode build, before the
+    /// build signs the bundle and so rewrites it: the stamp is taken on first
+    /// use instead, provided nothing in the bundle changed long after the
+    /// record (`SimulatorAppBuildCache.stampWindow`).
+    public var awaitingStamp: Bool?
     public var builtAt: Date
     public var installRecords: [String: SimulatorAppInstallRecord]
 
@@ -252,6 +370,8 @@ public struct SimulatorAppBuildCacheMetadata: Codable, Equatable, Sendable {
         inputFileCount: Int,
         appBundlePath: String,
         bundleIdentifier: String,
+        product: SimulatorAppProductStamp? = nil,
+        awaitingStamp: Bool? = nil,
         builtAt: Date = Date(),
         installRecords: [String: SimulatorAppInstallRecord] = [:]
     ) {
@@ -260,6 +380,8 @@ public struct SimulatorAppBuildCacheMetadata: Codable, Equatable, Sendable {
         self.inputFileCount = inputFileCount
         self.appBundlePath = appBundlePath
         self.bundleIdentifier = bundleIdentifier
+        self.product = product
+        self.awaitingStamp = awaitingStamp
         self.builtAt = builtAt
         self.installRecords = installRecords
     }
@@ -275,7 +397,14 @@ public struct SimulatorAppBuildPayload: Codable, Equatable, Sendable {
     public var xcodebuildRan: Bool
     public var appBundlePath: String
     public var bundleIdentifier: String
-    /// The build step: xcodebuild's output, or Xcode's `BuildProject` result.
+    /// The bundle at `appBundlePath`, as an install record keeps it.
+    public var product: SimulatorAppProductStamp?
+    /// The build's full log when one ran: xcodebuild's, written to
+    /// `.simtool/build/<identity key>.log` and replaced by the next build of
+    /// the same identity, or Xcode's own for `xcode-mcp`.
+    public var logPath: String?
+    /// The build step: xcodebuild's output (its end), or Xcode's
+    /// `BuildProject` result.
     public var xcodebuild: SimulatorAppProcessStepSummary
 
     public init(
@@ -286,6 +415,8 @@ public struct SimulatorAppBuildPayload: Codable, Equatable, Sendable {
         xcodebuildRan: Bool,
         appBundlePath: String,
         bundleIdentifier: String,
+        product: SimulatorAppProductStamp? = nil,
+        logPath: String? = nil,
         xcodebuild: SimulatorAppProcessStepSummary
     ) {
         self.identity = identity
@@ -295,6 +426,8 @@ public struct SimulatorAppBuildPayload: Codable, Equatable, Sendable {
         self.xcodebuildRan = xcodebuildRan
         self.appBundlePath = appBundlePath
         self.bundleIdentifier = bundleIdentifier
+        self.product = product
+        self.logPath = logPath
         self.xcodebuild = xcodebuild
     }
 }
@@ -341,6 +474,8 @@ public struct SimulatorAppTestPayload: Codable, Equatable, Sendable {
     public var device: SimulatorDevice
     public var passed: Bool
     public var xcodebuildRan: Bool
+    /// The run's full log, `.simtool/build/<identity key>-test.log`.
+    public var logPath: String?
     public var xcodebuild: SimulatorAppProcessStepSummary
 
     public init(
@@ -348,12 +483,14 @@ public struct SimulatorAppTestPayload: Codable, Equatable, Sendable {
         device: SimulatorDevice,
         passed: Bool,
         xcodebuildRan: Bool,
+        logPath: String? = nil,
         xcodebuild: SimulatorAppProcessStepSummary
     ) {
         self.identity = identity
         self.device = device
         self.passed = passed
         self.xcodebuildRan = xcodebuildRan
+        self.logPath = logPath
         self.xcodebuild = xcodebuild
     }
 }
@@ -364,10 +501,35 @@ public struct SimulatorAppBuildCache {
     /// Rebuildable xcodebuild products; kept out of the project tree because
     /// they can weigh gigabytes.
     public var derivedDataRoot: URL
+    /// The build locks every SimTool process shares (`SimulatorAppBuildLock`):
+    /// beside the managed DerivedData, `…/app-builds/locks`.
+    public var lockRoot: URL
 
-    public init(simtoolDirectory: URL, derivedDataRoot: URL = Self.defaultDerivedDataRoot()) {
+    public init(simtoolDirectory: URL, derivedDataRoot: URL = Self.defaultDerivedDataRoot(), lockRoot: URL? = nil) {
         self.metadataRoot = SimToolDirectory.buildMetadataDirectory(in: simtoolDirectory)
         self.derivedDataRoot = derivedDataRoot
+        self.lockRoot = lockRoot ?? derivedDataRoot.deletingLastPathComponent().appendingPathComponent("locks", isDirectory: true)
+    }
+
+    /// Waits for, then holds, the locks of every directory a build of
+    /// `identity` writes: the project's directory, and the DerivedData
+    /// xcodebuild builds into — Xcode picks its own, which the project's
+    /// lock covers.
+    func lock(
+        identity: SimulatorAppBuildIdentity,
+        onWait: (String) -> Void
+    ) async throws -> (lock: SimulatorAppBuildLock, waited: Bool) {
+        var waited = false
+        let source = URL(fileURLWithPath: identity.workspacePath ?? identity.projectPath ?? "/")
+        var paths = [source.deletingLastPathComponent().standardizedFileURL.path]
+        if (identity.builder ?? .xcodebuild) == .xcodebuild {
+            paths.append(try identity.derivedDataPath ?? derivedDataPath(for: identity))
+        }
+        let lock = try await SimulatorAppBuildLock.acquire(paths: paths, in: lockRoot) { message in
+            waited = true
+            onWait(message)
+        }
+        return (lock, waited)
     }
 
     public static func defaultDerivedDataRoot() -> URL {
@@ -392,20 +554,51 @@ public struct SimulatorAppBuildCache {
             .appendingPathExtension("json")
     }
 
+    /// The content hashes of the project's input files, by their `stat`
+    /// (`SimulatorAppInputHashCache`): one per project, whatever the identity.
+    public var inputHashesURL: URL {
+        metadataRoot.appendingPathComponent("input-hashes.tsv")
+    }
+
+    /// Where the full log of the last xcodebuild run of `identity` is kept,
+    /// beside its metadata; each build replaces it.
+    public func logURL(for identity: SimulatorAppBuildIdentity, action: String = "build") throws -> URL {
+        let key = try identityKey(for: identity)
+        return metadataRoot.appendingPathComponent(action == "build" ? "\(key).log" : "\(key)-\(action).log")
+    }
+
     public func readMetadata(for identity: SimulatorAppBuildIdentity) -> SimulatorAppBuildCacheMetadata? {
         guard let url = try? metadataURL(for: identity), FileManager.default.fileExists(atPath: url.path) else { return nil }
         guard let data = try? Data(contentsOf: url) else { return nil }
         return try? JSON.decoder.decode(SimulatorAppBuildCacheMetadata.self, from: data)
     }
 
+    /// The entry for `identity` when it was built from sources with this
+    /// `checksum` and its bundle is still the one that build produced — not
+    /// rebuilt since by anything else that writes to the same path.
     public func validMetadata(for identity: SimulatorAppBuildIdentity, checksum: String) -> SimulatorAppBuildCacheMetadata? {
         guard let metadata = readMetadata(for: identity), metadata.checksum == checksum else { return nil }
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: metadata.appBundlePath, isDirectory: &isDirectory), isDirectory.boolValue else {
-            return nil
+        let bundle = URL(fileURLWithPath: metadata.appBundlePath)
+        if let recorded = metadata.product {
+            return SimulatorAppProductStamp(appBundleURL: bundle) == recorded ? metadata : nil
         }
-        return metadata
+        // Recorded mid-build: the build that signed it may have written the
+        // bundle since, but nothing much later may have.
+        guard metadata.awaitingStamp == true,
+              let newest = SimulatorAppProductStamp.newestModification(in: bundle),
+              newest <= metadata.builtAt.addingTimeInterval(Self.stampWindow),
+              let stamp = SimulatorAppProductStamp(appBundleURL: bundle)
+        else { return nil }
+        var sealed = metadata
+        sealed.product = stamp
+        sealed.awaitingStamp = nil
+        try? write(sealed)
+        return sealed
     }
+
+    /// How long after `simtool checksum` recorded a build its bundle may still
+    /// change — the rest of that build: later phases, signing.
+    public static let stampWindow: TimeInterval = 600
 
     public func write(_ metadata: SimulatorAppBuildCacheMetadata) throws {
         let url = try metadataURL(for: metadata.identity)
@@ -418,65 +611,83 @@ public struct SimulatorAppBuildCache {
         identity: SimulatorAppBuildIdentity,
         checksum: String,
         bundleIdentifier: String,
+        product: SimulatorAppProductStamp? = nil,
         deviceUDID: String
     ) throws {
         guard var metadata = readMetadata(for: identity) else { return }
         metadata.installRecords[deviceUDID] = SimulatorAppInstallRecord(
             deviceUDID: deviceUDID,
             checksum: checksum,
-            bundleIdentifier: bundleIdentifier
+            bundleIdentifier: bundleIdentifier,
+            product: product
         )
         try write(metadata)
     }
 }
 
 public enum SimulatorAppBuildFingerprinter {
-    public static func fingerprint(selection: SimulatorAppBuildSelection, cacheRoot: URL? = nil) throws -> SimulatorAppBuildFingerprint {
+    /// The checksum of what a build of `selection` reads: its identity and
+    /// every input file, by path, size and content. With `hashCache`, files
+    /// whose `stat` is unchanged since the last fingerprint are not read
+    /// again (`SimulatorAppInputHashCache`); the checksum is the same either way.
+    public static func fingerprint(
+        selection: SimulatorAppBuildSelection,
+        cacheRoot: URL? = nil,
+        hashCache: URL? = nil
+    ) throws -> SimulatorAppBuildFingerprint {
         let files = try inputFiles(selection: selection, cacheRoot: cacheRoot)
+        let started = Date()
+        let known = hashCache.map(SimulatorAppInputHashCache.load) ?? SimulatorAppInputHashCache()
+        var seen = SimulatorAppInputHashCache()
         var hasher = SHA256()
         try update(&hasher, with: JSON.data(selection.identity, pretty: false))
         for file in files {
-            update(&hasher, with: "\nfile:\(file.relativePath):\(file.byteCount)\n")
-            try update(&hasher, with: Data(contentsOf: URL(fileURLWithPath: file.path)))
+            let status = SimulatorAppInputHashCache.Status(path: file.path)
+            let contentHash: String
+            if let status, let cached = known.hash(of: file.path, status: status) {
+                contentHash = cached
+            } else {
+                contentHash = hex(SHA256.hash(data: try Data(contentsOf: URL(fileURLWithPath: file.path))))
+            }
+            if let status { seen.record(file.path, status: status, hash: contentHash) }
+            update(&hasher, with: "\nfile:\(file.relativePath):\(file.byteCount):\(contentHash)\n")
+        }
+        if let hashCache {
+            seen.writtenAt = started
+            seen.write(to: hashCache)
         }
         return SimulatorAppBuildFingerprint(checksum: hex(hasher.finalize()), inputFileCount: files.count)
     }
 
+    /// The files whose content the fingerprint hashes: the project's sources
+    /// and resources, plus the Xcode containers the build reads — the
+    /// workspace or project, and every project the workspace references —
+    /// whether git tracks them or not.
     public static func inputFiles(selection: SimulatorAppBuildSelection, cacheRoot: URL? = nil) throws -> [SimulatorAppBuildInputFile] {
-        let root = selection.projectRoot.standardizedFileURL
+        // Paths are strings from here on: a large project lists tens of
+        // thousands of files, and URL standardization goes to the disk.
+        let root = selection.projectRoot.standardizedFileURL.path
+        // Build products are never sources: SimTool's own DerivedData, and the
+        // configured one wherever it lives — inside the project, under any name.
+        let excludedRoots = [cacheRoot?.path, selection.identity.derivedDataPath]
+            .compactMap { $0 }
+            .map { URL(fileURLWithPath: $0).standardizedFileURL.path }
         // When the project lives in a git work tree, hash only non-ignored files.
-        // Generated artifacts (Tuist's `.xcodeproj`/`Derived/`, DerivedData, SPM
-        // checkouts) are gitignored; they get rewritten on every build and would
-        // otherwise destabilize the checksum, breaking cache reuse. Outside git,
-        // fall back to the filesystem walk.
-        if let gitFiles = gitInputFiles(root: root, cacheRoot: cacheRoot) {
-            return gitFiles
-        }
-        let excludedRoot = cacheRoot?.standardizedFileURL.path
-        let resourceKeys: [URLResourceKey] = [.isDirectoryKey, .fileSizeKey]
-        guard let enumerator = FileManager.default.enumerator(
-            at: root,
-            includingPropertiesForKeys: resourceKeys,
-            options: [],
-            errorHandler: nil
-        ) else { return [] }
-
-        var files: [SimulatorAppBuildInputFile] = []
-        for case let url as URL in enumerator {
-            let standardized = url.standardizedFileURL
-            let path = standardized.path
-            if let excludedRoot, path == excludedRoot || path.hasPrefix(excludedRoot + "/") {
-                if isDirectory(standardized) { enumerator.skipDescendants() }
-                continue
+        // Generated artifacts (Tuist's `Derived/`, DerivedData, SPM checkouts)
+        // are gitignored and derive from tracked inputs; they get rewritten on
+        // builds and would otherwise destabilize the checksum, breaking cache
+        // reuse. Outside git, fall back to the filesystem walk.
+        var files = gitInputFiles(root: root, excludedRoots: excludedRoots)
+            ?? walk(root, root: root, excludedRoots: excludedRoots)
+        // A generated workspace or project is gitignored too, yet it is what
+        // xcodebuild builds: the same generator inputs can produce another
+        // project (generator flags, a binary cache, a generator update). Its
+        // content is deterministic, so hashing it misses only when it changed.
+        var seen = Set(files.map(\.path))
+        for container in containers(of: selection) {
+            for file in walk(container.path, root: root, excludedRoots: excludedRoots) where seen.insert(file.path).inserted {
+                files.append(file)
             }
-            if isExcludedPath(standardized, root: root) {
-                if isDirectory(standardized) { enumerator.skipDescendants() }
-                continue
-            }
-            guard !isDirectory(standardized), isBuildInputFile(standardized, root: root) else { continue }
-            let relativePath = standardized.pathRelative(to: root)
-            let byteCount = ((try? standardized.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init)) ?? 0
-            files.append(SimulatorAppBuildInputFile(relativePath: relativePath, path: path, byteCount: byteCount))
         }
         return files.sorted { $0.relativePath < $1.relativePath }
     }
@@ -485,42 +696,129 @@ public enum SimulatorAppBuildFingerprinter {
         hex(SHA256.hash(data: data))
     }
 
-    /// Returns the build-input files known to git (tracked plus untracked but
-    /// not ignored), or `nil` when `root` is not inside a git work tree (or git
-    /// is unavailable) so the caller falls back to the filesystem walk. Listing
-    /// via git is what excludes gitignored generated artifacts from the
-    /// fingerprint; the same type filter (`isBuildInputFile`) is then applied so
-    /// the included file set matches the filesystem walk for tracked files.
-    private static func gitInputFiles(root: URL, cacheRoot: URL?) -> [SimulatorAppBuildInputFile]? {
-        guard let output = runGit(
-            ["-C", root.path, "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
-            in: root
-        ), output.status == 0 else { return nil }
+    /// The build-input files under `directory`, found by walking the
+    /// filesystem; excluded directory names count from `directory` down.
+    private static func walk(_ directory: String, root: String, excludedRoots: [String]) -> [SimulatorAppBuildInputFile] {
+        guard let enumerator = FileManager.default.enumerator(atPath: directory) else { return [] }
+        var files: [SimulatorAppBuildInputFile] = []
+        for case let below as String in enumerator {
+            let path = directory + "/" + below
+            let isDirectory = (enumerator.fileAttributes?[.type] as? FileAttributeType) == .typeDirectory
+            if isExcluded(relativePath: below) || isUnder(path, anyOf: excludedRoots) {
+                if isDirectory { enumerator.skipDescendants() }
+                continue
+            }
+            let relativePath = relative(path, to: root)
+            guard !isDirectory, isBuildInput(relativePath: relativePath), let byteCount = regularFileSize(atPath: path) else { continue }
+            files.append(SimulatorAppBuildInputFile(relativePath: relativePath, path: path, byteCount: byteCount))
+        }
+        return files
+    }
 
-        let excludedRoot = cacheRoot?.standardizedFileURL.path
+    /// Returns the build-input files known to git, or `nil` when `root` is
+    /// not inside a git work tree (or git is unavailable) so the caller falls
+    /// back to the filesystem walk:
+    ///
+    /// - every tracked file — committed on purpose, wherever it sits, as an
+    ///   xcconfig under `Build/` does;
+    /// - untracked files git does not ignore, minus build directories by name
+    ///   and the DerivedData roots: a project whose `.gitignore` misses its
+    ///   DerivedData must neither miss the cache forever nor hash gigabytes
+    ///   of build products;
+    /// - ignored configuration files outside ignored directories — `.env`, a
+    ///   secrets `.xcconfig`, `GoogleService-Info.plist`, kept out of git yet
+    ///   read by the build. An ignored directory (Tuist's `Derived/`, Pods,
+    ///   SPM checkouts) is never entered: what is generated there derives
+    ///   from tracked inputs and gets rewritten on builds.
+    ///
+    /// The type filter (`isBuildInput`) applies to all of them.
+    private static func gitInputFiles(root: String, excludedRoots: [String]) -> [SimulatorAppBuildInputFile]? {
+        // Pathspecs, relative to `root` where git runs, keep git out of the
+        // DerivedData roots; excluding by name keeps it out of build directories.
+        var pathspecs = ["--", "."]
+        for excluded in excludedRoots {
+            let below = relative(excluded, to: root)
+            guard !below.hasPrefix("/"), !below.isEmpty else { continue }
+            pathspecs.append(":(exclude,literal)\(below)")
+        }
+        let excludedNames = excludedDirectoryNames.sorted().map { "--exclude=\($0)/" }
+        guard let listed = runGit(["-C", root, "ls-files", "-t", "--cached", "--others", "--exclude-standard", "-z"] + excludedNames + pathspecs),
+              listed.status == 0
+        else { return nil }
+        let ignored = runGit(["-C", root, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"] + pathspecs)
+
         var files: [SimulatorAppBuildInputFile] = []
         var seen = Set<String>()
-        for relative in String(decoding: output.stdout, as: UTF8.self).split(separator: "\0") {
-            let relativePath = String(relative)
-            if relativePath.isEmpty { continue }
-            let url = root.appendingPathComponent(relativePath).standardizedFileURL
-            let path = url.path
-            guard seen.insert(path).inserted else { continue }
-            if let excludedRoot, path == excludedRoot || path.hasPrefix(excludedRoot + "/") { continue }
-            guard isBuildInputFile(url, root: root) else { continue }
-            // Skip directories and stale index entries (deleted/renamed files).
-            var isDirectory: ObjCBool = false
-            guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), !isDirectory.boolValue else { continue }
-            let byteCount = ((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init)) ?? 0
-            files.append(SimulatorAppBuildInputFile(relativePath: url.pathRelative(to: root), path: path, byteCount: byteCount))
+        func add(_ relativePath: String, tracked: Bool, ignored: Bool = false) {
+            guard !relativePath.isEmpty, !relativePath.hasSuffix("/"), seen.insert(relativePath).inserted else { return }
+            let path = root + "/" + relativePath
+            if isUnder(path, anyOf: excludedRoots) { return }
+            if !tracked, isExcluded(relativePath: relativePath) { return }
+            if ignored, !isIgnoredBuildInput(relativePath: relativePath) { return }
+            // Directories (submodules) and stale index entries (deleted or
+            // renamed files) have no regular file to hash.
+            guard isBuildInput(relativePath: relativePath), let byteCount = regularFileSize(atPath: path) else { return }
+            files.append(SimulatorAppBuildInputFile(relativePath: relativePath, path: path, byteCount: byteCount))
         }
-        return files.sorted { $0.relativePath < $1.relativePath }
+        // `-t` tags each path: `? ` untracked, anything else tracked.
+        for entry in String(decoding: listed.stdout, as: UTF8.self).split(separator: "\0") where entry.count > 2 {
+            add(String(entry.dropFirst(2)), tracked: !entry.hasPrefix("? "))
+        }
+        if let ignored, ignored.status == 0 {
+            for entry in String(decoding: ignored.stdout, as: UTF8.self).split(separator: "\0") {
+                add(String(entry), tracked: false, ignored: true)
+            }
+        }
+        return files
+    }
+
+    /// The ignored files that still count: configuration a build reads but
+    /// a repository keeps out of git.
+    private static func isIgnoredBuildInput(relativePath: String) -> Bool {
+        guard let name = relativePath.split(separator: "/").last else { return false }
+        return includedFileNames.contains(String(name)) || ignoredInputExtensions.contains(pathExtension(name))
+    }
+
+    /// The size of the regular file at `path`, links followed — what reading
+    /// it reads; nil for anything else, or nothing.
+    private static func regularFileSize(atPath path: String) -> Int64? {
+        var info = stat()
+        guard stat(path, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else { return nil }
+        return Int64(info.st_size)
+    }
+
+    /// `path` below `root`, or `path` itself when it is not inside it.
+    private static func relative(_ path: String, to root: String) -> String {
+        if path == root { return "" }
+        return path.hasPrefix(root + "/") ? String(path.dropFirst(root.count + 1)) : path
+    }
+
+    /// The Xcode containers the build reads: the selected workspace or
+    /// project, and for a workspace each project it references.
+    static func containers(of selection: SimulatorAppBuildSelection) -> [URL] {
+        let source = selection.sourceURL.standardizedFileURL
+        guard selection.identity.workspacePath != nil else { return [source] }
+        return [source] + workspaceProjects(source).filter { $0 != source }
+    }
+
+    /// The `.xcodeproj` references in a workspace's `contents.xcworkspacedata`,
+    /// resolved the way Xcode resolves them: `group:` against the enclosing
+    /// groups, `container:` against the workspace's directory, `absolute:` as
+    /// is, `self:` as the project an embedded workspace belongs to.
+    static func workspaceProjects(_ workspace: URL) -> [URL] {
+        let data = workspace.appendingPathComponent("contents.xcworkspacedata")
+        guard let parser = XMLParser(contentsOf: data) else { return [] }
+        let collector = WorkspaceReferenceCollector(workspace: workspace)
+        parser.delegate = collector
+        parser.parse()
+        var seen = Set<String>()
+        return collector.projects.filter { seen.insert($0.path).inserted }
     }
 
     /// Runs git synchronously, returning its exit status and stdout, or `nil` if
     /// git could not be launched. stderr is discarded; stdout is drained before
     /// `waitUntilExit` to avoid pipe-buffer deadlock.
-    private static func runGit(_ arguments: [String], in directory: URL) -> (status: Int32, stdout: Data)? {
+    private static func runGit(_ arguments: [String]) -> (status: Int32, stdout: Data)? {
         let gitURL = URL(fileURLWithPath: "/usr/bin/git")
         guard FileManager.default.isExecutableFile(atPath: gitURL.path) else { return nil }
         let process = Process()
@@ -539,7 +837,7 @@ public enum SimulatorAppBuildFingerprinter {
         hasher.update(data: Data(string.utf8))
     }
 
-    private static func update(_ hasher: inout SHA256, with data: Data) throws {
+    private static func update(_ hasher: inout SHA256, with data: Data) {
         hasher.update(data: data)
     }
 
@@ -547,46 +845,123 @@ public enum SimulatorAppBuildFingerprinter {
         digest.map { String(format: "%02x", $0) }.joined()
     }
 
-    private static func isDirectory(_ url: URL) -> Bool {
-        ((try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false) == true
+    private static func isUnder(_ path: String, anyOf roots: [String]) -> Bool {
+        roots.contains { path == $0 || path.hasPrefix($0 + "/") }
     }
 
-    private static func isExcludedPath(_ url: URL, root: URL) -> Bool {
-        let components = url.pathRelative(to: root).split(separator: "/").map(String.init)
-        return components.contains { excludedDirectoryNames.contains($0) }
+    /// Whether a path holds a build directory — counted from where the
+    /// path is relative to.
+    private static func isExcluded(relativePath: String) -> Bool {
+        relativePath.split(separator: "/").contains { excludedDirectoryNames.contains(String($0)) }
     }
 
-    private static func isBuildInputFile(_ url: URL, root: URL) -> Bool {
-        let relativeComponents = url.pathRelative(to: root).split(separator: "/").map(String.init)
-        if relativeComponents.contains(where: isBuildPackageComponent) { return true }
-        let filename = url.lastPathComponent
-        if includedFileNames.contains(filename) { return true }
-        let fileExtension = url.pathExtension.lowercased()
-        return includedExtensions.contains(fileExtension)
+    /// Whether the file at `relativePath` (relative to the project root, or
+    /// absolute outside it) is something a build reads.
+    static func isBuildInput(relativePath: String) -> Bool {
+        let components = relativePath.split(separator: "/")
+        if components.contains(where: { buildPackageExtensions.contains(pathExtension($0)) }) { return true }
+        guard let name = components.last else { return false }
+        return includedFileNames.contains(String(name)) || includedExtensions.contains(pathExtension(name))
     }
 
-    private static func isBuildPackageComponent(_ component: String) -> Bool {
-        buildPackageExtensions.contains(URL(fileURLWithPath: component).pathExtension.lowercased())
+    /// A name's extension, lowercased, as `URL.pathExtension` reads it:
+    /// none for a dotfile (`.env`, `.bundle`).
+    private static func pathExtension(_ name: Substring) -> String {
+        guard let dot = name.lastIndex(of: "."), dot != name.startIndex else { return "" }
+        return name[name.index(after: dot)...].lowercased()
     }
+
+    /// Ignored files of these types are hashed (`isIgnoredBuildInput`).
+    private static let ignoredInputExtensions: Set<String> = [
+        "entitlements", "json", "plist", "xcconfig", "xcprivacy"
+    ]
 
     private static let excludedDirectoryNames: Set<String> = [
         ".build", ".git", ".hg", ".svn", ".swiftpm", ".simtool", "Build", "build", "DerivedData", "xcuserdata"
     ]
 
+    /// Directories whose every file is a build input: Xcode containers and
+    /// catalogs, resource bundles and localizations, compiled or vendored
+    /// bundles and frameworks.
     private static let buildPackageExtensions: Set<String> = [
-        "xcassets", "xcdatamodeld", "xcodeproj", "xcworkspace"
+        "bundle", "framework", "icon", "lproj", "mlmodelc", "mlpackage", "momd", "nib", "rcproject", "scnassets",
+        "storyboardc", "xcassets", "xcdatamodel", "xcdatamodeld", "xcframework", "xcmappingmodel", "xcodeproj",
+        "xcstickers", "xcworkspace"
     ]
 
     private static let includedFileNames: Set<String> = [
-        ".env", "Package.resolved", "Package.swift", "Podfile", "Podfile.lock", "Cartfile", "Cartfile.resolved",
-        "project.pbxproj", "contents.xcworkspacedata"
+        ".env", "Package.resolved", "Package.swift", "Podfile", "Podfile.lock", "Cartfile", "Cartfile.private",
+        "Cartfile.resolved", "project.pbxproj", "contents.xcworkspacedata"
     ]
 
+    /// What a build compiles, links or copies into the app. Shell scripts are
+    /// in, as what run-script phases run; documentation (`md`) is not, nor are
+    /// scripts in other languages, mostly tooling whose edits would only cost
+    /// rebuilds.
     private static let includedExtensions: Set<String> = [
-        "c", "cc", "cpp", "entitlements", "graphql", "h", "hpp", "html", "json", "m", "metal", "mm", "modulemap",
-        "plist", "png", "jpg", "jpeg", "pdf", "storyboard", "strings", "stringsdict", "swift", "svg", "toml", "webp",
-        "xalloc", "xcconfig", "xcdatamodel", "xcscheme", "xib", "xml", "yaml", "yml"
+        // Code, headers and build configuration
+        "a", "c", "cc", "cpp", "cxx", "dylib", "entitlements", "h", "hh", "hpp", "hxx", "m", "metal", "mm",
+        "modulemap", "pch", "s", "swift", "tbd", "xcconfig", "xcfilelist", "xcprivacy", "xcscheme", "sh",
+        // Data, configuration and generated-code inputs
+        "bin", "csv", "dat", "db", "geojson", "graphql", "intentdefinition", "json", "plist", "proto", "sqlite",
+        "toml", "txt", "xalloc", "xml", "yaml", "yml",
+        // Interface, localization and web content
+        "css", "htm", "html", "js", "nib", "rtf", "storyboard", "strings", "stringsdict", "xcstrings", "xib",
+        // Images, media, animations and fonts
+        "aac", "aif", "aiff", "bmp", "caf", "gif", "heic", "heif", "jpeg", "jpg", "lottie", "m4a", "m4v", "mov",
+        "mp3", "mp4", "otf", "pdf", "png", "riv", "svg", "tif", "tiff", "ttc", "ttf", "wav", "webp", "woff", "woff2",
+        // Models, 3D, certificates
+        "cer", "crt", "dae", "der", "mlmodel", "mom", "pem", "reality", "scn", "usdz", "xcdatamodel"
     ]
+}
+
+/// Collects the project references of a `contents.xcworkspacedata` — the
+/// nested `Group`s carry the base `group:` locations resolve against.
+private final class WorkspaceReferenceCollector: NSObject, XMLParserDelegate {
+    private let containerDirectory: URL
+    private let workspace: URL
+    private var bases: [URL]
+    private(set) var projects: [URL] = []
+
+    init(workspace: URL) {
+        self.workspace = workspace
+        self.containerDirectory = workspace.deletingLastPathComponent()
+        self.bases = [workspace.deletingLastPathComponent()]
+    }
+
+    func parser(_ parser: XMLParser, didStartElement element: String, namespaceURI: String?, qualifiedName: String?, attributes: [String: String] = [:]) {
+        let location = attributes["location"].flatMap(resolve)
+        switch element {
+        case "Group":
+            bases.append(location ?? bases[bases.count - 1])
+        case "FileRef":
+            if let location, location.pathExtension == "xcodeproj" { projects.append(location.standardizedFileURL) }
+        default:
+            break
+        }
+    }
+
+    func parser(_ parser: XMLParser, didEndElement element: String, namespaceURI: String?, qualifiedName: String?) {
+        if element == "Group", bases.count > 1 { bases.removeLast() }
+    }
+
+    private func resolve(_ location: String) -> URL? {
+        guard let colon = location.firstIndex(of: ":") else { return nil }
+        let kind = location[..<colon]
+        let path = String(location[location.index(after: colon)...])
+        switch kind {
+        case "group":
+            return path.isEmpty ? bases[bases.count - 1] : bases[bases.count - 1].appendingPathComponent(path)
+        case "container":
+            return path.isEmpty ? containerDirectory : containerDirectory.appendingPathComponent(path)
+        case "absolute":
+            return URL(fileURLWithPath: path)
+        case "self":
+            return workspace.deletingLastPathComponent().pathExtension == "xcodeproj" ? workspace.deletingLastPathComponent() : nil
+        default:
+            return nil
+        }
+    }
 }
 
 /// The result of the checksum stage: the source fingerprint plus the resolved
@@ -597,17 +972,21 @@ public struct SimulatorAppBuildPlan: Sendable {
     public var fingerprint: SimulatorAppBuildFingerprint
     public var derivedDataPath: String
     public var cachedMetadata: SimulatorAppBuildCacheMetadata?
+    /// Planned with `force`: a build runs whatever the cache holds.
+    public var forced: Bool
 
     public init(
         selection: SimulatorAppBuildSelection,
         fingerprint: SimulatorAppBuildFingerprint,
         derivedDataPath: String,
-        cachedMetadata: SimulatorAppBuildCacheMetadata?
+        cachedMetadata: SimulatorAppBuildCacheMetadata?,
+        forced: Bool = false
     ) {
         self.selection = selection
         self.fingerprint = fingerprint
         self.derivedDataPath = derivedDataPath
         self.cachedMetadata = cachedMetadata
+        self.forced = forced
     }
 
     public var isCacheHit: Bool { cachedMetadata != nil }
@@ -623,7 +1002,11 @@ public enum SimulatorAppLifecycleClient {
         force: Bool = false,
         cache: SimulatorAppBuildCache = SimulatorAppBuildCache(simtoolDirectory: SimToolDirectory.resolve())
     ) throws -> SimulatorAppBuildPlan {
-        let fingerprint = try SimulatorAppBuildFingerprinter.fingerprint(selection: selection, cacheRoot: cache.derivedDataRoot)
+        let fingerprint = try SimulatorAppBuildFingerprinter.fingerprint(
+            selection: selection,
+            cacheRoot: cache.derivedDataRoot,
+            hashCache: cache.inputHashesURL
+        )
         let derivedDataPath: String
         if let selectedDerivedDataPath = selection.identity.derivedDataPath {
             derivedDataPath = selectedDerivedDataPath
@@ -635,22 +1018,23 @@ public enum SimulatorAppLifecycleClient {
             selection: selection,
             fingerprint: fingerprint,
             derivedDataPath: derivedDataPath,
-            cachedMetadata: cachedMetadata
+            cachedMetadata: cachedMetadata,
+            forced: force
         )
     }
 
     /// `progress` receives short build statuses ("Compiling Foo.swift") parsed
     /// from xcodebuild output. It is invoked on a background thread as output
-    /// arrives; blocking inside it backpressures pipe reads.
+    /// arrives; blocking inside it backpressures pipe reads. The build runs
+    /// under the selection's time limit (`buildTimeLimit`).
     public static func build(
         selection: SimulatorAppBuildSelection,
         force: Bool = false,
         cache: SimulatorAppBuildCache = SimulatorAppBuildCache(simtoolDirectory: SimToolDirectory.resolve()),
-        timeoutSeconds: TimeInterval? = 1_800,
         progress: (@Sendable (String) -> Void)? = nil
     ) async throws -> SimulatorAppBuildPayload {
         let plan = try plan(selection: selection, force: force, cache: cache)
-        return try await build(plan: plan, cache: cache, timeoutSeconds: timeoutSeconds, progress: progress)
+        return try await build(plan: plan, cache: cache, progress: progress)
     }
 
     /// Build stage: runs xcodebuild for a planned build, or returns a cache-hit
@@ -659,12 +1043,16 @@ public enum SimulatorAppLifecycleClient {
     public static func build(
         plan: SimulatorAppBuildPlan,
         cache: SimulatorAppBuildCache = SimulatorAppBuildCache(simtoolDirectory: SimToolDirectory.resolve()),
-        timeoutSeconds: TimeInterval? = 1_800,
         progress: (@Sendable (String) -> Void)? = nil
     ) async throws -> SimulatorAppBuildPayload {
         let selection = plan.selection
         let fingerprint = plan.fingerprint
         if let metadata = plan.cachedMetadata {
+            // In use, though no xcodebuild touched it: `app cache prune
+            // --older-than` must not take it for abandoned.
+            if selection.builder == .xcodebuild, selection.identity.derivedDataPath == nil {
+                try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: plan.derivedDataPath)
+            }
             return SimulatorAppBuildPayload(
                 identity: selection.identity,
                 checksum: fingerprint.checksum,
@@ -673,57 +1061,101 @@ public enum SimulatorAppLifecycleClient {
                 xcodebuildRan: false,
                 appBundlePath: metadata.appBundlePath,
                 bundleIdentifier: metadata.bundleIdentifier,
+                product: metadata.product,
                 xcodebuild: SimulatorAppProcessStepSummary(name: "xcodebuild", ran: false)
             )
         }
 
+        let (buildLock, waited) = try await cache.lock(identity: selection.identity) { message in
+            report(message, to: progress)
+        }
+        defer { buildLock.release() }
+        // The build waited for may have been of these very sources.
+        if waited, !plan.forced, let metadata = cache.validMetadata(for: selection.identity, checksum: fingerprint.checksum) {
+            return SimulatorAppBuildPayload(
+                identity: selection.identity,
+                checksum: fingerprint.checksum,
+                inputFileCount: fingerprint.inputFileCount,
+                cacheHit: true,
+                xcodebuildRan: false,
+                appBundlePath: metadata.appBundlePath,
+                bundleIdentifier: metadata.bundleIdentifier,
+                product: metadata.product,
+                xcodebuild: SimulatorAppProcessStepSummary(name: "xcodebuild", ran: false)
+            )
+        }
+
+        let previous = cache.readMetadata(for: selection.identity)
         let product: XcodeBuildProduct
         let buildStep: SimulatorAppProcessStepSummary
+        let logPath: String?
         switch selection.builder {
         case .xcodebuild:
             let derivedDataPath = plan.derivedDataPath
             let buildArguments = xcodebuildArguments(selection: selection, derivedDataPath: derivedDataPath)
-            let onStdoutLine: (@Sendable (String) -> Void)? = progress.map { progress in
-                { @Sendable line in
-                    if let status = XcodebuildProgress.status(forLine: line) {
-                        progress(status)
-                    }
+            let logURL = try cache.logURL(for: selection.identity)
+            try SimToolDirectory.ensureEnclosing(cache.metadataRoot)
+            let scanner = XcodebuildLogScanner(configuration: selection.identity.configuration)
+            let onStdoutLine: @Sendable (String) -> Void = { line in
+                scanner.consume(line)
+                if let progress, let status = XcodebuildProgress.status(forLine: line) {
+                    progress(status)
                 }
             }
-            let buildOutput = try await ProcessRunner.run(
-                executable: URL(fileURLWithPath: "/usr/bin/xcrun"),
-                arguments: buildArguments,
-                timeoutSeconds: timeoutSeconds,
-                onStdoutLine: onStdoutLine
-            )
+            let buildOutput: ProcessOutput
+            do {
+                buildOutput = try await ProcessRunner.run(
+                    executable: URL(fileURLWithPath: "/usr/bin/xcrun"),
+                    arguments: buildArguments,
+                    timeoutSeconds: selection.buildTimeLimit,
+                    log: ProcessOutputLog(url: logURL),
+                    stopsWithSimTool: true,
+                    onStdoutLine: onStdoutLine
+                )
+            } catch let timeout as ProcessTimeoutError {
+                throw SimToolError("xcodebuild ran past the \(formatDuration(timeout.seconds)) time limit for scheme \(selection.identity.scheme) and was stopped; raise or lift it with build.timeout or --build-timeout (0 for no limit).\nFull log: \(logURL.path)")
+            }
             buildStep = SimulatorAppProcessStepSummary(name: "xcodebuild", output: buildOutput)
             guard buildOutput.status == 0 else {
-                let detail = XcodebuildFailure.detail(from: buildOutput)
-                throw SimToolError("xcodebuild failed for scheme \(selection.identity.scheme): \(detail)")
+                let detail = XcodebuildFailure.detail(
+                    stdoutErrorLines: scanner.failureLines,
+                    stdoutTail: buildOutput.stdoutString,
+                    stderr: buildOutput.stderrString
+                )
+                throw SimToolError("xcodebuild failed for scheme \(selection.identity.scheme): \(detail)\nFull log: \(logURL.path)")
             }
-            product = try await builtProduct(selection: selection, derivedDataPath: derivedDataPath)
+            product = try await builtProduct(
+                selection: selection,
+                derivedDataPath: derivedDataPath,
+                logged: scanner.builtApps,
+                previous: previous
+            )
+            logPath = logURL.path
         case .xcodeMCP:
             let outcome = try await XcodeMCPBuilder.build(
                 selection: selection,
                 device: try await device(udid: selection.deviceUDID),
-                timeoutSeconds: timeoutSeconds,
+                timeoutSeconds: selection.buildTimeLimit,
                 progress: progress
             )
             try checkConfiguration(outcome.configuration, of: selection)
             buildStep = outcome.stepSummary
             product = XcodeBuildProduct(appBundleURL: outcome.appBundleURL)
+            logPath = outcome.fullLogPath
         }
 
         let bundleIdentifier = try bundleIdentifier(appBundleURL: product.appBundleURL)
+        let stamp = try productStamp(appBundleURL: product.appBundleURL)
         var metadata = SimulatorAppBuildCacheMetadata(
             identity: selection.identity,
             checksum: fingerprint.checksum,
             inputFileCount: fingerprint.inputFileCount,
             appBundlePath: product.appBundleURL.path,
-            bundleIdentifier: bundleIdentifier
+            bundleIdentifier: bundleIdentifier,
+            product: stamp
         )
-        if let previous = cache.readMetadata(for: selection.identity) {
-            metadata.installRecords = previous.installRecords.filter { $0.value.checksum == fingerprint.checksum }
+        if let previous {
+            metadata.installRecords = previous.installRecords.filter { $0.value.checksum == fingerprint.checksum && $0.value.product == stamp }
         }
         try cache.write(metadata)
 
@@ -735,8 +1167,38 @@ public enum SimulatorAppLifecycleClient {
             xcodebuildRan: true,
             appBundlePath: product.appBundleURL.path,
             bundleIdentifier: bundleIdentifier,
+            product: stamp,
+            logPath: logPath,
             xcodebuild: buildStep
         )
+    }
+
+    /// A status for whoever is watching: the progress line when there is one,
+    /// else stderr — a `--json` run's stdout carries only its payload.
+    static func report(_ message: String, to progress: (@Sendable (String) -> Void)?) {
+        if let progress {
+            progress(message)
+        } else {
+            FileHandle.standardError.write(Data("simtool: \(message)\n".utf8))
+        }
+    }
+
+    /// `90m`, `1h 30m`, `45s`: a time limit as the error naming it reads.
+    static func formatDuration(_ seconds: TimeInterval) -> String {
+        let total = Int(seconds.rounded())
+        let hours = total / 3_600, minutes = total % 3_600 / 60, rest = total % 60
+        var parts: [String] = []
+        if hours > 0 { parts.append("\(hours)h") }
+        if minutes > 0 { parts.append("\(minutes)m") }
+        if rest > 0 || parts.isEmpty { parts.append("\(rest)s") }
+        return parts.joined(separator: " ")
+    }
+
+    private static func productStamp(appBundleURL: URL) throws -> SimulatorAppProductStamp {
+        guard let stamp = SimulatorAppProductStamp(appBundleURL: appBundleURL) else {
+            throw SimToolError("App bundle not found: \(appBundleURL.path)")
+        }
+        return stamp
     }
 
     /// Records checksum-cache metadata for an app built outside SimTool — for
@@ -757,21 +1219,23 @@ public enum SimulatorAppLifecycleClient {
         guard FileManager.default.fileExists(atPath: appBundleURL.path, isDirectory: &isDirectory), isDirectory.boolValue else {
             throw SimToolError("App bundle not found: \(appBundleURL.path)")
         }
-        let fingerprint = try SimulatorAppBuildFingerprinter.fingerprint(selection: selection, cacheRoot: cache.derivedDataRoot)
+        let fingerprint = try SimulatorAppBuildFingerprinter.fingerprint(
+            selection: selection,
+            cacheRoot: cache.derivedDataRoot,
+            hashCache: cache.inputHashesURL
+        )
         let bundleIdentifier = try bundleIdentifier(appBundleURL: appBundleURL)
-        var metadata = SimulatorAppBuildCacheMetadata(
+        // A build phase runs before Xcode signs the bundle, which rewrites it:
+        // the stamp waits for the first use (`validMetadata`). Whatever a
+        // device has installed is another build than this one.
+        let metadata = SimulatorAppBuildCacheMetadata(
             identity: selection.identity,
             checksum: fingerprint.checksum,
             inputFileCount: fingerprint.inputFileCount,
             appBundlePath: appBundleURL.standardizedFileURL.path,
-            bundleIdentifier: bundleIdentifier
+            bundleIdentifier: bundleIdentifier,
+            awaitingStamp: true
         )
-        // Drop install records for older checksums: the externally built app no
-        // longer matches what any device has installed. Records matching the new
-        // checksum (a rebuild with no source change) stay valid.
-        if let previous = cache.readMetadata(for: selection.identity) {
-            metadata.installRecords = previous.installRecords.filter { $0.value.checksum == fingerprint.checksum }
-        }
         try cache.write(metadata)
 
         return SimulatorAppBuildPayload(
@@ -787,7 +1251,8 @@ public enum SimulatorAppLifecycleClient {
     }
 
     /// Builds for `device` only (see `SimulatorAppBuildSelection.targeting`),
-    /// then installs and launches there.
+    /// then installs and launches there. The build runs under the selection's
+    /// time limit; `timeoutSeconds` bounds install and launch.
     public static func launch(
         selection: SimulatorAppBuildSelection,
         device: SimulatorDevice,
@@ -803,7 +1268,6 @@ public enum SimulatorAppLifecycleClient {
             selection: selection.targeting(device),
             force: force,
             cache: cache,
-            timeoutSeconds: timeoutSeconds,
             progress: buildProgress
         )
         return try await installAndLaunch(
@@ -821,18 +1285,25 @@ public enum SimulatorAppLifecycleClient {
     /// Whether the bundle recorded as installed on this device is the one we are
     /// about to run. `force` reinstalls regardless; a fresh `xcodebuild` means
     /// whatever is on the device is stale even when the checksum matches, because
-    /// the record was written for the previous bundle.
+    /// the record was written for the previous bundle. Sources with the same
+    /// checksum do not make the same bundle either — a build with other
+    /// settings, or Xcode's, may have replaced it since — so the record must
+    /// name this very `product`.
     public static func needsInstall(
         checksum: String,
         bundleIdentifier: String,
+        product: SimulatorAppProductStamp?,
         installed: SimulatorAppInstallRecord?,
         xcodebuildRan: Bool,
         force: Bool
     ) -> Bool {
-        force
+        guard let installed else { return true }
+        return force
             || xcodebuildRan
-            || installed?.checksum != checksum
-            || installed?.bundleIdentifier != bundleIdentifier
+            || installed.checksum != checksum
+            || installed.bundleIdentifier != bundleIdentifier
+            || product == nil
+            || installed.product != product
     }
 
     /// Brings the app on the device up to date without launching it — what a
@@ -851,24 +1322,45 @@ public enum SimulatorAppLifecycleClient {
         guard needsInstall(
             checksum: buildPayload.checksum,
             bundleIdentifier: buildPayload.bundleIdentifier,
+            product: buildPayload.product,
             installed: installRecord,
             xcodebuildRan: buildPayload.xcodebuildRan,
             force: force
         ) else { return false }
 
         progress?("Installing…")
-        _ = try await installApp(
-            deviceUDID: device.udid,
-            appBundlePath: buildPayload.appBundlePath,
-            timeoutSeconds: timeoutSeconds
-        )
+        _ = try await installBuilt(buildPayload, device: device, cache: cache, timeoutSeconds: timeoutSeconds, progress: progress)
+        return true
+    }
+
+    /// Installs the payload's bundle — the very one its build produced, not
+    /// one rebuilt since — and records it. The build's locks are held while
+    /// `simctl` copies it, so no other build rewrites it halfway through and
+    /// no prune removes it.
+    private static func installBuilt(
+        _ buildPayload: SimulatorAppBuildPayload,
+        device: SimulatorDevice,
+        cache: SimulatorAppBuildCache,
+        timeoutSeconds: TimeInterval?,
+        progress: (@Sendable (String) -> Void)?
+    ) async throws -> SimulatorAppProcessStepSummary {
+        let (lock, _) = try await cache.lock(identity: buildPayload.identity) { message in
+            report(message, to: progress)
+        }
+        defer { lock.release() }
+        let bundle = URL(fileURLWithPath: buildPayload.appBundlePath)
+        if let built = buildPayload.product, SimulatorAppProductStamp(appBundleURL: bundle) != built {
+            throw SimToolError("\(bundle.path) is no longer the app SimTool built: another build has rewritten it since. Run again to build it anew.")
+        }
+        let step = try await installApp(deviceUDID: device.udid, appBundlePath: buildPayload.appBundlePath, timeoutSeconds: timeoutSeconds)
         try cache.recordInstall(
             identity: buildPayload.identity,
             checksum: buildPayload.checksum,
             bundleIdentifier: buildPayload.bundleIdentifier,
+            product: buildPayload.product,
             deviceUDID: device.udid
         )
-        return true
+        return step
     }
 
     /// Installs (only when the cache's install record does not match the
@@ -894,24 +1386,15 @@ public enum SimulatorAppLifecycleClient {
         let needsInstall = needsInstall(
             checksum: buildPayload.checksum,
             bundleIdentifier: buildPayload.bundleIdentifier,
+            product: buildPayload.product,
             installed: installRecord,
             xcodebuildRan: buildPayload.xcodebuildRan,
             force: force
         )
         if needsInstall {
             progress?("Installing…")
-            installStep = try await installApp(
-                deviceUDID: device.udid,
-                appBundlePath: buildPayload.appBundlePath,
-                timeoutSeconds: timeoutSeconds
-            )
+            installStep = try await installBuilt(buildPayload, device: device, cache: cache, timeoutSeconds: timeoutSeconds, progress: progress)
             installRan = true
-            try cache.recordInstall(
-                identity: buildPayload.identity,
-                checksum: buildPayload.checksum,
-                bundleIdentifier: buildPayload.bundleIdentifier,
-                deviceUDID: device.udid
-            )
         }
 
         progress?("Launching…")
@@ -924,18 +1407,8 @@ public enum SimulatorAppLifecycleClient {
         )
         if launchStep.status != 0, !installRan, isMissingInstallLaunchFailure(launchStep) {
             progress?("Reinstalling…")
-            installStep = try await installApp(
-                deviceUDID: device.udid,
-                appBundlePath: buildPayload.appBundlePath,
-                timeoutSeconds: timeoutSeconds
-            )
+            installStep = try await installBuilt(buildPayload, device: device, cache: cache, timeoutSeconds: timeoutSeconds, progress: progress)
             installRan = true
-            try cache.recordInstall(
-                identity: buildPayload.identity,
-                checksum: buildPayload.checksum,
-                bundleIdentifier: buildPayload.bundleIdentifier,
-                deviceUDID: device.udid
-            )
             progress?("Launching…")
             launchStep = try await launchApp(
                 deviceUDID: device.udid,
@@ -998,6 +1471,11 @@ public enum SimulatorAppLifecycleClient {
         if let derivedDataPath, !derivedDataPath.isEmpty {
             arguments += ["-derivedDataPath", derivedDataPath]
         }
+        if !showBuildSettings {
+            // Each run-script phase would otherwise print the whole build
+            // environment, hundreds of lines a phase, into the log.
+            arguments.append("-hideShellScriptEnvironment")
+        }
         arguments += selection.identity.buildSettings ?? []
         if showBuildSettings {
             arguments += ["-showBuildSettings", "-json"]
@@ -1026,31 +1504,47 @@ public enum SimulatorAppLifecycleClient {
         if let derivedDataPath, !derivedDataPath.isEmpty {
             arguments += ["-derivedDataPath", derivedDataPath]
         }
+        arguments.append("-hideShellScriptEnvironment")
         arguments += selection.identity.buildSettings ?? []
         arguments.append("test")
         return arguments
     }
 
+    /// Runs `xcodebuild test` under the selection's time limit.
     public static func test(
         selection: SimulatorAppBuildSelection,
         device: SimulatorDevice,
-        timeoutSeconds: TimeInterval? = 1_800
+        cache: SimulatorAppBuildCache = SimulatorAppBuildCache(simtoolDirectory: SimToolDirectory.resolve())
     ) async throws -> SimulatorAppTestPayload {
-        let output = try await ProcessRunner.run(
-            executable: URL(fileURLWithPath: "/usr/bin/xcrun"),
-            arguments: xcodebuildTestArguments(
-                selection: selection,
-                device: device,
-                derivedDataPath: selection.identity.derivedDataPath
-            ),
-            timeoutSeconds: timeoutSeconds
-        )
+        let logURL = try cache.logURL(for: selection.identity, action: "test")
+        try SimToolDirectory.ensureEnclosing(cache.metadataRoot)
+        let (testLock, _) = try await cache.lock(identity: selection.identity) { message in
+            report(message, to: nil)
+        }
+        defer { testLock.release() }
+        let output: ProcessOutput
+        do {
+            output = try await ProcessRunner.run(
+                executable: URL(fileURLWithPath: "/usr/bin/xcrun"),
+                arguments: xcodebuildTestArguments(
+                    selection: selection,
+                    device: device,
+                    derivedDataPath: selection.identity.derivedDataPath
+                ),
+                timeoutSeconds: selection.buildTimeLimit,
+                log: ProcessOutputLog(url: logURL),
+                stopsWithSimTool: true
+            )
+        } catch let timeout as ProcessTimeoutError {
+            throw SimToolError("xcodebuild test ran past the \(formatDuration(timeout.seconds)) time limit for scheme \(selection.identity.scheme) and was stopped; raise or lift it with build.timeout or --build-timeout (0 for no limit).\nFull log: \(logURL.path)")
+        }
         let step = SimulatorAppProcessStepSummary(name: "xcodebuild test", output: output)
         return SimulatorAppTestPayload(
             identity: selection.identity,
             device: device,
             passed: output.status == 0,
             xcodebuildRan: true,
+            logPath: logURL.path,
             xcodebuild: step
         )
     }
@@ -1109,9 +1603,56 @@ public enum SimulatorAppLifecycleClient {
         throw SimToolError("Xcode built scheme \(selection.identity.scheme) in its Run configuration \(built), not \(expected). Set the scheme's Run configuration to \(expected) in Xcode, or ask for configuration \(built).")
     }
 
-    private static func builtProduct(selection: SimulatorAppBuildSelection, derivedDataPath: String) async throws -> XcodeBuildProduct {
+    /// The `.app` a successful xcodebuild run produced. The build's own log
+    /// says where it wrote it, whatever products root Xcode's build location
+    /// settings chose — `-derivedDataPath` does not decide that on its own.
+    /// A build with nothing to do writes nothing; then the bundle this
+    /// identity's previous build made is still the product, provided nothing
+    /// has rebuilt it since. Only when neither tells is xcodebuild asked for
+    /// its build settings: a second run that loads the workspace again.
+    static func builtProduct(
+        selection: SimulatorAppBuildSelection,
+        derivedDataPath: String,
+        logged: [URL],
+        previous: SimulatorAppBuildCacheMetadata?
+    ) async throws -> XcodeBuildProduct {
+        if let url = productInLog(logged, scheme: selection.identity.scheme, previous: previous) {
+            return XcodeBuildProduct(appBundleURL: url)
+        }
+        // Nothing to do for it — or only for another app of the scheme.
+        if let previous, let recorded = previous.product,
+           SimulatorAppProductStamp(appBundleURL: URL(fileURLWithPath: previous.appBundlePath)) == recorded {
+            return XcodeBuildProduct(appBundleURL: URL(fileURLWithPath: previous.appBundlePath))
+        }
+        return try await builtProductFromSettings(selection: selection, derivedDataPath: derivedDataPath)
+    }
+
+    /// The app among those the build log shows written. After a previous
+    /// build of this identity, only the one with its name: a scheme with two
+    /// apps may rewrite just the other one. On a first build, the only one,
+    /// else the one named after the scheme. Nil when that leaves more than one
+    /// (an app with an App Clip, say) or none.
+    static func productInLog(_ logged: [URL], scheme: String, previous: SimulatorAppBuildCacheMetadata?) -> URL? {
+        let apps = logged.filter { url in
+            var isDirectory: ObjCBool = false
+            return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) && isDirectory.boolValue
+        }
+        if let previous {
+            let name = URL(fileURLWithPath: previous.appBundlePath).lastPathComponent
+            return apps.first { $0.lastPathComponent == name }
+        }
+        if apps.count == 1 { return apps[0] }
+        let named = apps.filter { $0.lastPathComponent == "\(scheme).app" }
+        return named.count == 1 ? named[0] : nil
+    }
+
+    private static func builtProductFromSettings(selection: SimulatorAppBuildSelection, derivedDataPath: String) async throws -> XcodeBuildProduct {
         let settingsArguments = xcodebuildArguments(selection: selection, derivedDataPath: derivedDataPath, showBuildSettings: true)
-        let settingsOutput = try await ProcessRunner.runXcrun(settingsArguments)
+        let settingsOutput = try await ProcessRunner.run(
+            executable: URL(fileURLWithPath: "/usr/bin/xcrun"),
+            arguments: settingsArguments,
+            stopsWithSimTool: true
+        )
         if settingsOutput.status == 0, let product = try? parseBuildSettings(settingsOutput.stdout) {
             return product
         }
@@ -1212,19 +1753,10 @@ public enum SimulatorAppLifecycleClient {
     }
 }
 
-private struct XcodeBuildProduct: Equatable {
+struct XcodeBuildProduct: Equatable {
     var appBundleURL: URL
 }
 
 private struct XcodeBuildSettingsEntry: Decodable {
     var buildSettings: [String: String]
-}
-
-private extension URL {
-    func pathRelative(to root: URL) -> String {
-        let rootPath = root.standardizedFileURL.path
-        let path = standardizedFileURL.path
-        guard path == rootPath || path.hasPrefix(rootPath + "/") else { return path }
-        return String(path.dropFirst(rootPath.count + (path == rootPath ? 0 : 1)))
-    }
 }

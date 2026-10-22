@@ -10,6 +10,34 @@ import Foundation
 /// summary.
 public enum XcodebuildFailure {
     public static func detail(stdout: String, stderr: String) -> String {
+        detail(causes: errorLines(in: stdout) + errorLines(in: stderr), stderr: stderr, fallback: stdout)
+    }
+
+    /// Convenience overload for a `ProcessOutput` from a failed xcodebuild.
+    public static func detail(from output: ProcessOutput) -> String {
+        detail(stdout: output.stdoutString, stderr: output.stderrString)
+    }
+
+    /// The detail of a build whose stdout was scanned as it streamed rather
+    /// than kept: its error lines (`isErrorLine`), and the end of it for when
+    /// none were recognized.
+    public static func detail(stdoutErrorLines: [String], stdoutTail: String, stderr: String) -> String {
+        detail(causes: stdoutErrorLines + errorLines(in: stderr), stderr: stderr, fallback: stdoutTail)
+    }
+
+    /// Whether a line of xcodebuild output, trimmed, explains a failure.
+    public static func isErrorLine(_ line: String) -> Bool {
+        guard !line.isEmpty else { return false }
+        let lowered = line.lowercased()
+        // A compiler/tool diagnostic is "error:" at the start of the line
+        // (`error: Build input file …`) or after a space (`clang: error:`,
+        // `Foo.swift:10:5: error:`). Requiring the space avoids matching
+        // `error:` inside Swift parameter labels like `isLoading:error:`.
+        if lowered.hasPrefix("error:") || lowered.contains(" error:") { return true }
+        return markers.contains { lowered.contains($0) }
+    }
+
+    private static func detail(causes: [String], stderr: String, fallback: String) -> String {
         let summary = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
         let summaryLines = Set(
             summary.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
@@ -19,7 +47,7 @@ public enum XcodebuildFailure {
         // on stdout, but be robust), minus anything already shown in the summary.
         var seen = Set<String>()
         var cause: [String] = []
-        for line in errorLines(in: stdout) + errorLines(in: stderr) {
+        for line in causes {
             let key = line.trimmingCharacters(in: .whitespaces)
             guard !summaryLines.contains(key), seen.insert(key).inserted else { continue }
             cause.append(line)
@@ -27,7 +55,7 @@ public enum XcodebuildFailure {
 
         guard !cause.isEmpty else {
             // Nothing recognizable: preserve the previous behavior.
-            return summary.isEmpty ? stdout.trimmingCharacters(in: .whitespacesAndNewlines) : summary
+            return summary.isEmpty ? fallback.trimmingCharacters(in: .whitespacesAndNewlines) : summary
         }
 
         let capped = cap(cause)
@@ -36,24 +64,10 @@ public enum XcodebuildFailure {
         return blocks.joined(separator: "\n\n")
     }
 
-    /// Convenience overload for a `ProcessOutput` from a failed xcodebuild.
-    public static func detail(from output: ProcessOutput) -> String {
-        detail(stdout: output.stdoutString, stderr: output.stderrString)
-    }
-
     private static func errorLines(in text: String) -> [String] {
         text.split(whereSeparator: \.isNewline)
             .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { line in
-                guard !line.isEmpty else { return false }
-                let lowered = line.lowercased()
-                // A compiler/tool diagnostic is "error:" at the start of the line
-                // (`error: Build input file …`) or after a space (`clang: error:`,
-                // `Foo.swift:10:5: error:`). Requiring the space avoids matching
-                // `error:` inside Swift parameter labels like `isLoading:error:`.
-                if lowered.hasPrefix("error:") || lowered.contains(" error:") { return true }
-                return markers.contains { lowered.contains($0) }
-            }
+            .filter(isErrorLine)
     }
 
     /// Substrings (compared case-insensitively) that mark a line as the cause of

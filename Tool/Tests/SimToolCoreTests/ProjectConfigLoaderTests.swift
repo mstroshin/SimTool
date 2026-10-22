@@ -222,6 +222,7 @@ final class ProjectConfigLoaderTests: XCTestCase {
             "-configuration", "Debug",
             "-destination", "platform=iOS Simulator,id=5A1C0DE0-0000-4000-8000-00000000BEEF",
             "-derivedDataPath", derivedData,
+            "-hideShellScriptEnvironment",
             "MACOSX_DEPLOYMENT_TARGET=15.0",
             "build",
         ])
@@ -274,7 +275,7 @@ final class ProjectConfigLoaderTests: XCTestCase {
         let config = try ProjectConfigLoader.load(startDirectory: root)
         XCTAssertEqual(config.build.builder, .xcodeMCP)
 
-        // Xcode builds into its own DerivedData with the project's own
+        // Xcode builds where its own settings say, with the project's own
         // settings, so neither reaches its build nor its cache entry.
         let xcode = try config.buildSelection()
         XCTAssertEqual(xcode.builder, .xcodeMCP)
@@ -297,6 +298,122 @@ final class ProjectConfigLoaderTests: XCTestCase {
         )
         XCTAssertEqual(config.build.builder(for: sameWorkspace), .xcodeMCP)
         XCTAssertNil(config.build.builder(for: otherProject))
+    }
+
+    // `app build --workspace <the configured one>` must build what `run`
+    // builds, where `run` builds it: a DerivedData of its own is a second cold
+    // build, and with Xcode's custom build locations a fight over module caches.
+    func testAnExplicitWorkspaceOfTheConfiguredAppInheritsItsDerivedData() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try writeConfig("""
+        simulator: booted
+        bundleId: com.example.MyApp
+        build:
+          workspace: App.xcworkspace
+          scheme: App
+          derivedDataPath: DerivedData
+          settings:
+            MACOSX_DEPLOYMENT_TARGET: 15.0
+        """, in: root)
+        let build = try ProjectConfigLoader.load(startDirectory: root).build
+        let workspace = root.appendingPathComponent("App.xcworkspace").path
+        func explicit(
+            workspace: String? = workspace,
+            project: String? = nil,
+            derivedDataPath: String? = nil,
+            builder: SimulatorAppBuilder? = nil
+        ) throws -> SimulatorAppBuildSelection {
+            try ProjectConfig.Build.explicitSelection(
+                configured: build, workspace: workspace, project: project, scheme: "App", configuration: nil,
+                derivedDataPath: derivedDataPath, settings: [:], builder: builder
+            )
+        }
+
+        // The same workspace by its path is the configured build: one cache entry.
+        XCTAssertEqual(try explicit().identity, try build.selection().identity)
+        XCTAssertEqual(try explicit().identity.derivedDataPath, root.appendingPathComponent("DerivedData").path)
+        // A flag still wins over the key.
+        XCTAssertEqual(try explicit(derivedDataPath: "/tmp/Elsewhere").identity.derivedDataPath, "/tmp/Elsewhere")
+        // Another project takes nothing from the block.
+        let other = try explicit(workspace: nil, project: root.appendingPathComponent("App.xcodeproj").path)
+        XCTAssertNil(other.identity.derivedDataPath)
+        XCTAssertNil(other.identity.buildSettings)
+        // Without a config, the flags alone.
+        XCTAssertNil(try ProjectConfig.Build.explicitSelection(
+            configured: nil, workspace: workspace, project: nil, scheme: "App", configuration: nil,
+            derivedDataPath: nil, settings: [:], builder: nil
+        ).identity.derivedDataPath)
+        // Xcode picks its DerivedData itself: the configured one stays out,
+        // and asking for one is an error.
+        let xcode = try explicit(builder: .xcodeMCP)
+        XCTAssertNil(xcode.identity.derivedDataPath)
+        XCTAssertNil(xcode.identity.buildSettings)
+        XCTAssertThrowsError(try explicit(derivedDataPath: "/tmp/Elsewhere", builder: .xcodeMCP))
+    }
+
+    func testABuildRunsUnderTheConfiguredTimeoutOrNone() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try writeConfig("""
+        simulator: booted
+        bundleId: com.example.MyApp
+        build:
+          workspace: App.xcworkspace
+          scheme: App
+          timeout: 90m
+        """, in: root)
+        let config = try ProjectConfigLoader.load(startDirectory: root)
+        XCTAssertEqual(config.build.timeout, 5_400)
+        XCTAssertEqual(try config.buildSelection().buildTimeLimit, 5_400)
+        let device = SimulatorDevice(udid: "DEVICE", name: "iPhone", runtime: "iOS", state: "Booted", isAvailable: true)
+        XCTAssertEqual(try config.buildSelection(for: device).buildTimeLimit, 5_400, "run and test run build under it too")
+        // A flag wins; 0 lifts the limit.
+        XCTAssertEqual(try config.buildSelection(timeout: 60).buildTimeLimit, 60)
+        XCTAssertNil(try config.buildSelection(timeout: 0).buildTimeLimit)
+        // The configured workspace by its path takes it; another project does not.
+        func explicit(workspace: String?, project: String?, timeout: TimeInterval? = nil) throws -> SimulatorAppBuildSelection {
+            try ProjectConfig.Build.explicitSelection(
+                configured: config.build, workspace: workspace, project: project, scheme: "App", configuration: nil,
+                derivedDataPath: nil, settings: [:], builder: nil, timeout: timeout
+            )
+        }
+        XCTAssertEqual(try explicit(workspace: root.appendingPathComponent("App.xcworkspace").path, project: nil).buildTimeLimit, 5_400)
+        XCTAssertNil(try explicit(workspace: nil, project: root.appendingPathComponent("App.xcodeproj").path).buildTimeLimit)
+        XCTAssertEqual(try explicit(workspace: nil, project: root.appendingPathComponent("App.xcodeproj").path, timeout: 30).buildTimeLimit, 30)
+        // The time limit is no part of what was built: one cache entry.
+        XCTAssertEqual(try config.buildSelection(timeout: 60).identity, try config.buildSelection().identity)
+
+        try writeConfig("""
+        simulator: booted
+        bundleId: com.example.MyApp
+        build:
+          workspace: App.xcworkspace
+          scheme: App
+        """, in: root)
+        XCTAssertNil(try ProjectConfigLoader.load(startDirectory: root).buildSelection().buildTimeLimit, "no limit unless one is set")
+
+        try assertLoadThrows("""
+        simulator: booted
+        bundleId: com.example.MyApp
+        build:
+          workspace: App.xcworkspace
+          scheme: App
+          timeout: soon
+        """, contains: "Invalid `build.timeout`")
+    }
+
+    func testBuildTimeoutsReadAsSecondsOrWithAUnit() throws {
+        XCTAssertEqual(try SimulatorAppBuildSelection.parseTimeout("2700"), 2_700)
+        XCTAssertEqual(try SimulatorAppBuildSelection.parseTimeout("30s"), 30)
+        XCTAssertEqual(try SimulatorAppBuildSelection.parseTimeout("45m"), 2_700)
+        XCTAssertEqual(try SimulatorAppBuildSelection.parseTimeout("1.5h"), 5_400)
+        XCTAssertEqual(try SimulatorAppBuildSelection.parseTimeout(" 2H "), 7_200)
+        XCTAssertEqual(try SimulatorAppBuildSelection.parseTimeout("0"), 0)
+        XCTAssertEqual(try SimulatorAppBuildSelection.parseTimeout("168h"), 604_800)
+        for invalid in ["", "m", "soon", "-5", "10x", "nan", "inf", "169h", "1e16"] {
+            XCTAssertThrowsError(try SimulatorAppBuildSelection.parseTimeout(invalid), invalid)
+        }
     }
 
     func testFlagsOverrideTheConfiguredBuildKeyByKey() throws {
