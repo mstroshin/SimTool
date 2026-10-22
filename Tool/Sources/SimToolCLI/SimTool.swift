@@ -1008,7 +1008,7 @@ struct AppCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "app",
         abstract: "Build, install, and launch simulator apps.",
-        subcommands: [Build.self, Launch.self, Test.self, Info.self, Install.self]
+        subcommands: [Build.self, Launch.self, Test.self, Info.self, Install.self, Cache.self]
     )
 }
 

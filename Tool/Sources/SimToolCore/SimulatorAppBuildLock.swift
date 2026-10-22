@@ -57,9 +57,7 @@ public final class SimulatorAppBuildLock: @unchecked Sendable {
                 }
             }
             held.append(descriptor)
-            let record = "\(getpid())\t\(ISO8601DateFormatter().string(from: Date()))\t\(owner)\t\(path)\n"
-            ftruncate(descriptor, 0)
-            _ = record.withCString { pwrite(descriptor, $0, strlen($0), 0) }
+            record(owner: owner, path: path, in: descriptor)
         }
         return held
     }
@@ -72,6 +70,20 @@ public final class SimulatorAppBuildLock: @unchecked Sendable {
         guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else { return errno == EWOULDBLOCK }
         flock(descriptor, LOCK_UN)
         return false
+    }
+
+    /// The lock for `path` if no one holds it, without waiting; nil if
+    /// someone does (or it cannot be taken).
+    public static func tryAcquire(path: String, in directory: URL, owner: String = currentOwner()) -> SimulatorAppBuildLock? {
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let descriptor = open(lockFile(for: path, in: directory).path, O_CREAT | O_RDWR | O_CLOEXEC, 0o644)
+        guard descriptor >= 0 else { return nil }
+        guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
+            close(descriptor)
+            return nil
+        }
+        record(owner: owner, path: path, in: descriptor)
+        return SimulatorAppBuildLock(descriptors: [descriptor])
     }
 
     /// Releases every lock taken; releasing twice is harmless.
@@ -98,6 +110,13 @@ public final class SimulatorAppBuildLock: @unchecked Sendable {
     static func lockFile(for path: String, in directory: URL) -> URL {
         let digest = SHA256.hash(data: Data(path.utf8)).map { String(format: "%02x", $0) }.joined()
         return directory.appendingPathComponent("\(digest.prefix(32)).lock")
+    }
+
+    /// Writes who holds the lock into its file, for whoever waits on it.
+    private static func record(owner: String, path: String, in descriptor: Int32) {
+        let line = "\(getpid())\t\(ISO8601DateFormatter().string(from: Date()))\t\(owner)\t\(path)\n"
+        ftruncate(descriptor, 0)
+        _ = line.withCString { pwrite(descriptor, $0, strlen($0), 0) }
     }
 
     private func append(_ descriptor: Int32) {

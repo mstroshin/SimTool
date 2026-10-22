@@ -632,6 +632,20 @@ simulator does not have that build installed yet, SimTool installs it before
 launching. Checksum metadata is stored in `.simtool/build/` inside the project;
 build products (DerivedData) stay in `~/Library/Caches/SimTool`.
 
+That cache keeps one DerivedData per build identity — gigabytes each — and no
+build removes one, so they outlive the worktrees and checkouts they were built
+for. `simtool app cache prune` clears them out: an entry goes when the workspace
+or project it was built from no longer exists, when no build has used it for
+`--older-than <days>`, or with `--all`; one a running build uses stays. It is a
+dry run that lists what would go and the space it frees until you pass
+`--delete`. A `derivedDataPath` set in a project's config is the project's own
+and never touched.
+
+```sh
+swift run simtool app cache prune                       # what would go, and how much
+swift run simtool app cache prune --older-than 30 --delete
+```
+
 A cache hit also needs the `.app` to still be the one that build produced.
 One bundle path is often written by more than one build — a build with other
 `--build-setting`s into the same DerivedData, Xcode (with `xcode-mcp` or from
