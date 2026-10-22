@@ -1012,9 +1012,15 @@ The source fingerprint hashes only git-tracked (and untracked-but-not-ignored)
 files when the project is in a git work tree, falling back to a filesystem walk
 otherwise. This keeps gitignored, generated artifacts — Tuist's `Derived/`,
 SPM checkouts — out of the checksum, so they don't spuriously invalidate the
-cache. Build directories stay out either way, ignored or not: anything under a
-directory named `DerivedData`, `build`, `Build`, `.build`, `.swiftpm`,
-`.simtool` or `xcuserdata`, and the configured `derivedDataPath` under any name.
+cache. Untracked build directories stay out even when `.gitignore` misses them:
+anything git does not track under a directory named `DerivedData`, `build`,
+`Build`, `.build`, `.swiftpm`, `.simtool` or `xcuserdata`, and the configured
+`derivedDataPath` under any name. A tracked file counts wherever it sits — an
+xcconfig committed under `Build/` is a source. So does configuration kept out of
+git on purpose — an ignored `.env`, `.xcconfig`, `.plist`, `.json`,
+`.entitlements` or `.xcprivacy` file such as a secrets xcconfig or
+`GoogleService-Info.plist` — unless it lies inside an ignored directory, which is
+never read.
 
 What it hashes is what a build compiles, links or copies into the app: code,
 headers and build configuration (`.xcconfig`, `.xcfilelist`, `.entitlements`,

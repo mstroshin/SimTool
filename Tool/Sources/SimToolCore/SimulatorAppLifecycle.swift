@@ -667,41 +667,68 @@ public enum SimulatorAppBuildFingerprinter {
         return files
     }
 
-    /// Returns the build-input files known to git (tracked plus untracked but
-    /// not ignored), or `nil` when `root` is not inside a git work tree (or git
-    /// is unavailable) so the caller falls back to the filesystem walk. Listing
-    /// via git is what excludes gitignored generated artifacts from the
-    /// fingerprint; the walk's own exclusions — build directories by name, the
-    /// DerivedData roots — and its type filter (`isBuildInput`) then apply
-    /// as well, so a project whose `.gitignore` misses its DerivedData neither
-    /// misses the cache forever nor hashes gigabytes of build products.
+    /// Returns the build-input files known to git, or `nil` when `root` is
+    /// not inside a git work tree (or git is unavailable) so the caller falls
+    /// back to the filesystem walk:
+    ///
+    /// - every tracked file — committed on purpose, wherever it sits, as an
+    ///   xcconfig under `Build/` does;
+    /// - untracked files git does not ignore, minus build directories by name
+    ///   and the DerivedData roots: a project whose `.gitignore` misses its
+    ///   DerivedData must neither miss the cache forever nor hash gigabytes
+    ///   of build products;
+    /// - ignored configuration files outside ignored directories — `.env`, a
+    ///   secrets `.xcconfig`, `GoogleService-Info.plist`, kept out of git yet
+    ///   read by the build. An ignored directory (Tuist's `Derived/`, Pods,
+    ///   SPM checkouts) is never entered: what is generated there derives
+    ///   from tracked inputs and gets rewritten on builds.
+    ///
+    /// The type filter (`isBuildInput`) applies to all of them.
     private static func gitInputFiles(root: String, excludedRoots: [String]) -> [SimulatorAppBuildInputFile]? {
-        // Ignored directories are not walked at all: excluded by name here,
-        // and by path through pathspecs (relative to `root`, where git runs).
-        var arguments = ["-C", root, "ls-files", "--cached", "--others", "--exclude-standard", "-z"]
-        arguments += excludedDirectoryNames.sorted().map { "--exclude=\($0)/" }
-        arguments += ["--", "."]
+        // Pathspecs, relative to `root` where git runs, keep git out of the
+        // DerivedData roots; excluding by name keeps it out of build directories.
+        var pathspecs = ["--", "."]
         for excluded in excludedRoots {
             let below = relative(excluded, to: root)
             guard !below.hasPrefix("/"), !below.isEmpty else { continue }
-            arguments.append(":(exclude,literal)\(below)")
+            pathspecs.append(":(exclude,literal)\(below)")
         }
-        guard let output = runGit(arguments), output.status == 0 else { return nil }
+        let excludedNames = excludedDirectoryNames.sorted().map { "--exclude=\($0)/" }
+        guard let listed = runGit(["-C", root, "ls-files", "-t", "--cached", "--others", "--exclude-standard", "-z"] + excludedNames + pathspecs),
+              listed.status == 0
+        else { return nil }
+        let ignored = runGit(["-C", root, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"] + pathspecs)
 
         var files: [SimulatorAppBuildInputFile] = []
         var seen = Set<String>()
-        for listed in String(decoding: output.stdout, as: UTF8.self).split(separator: "\0") {
-            let relativePath = String(listed)
-            guard !relativePath.isEmpty, seen.insert(relativePath).inserted else { continue }
+        func add(_ relativePath: String, tracked: Bool, ignored: Bool = false) {
+            guard !relativePath.isEmpty, !relativePath.hasSuffix("/"), seen.insert(relativePath).inserted else { return }
             let path = root + "/" + relativePath
-            // Tracked files are listed whatever the exclusions say.
-            if isExcluded(relativePath: relativePath) || isUnder(path, anyOf: excludedRoots) { continue }
+            if isUnder(path, anyOf: excludedRoots) { return }
+            if !tracked, isExcluded(relativePath: relativePath) { return }
+            if ignored, !isIgnoredBuildInput(relativePath: relativePath) { return }
             // Directories (submodules) and stale index entries (deleted or
             // renamed files) have no regular file to hash.
-            guard isBuildInput(relativePath: relativePath), let byteCount = regularFileSize(atPath: path) else { continue }
+            guard isBuildInput(relativePath: relativePath), let byteCount = regularFileSize(atPath: path) else { return }
             files.append(SimulatorAppBuildInputFile(relativePath: relativePath, path: path, byteCount: byteCount))
         }
+        // `-t` tags each path: `? ` untracked, anything else tracked.
+        for entry in String(decoding: listed.stdout, as: UTF8.self).split(separator: "\0") where entry.count > 2 {
+            add(String(entry.dropFirst(2)), tracked: !entry.hasPrefix("? "))
+        }
+        if let ignored, ignored.status == 0 {
+            for entry in String(decoding: ignored.stdout, as: UTF8.self).split(separator: "\0") {
+                add(String(entry), tracked: false, ignored: true)
+            }
+        }
         return files
+    }
+
+    /// The ignored files that still count: configuration a build reads but
+    /// a repository keeps out of git.
+    private static func isIgnoredBuildInput(relativePath: String) -> Bool {
+        guard let name = relativePath.split(separator: "/").last else { return false }
+        return includedFileNames.contains(String(name)) || ignoredInputExtensions.contains(pathExtension(name))
     }
 
     /// The size of the regular file at `path`, links followed — what reading
@@ -795,6 +822,11 @@ public enum SimulatorAppBuildFingerprinter {
         guard let dot = name.lastIndex(of: "."), dot != name.startIndex else { return "" }
         return name[name.index(after: dot)...].lowercased()
     }
+
+    /// Ignored files of these types are hashed (`isIgnoredBuildInput`).
+    private static let ignoredInputExtensions: Set<String> = [
+        "entitlements", "json", "plist", "xcconfig", "xcprivacy"
+    ]
 
     private static let excludedDirectoryNames: Set<String> = [
         ".build", ".git", ".hg", ".svn", ".swiftpm", ".simtool", "Build", "build", "DerivedData", "xcuserdata"

@@ -246,6 +246,38 @@ final class SimulatorAppLifecycleTests: XCTestCase {
         XCTAssertNotEqual(try SimulatorAppBuildFingerprinter.fingerprint(selection: selection).checksum, before.checksum)
     }
 
+    // Configuration a repository keeps out of git is still read by the build:
+    // an edit to it must miss the cache. Ignored directories stay unread.
+    func testIgnoredConfigurationFilesCountButIgnoredDirectoriesDoNot() throws {
+        try XCTSkipUnless(gitIsAvailable(), "git not available")
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let project = root.appendingPathComponent("Example.xcodeproj", isDirectory: true)
+        try write("Example.xcodeproj/project.pbxproj", contents: "project", root: root)
+        try write("Sources/App.swift", contents: "struct App {}", root: root)
+        try write(".env", contents: "API=1", root: root)
+        try write("Config/Secrets.xcconfig", contents: "KEY = 1", root: root)
+        try write("Config/GoogleService-Info.plist", contents: "<plist/>", root: root)
+        try write("Derived/InfoPlists/Example-Info.plist", contents: "<plist>generated</plist>", root: root)
+        try write("Sources/Generated.swift", contents: "// generated", root: root)
+        try write("build.log", contents: "log", root: root)
+        try write(".gitignore", contents: ".env\nSecrets.xcconfig\nGoogleService-Info.plist\nDerived/\nGenerated.swift\n*.log\n", root: root)
+        runGit(["init"], in: root)
+        runGit(["add", "-A"], in: root)
+
+        let selection = try SimulatorAppBuildSelection.validated(workspacePath: nil, projectPath: project.path, scheme: "Example")
+        XCTAssertEqual(try SimulatorAppBuildFingerprinter.inputFiles(selection: selection).map(\.relativePath), [
+            ".env",
+            "Config/GoogleService-Info.plist",
+            "Config/Secrets.xcconfig",
+            "Example.xcodeproj/project.pbxproj",
+            "Sources/App.swift",
+        ])
+        let before = try SimulatorAppBuildFingerprinter.fingerprint(selection: selection)
+        try write("Config/Secrets.xcconfig", contents: "KEY = 2", root: root)
+        XCTAssertNotEqual(try SimulatorAppBuildFingerprinter.fingerprint(selection: selection).checksum, before.checksum)
+    }
+
     func testWorkspaceReferencesResolveTheWayXcodeResolvesThem() throws {
         let root = try makeTempDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -324,7 +356,8 @@ final class SimulatorAppLifecycleTests: XCTestCase {
 
     // A project whose .gitignore misses its build directories must get the
     // walk's exclusions from git too: otherwise build products are "sources"
-    // — a cache that never hits, and gigabytes hashed on every run.
+    // — a cache that never hits, and gigabytes hashed on every run. What git
+    // tracks was committed on purpose, though, wherever it sits.
     func testGitListingKeepsBuildProductsOutLikeTheWalk() throws {
         try XCTSkipUnless(gitIsAvailable(), "git not available")
         let root = try makeTempDirectory()
@@ -354,11 +387,15 @@ final class SimulatorAppLifecycleTests: XCTestCase {
         let cacheRoot = root.appendingPathComponent("managed", isDirectory: true)
         try write("managed/abc/Build/Products/Example.swift", contents: "product", root: root)
         let inputs = try SimulatorAppBuildFingerprinter.inputFiles(selection: selection, cacheRoot: cacheRoot).map(\.relativePath)
-        XCTAssertEqual(inputs, ["Example.xcodeproj/project.pbxproj", "Sources/App.swift"])
+        XCTAssertEqual(inputs, ["Example.xcodeproj/project.pbxproj", "Sources/App.swift", "Tracked/build/Generated.swift"])
 
-        // The listing is git's: with git gone, the walk keeps the same set out.
+        // The listing is git's: with git gone, the walk keeps the same products
+        // out — and, telling no tracked file from another, the committed one too.
         try FileManager.default.removeItem(at: root.appendingPathComponent(".git"))
-        XCTAssertEqual(try SimulatorAppBuildFingerprinter.inputFiles(selection: selection, cacheRoot: cacheRoot).map(\.relativePath), inputs)
+        XCTAssertEqual(
+            try SimulatorAppBuildFingerprinter.inputFiles(selection: selection, cacheRoot: cacheRoot).map(\.relativePath),
+            ["Example.xcodeproj/project.pbxproj", "Sources/App.swift"]
+        )
     }
 
     // What a test run asks before it records anything: is the build on the
