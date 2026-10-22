@@ -1285,6 +1285,8 @@ extension AppCommand {
         @OptionGroup var common: CommonJSON
 
         func run() async throws {
+            // A build it starts must not outlive it (`SignalTrap`).
+            SignalTrap.shared.installOnce()
             var selection = try buildOptions.selection()
             if let device {
                 selection.deviceUDID = try await resolveConfiguredDevice(device).udid
@@ -1343,6 +1345,8 @@ extension AppCommand {
         @OptionGroup var common: CommonJSON
 
         func run() async throws {
+            // A build it starts must not outlive it (`SignalTrap`).
+            SignalTrap.shared.installOnce()
             let launchEnvironment = try SimulatorAppLifecycleClient.parseLaunchEnvironment(environment)
             let selection = try buildOptions.selection()
             let buildCache = SimulatorAppBuildCache(simtoolDirectory: SimToolDirectory.resolve())
@@ -1396,6 +1400,8 @@ extension AppCommand {
         @OptionGroup var common: CommonJSON
 
         func run() async throws {
+            // A build it starts must not outlive it (`SignalTrap`).
+            SignalTrap.shared.installOnce()
             let resolved = try await resolveConfiguredDevice(device)
             let payload = try await SimulatorAppLifecycleClient.test(
                 selection: try testOptions.selection(),
@@ -1695,6 +1701,8 @@ struct TestCommand: AsyncParsableCommand {
         @OptionGroup var common: CommonJSON
 
         func run() async throws {
+            // A build it starts must not outlive it (`SignalTrap`).
+            SignalTrap.shared.installOnce()
             do {
                 try await runOrThrow()
             } catch let failure as TestRunPreflightError {
@@ -2592,6 +2600,8 @@ struct Run: AsyncParsableCommand {
     @OptionGroup var common: CommonJSON
 
     func run() async throws {
+        // A build it starts must not outlive it (`SignalTrap`).
+        SignalTrap.shared.installOnce()
         DebugLog.isEnabled = verbose
         let projectConfig = try ProjectConfigLoader.load(explicitPath: config)
         let buildCache = SimulatorAppBuildCache(simtoolDirectory: projectConfig.simtoolDirectory)

@@ -1026,6 +1026,7 @@ public enum SimulatorAppLifecycleClient {
                     arguments: buildArguments,
                     timeoutSeconds: selection.buildTimeLimit,
                     log: ProcessOutputLog(url: logURL),
+                    stopsWithSimTool: true,
                     onStdoutLine: onStdoutLine
                 )
             } catch let timeout as ProcessTimeoutError {
@@ -1456,7 +1457,8 @@ public enum SimulatorAppLifecycleClient {
                     derivedDataPath: selection.identity.derivedDataPath
                 ),
                 timeoutSeconds: selection.buildTimeLimit,
-                log: ProcessOutputLog(url: logURL)
+                log: ProcessOutputLog(url: logURL),
+                stopsWithSimTool: true
             )
         } catch let timeout as ProcessTimeoutError {
             throw SimToolError("xcodebuild test ran past the \(formatDuration(timeout.seconds)) time limit for scheme \(selection.identity.scheme) and was stopped; raise or lift it with build.timeout or --build-timeout (0 for no limit).\nFull log: \(logURL.path)")
@@ -1568,7 +1570,11 @@ public enum SimulatorAppLifecycleClient {
 
     private static func builtProductFromSettings(selection: SimulatorAppBuildSelection, derivedDataPath: String) async throws -> XcodeBuildProduct {
         let settingsArguments = xcodebuildArguments(selection: selection, derivedDataPath: derivedDataPath, showBuildSettings: true)
-        let settingsOutput = try await ProcessRunner.runXcrun(settingsArguments)
+        let settingsOutput = try await ProcessRunner.run(
+            executable: URL(fileURLWithPath: "/usr/bin/xcrun"),
+            arguments: settingsArguments,
+            stopsWithSimTool: true
+        )
         if settingsOutput.status == 0, let product = try? parseBuildSettings(settingsOutput.stdout) {
             return product
         }

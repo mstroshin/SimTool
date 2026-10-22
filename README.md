@@ -671,7 +671,11 @@ and says whom it waits for (on the progress line, or on stderr with `--json`).
 If the build it waited for was of the same sources, it reuses that one instead
 of building again. The locks live in `~/Library/Caches/SimTool/app-builds/locks`
 and vanish with the process that holds them, so a killed build leaves none
-behind.
+behind. Nor does an interrupted one leave its xcodebuild running: xcodebuild
+runs in a process group of its own that Ctrl-C at the terminal does not reach,
+so SimTool, interrupted, interrupts it (and what it started) and waits for it
+to cancel before exiting — and before letting go of the lock. The same happens
+past a build's time limit; either way the log ends with `** BUILD INTERRUPTED **`.
 
 The managed cache in `~/Library/Caches/SimTool` keeps one DerivedData per
 build identity without a configured `derivedDataPath` — gigabytes each — and no

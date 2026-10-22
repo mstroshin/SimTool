@@ -2,12 +2,18 @@ import Darwin
 import Dispatch
 import Foundation
 import Noora
+import SimToolCore
 
 /// Single owner of process signal handling. Noora's default Terminal would
 /// trap SIGINT/SIGTERM/SIGQUIT/SIGHUP and call exit(0), so interrupted runs
 /// read as success to CI and shells. Instead, every Noora instance is built
 /// with `signalBehavior: .none` and this trap exits with the shell convention
 /// 128 + signal number, restoring the cursor the spinner may have hidden.
+///
+/// Children that must not outlive SimTool — a build's xcodebuild, in a
+/// process group of its own that Ctrl-C does not reach — are stopped first
+/// (`ProcessRunner.stopChildren`): left running, a build would go on writing
+/// its DerivedData once SimTool's lock on it is gone.
 ///
 /// Server sessions register an *async* cleanup step (shut down simulators we
 /// booted, stop the server, drop the session) that must run before exiting.
@@ -41,6 +47,7 @@ final class SignalTrap: @unchecked Sendable {
     /// Runs on the dispatch queue (a normal thread), not in the signal handler,
     /// so awaiting async work and blocking on a semaphore are both safe here.
     fileprivate func runCleanupAndExit(_ signalNumber: Int32) {
+        ProcessRunner.stopChildren()
         lock.lock()
         let cleanup = self.cleanup
         lock.unlock()

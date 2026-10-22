@@ -81,6 +81,28 @@ final class ProcessRunnerTests: XCTestCase {
             XCTAssertEqual(timeout.localizedDescription, "Process timed out after 0.2 seconds: /bin/sleep 5")
         }
     }
+
+    // A build must not outlive its run: past the limit, the child and what it
+    // started (the compilers under xcodebuild) are interrupted as Ctrl-C at
+    // their terminal would, and gone before the timeout is reported.
+    func testATimedOutChildThatMustNotOutliveSimToolIsGoneWithItsGroup() async throws {
+        try XCTSkipUnless(FileManager.default.isExecutableFile(atPath: "/usr/bin/perl"), "perl not available")
+        let collector = LineCollector()
+        do {
+            // A parent and the child it forked, like xcodebuild and a compiler.
+            _ = try await ProcessRunner.run(
+                executable: URL(fileURLWithPath: "/usr/bin/perl"),
+                arguments: ["-e", "my $p = fork(); if ($p == 0) { sleep 30; exit 0 } $| = 1; print \"$p\\n\"; waitpid($p, 0)"],
+                timeoutSeconds: 1,
+                stopsWithSimTool: true,
+                onStdoutLine: { collector.append($0) }
+            )
+            XCTFail("the child outlived its limit")
+        } catch is ProcessTimeoutError {}
+        let grandchild = try XCTUnwrap(collector.lines().first.flatMap { Int32($0) })
+        XCTAssertEqual(kill(grandchild, 0), -1, "the child's own child is gone too")
+        XCTAssertEqual(errno, ESRCH)
+    }
 }
 
 private final class LineCollector: @unchecked Sendable {

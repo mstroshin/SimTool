@@ -55,6 +55,13 @@ public enum ProcessRunner {
     /// Runs a process to completion. With `log`, its output also goes to that
     /// file, replacing what was there, and the returned output holds only the
     /// end of each stream; `onStdoutLine` still sees every line.
+    ///
+    /// A child gets a process group of its own, so Ctrl-C at the terminal
+    /// reaches SimTool alone. With `stopsWithSimTool` it does not outlive
+    /// SimTool: `stopChildren()` — which the CLI's signal trap calls — and a
+    /// timeout interrupt it and wait until it is gone. A build left running on
+    /// its own would go on writing its DerivedData after SimTool's lock on it
+    /// is released.
     public static func run(
         executable: URL,
         arguments: [String],
@@ -63,6 +70,7 @@ public enum ProcessRunner {
         currentDirectory: URL? = nil,
         timeoutSeconds: TimeInterval? = nil,
         log: ProcessOutputLog? = nil,
+        stopsWithSimTool: Bool = false,
         onStdoutLine: (@Sendable (String) -> Void)? = nil
     ) async throws -> ProcessOutput {
         let process = Process()
@@ -120,6 +128,13 @@ public enum ProcessRunner {
             process.terminationHandler = { proc in
                 pipeEOF.wait()
                 logWriter?.close()
+                guard !stopsWithSimTool || !RunningChildren.shared.remove(proc) else {
+                    // Stopped because SimTool is going away: it exits with the
+                    // signal's status, so nothing reports this as a failure.
+                    // The run stays suspended until then — kept, not dropped.
+                    RunningChildren.shared.park(continuation)
+                    return
+                }
                 completion.resumeOnce {
                     continuation.resume(returning: ProcessOutput(
                         status: proc.terminationStatus,
@@ -131,11 +146,18 @@ public enum ProcessRunner {
 
             do {
                 try process.run()
+                if stopsWithSimTool { RunningChildren.shared.add(process) }
                 if let timeoutSeconds {
                     Task.detached {
                         try? await Task.sleep(for: .milliseconds(Int(timeoutSeconds * 1000)))
                         completion.resumeOnce {
-                            if process.isRunning { process.terminate() }
+                            // A child that must not outlive SimTool is gone
+                            // before the timeout is reported.
+                            if stopsWithSimTool {
+                                stop([process])
+                            } else if process.isRunning {
+                                process.terminate()
+                            }
                             continuation.resume(throwing: ProcessTimeoutError(
                                 seconds: timeoutSeconds,
                                 command: "\(executable.path) \(arguments.joined(separator: " "))"
@@ -149,6 +171,41 @@ public enum ProcessRunner {
                 logWriter?.close()
                 completion.resumeOnce { continuation.resume(throwing: error) }
             }
+        }
+    }
+
+    /// Stops every running child started with `stopsWithSimTool` and returns
+    /// once they are gone: for SimTool's own exit on a signal. Their runs never
+    /// return. Blocks the calling thread for up to `grace` plus a moment.
+    public static func stopChildren(grace: TimeInterval = 10) {
+        stop(RunningChildren.shared.beginStopping(), grace: grace)
+    }
+
+    /// Interrupts `processes` as Ctrl-C at their terminal would — SIGINT to
+    /// each one's process group, so xcodebuild cancels its build and the
+    /// compilers under it stop too — then kills what is left after `grace`.
+    static func stop(_ processes: [Process], grace: TimeInterval = 10) {
+        let running = processes.filter(\.isRunning)
+        guard !running.isEmpty else { return }
+        for process in running { deliver(SIGINT, to: process) }
+        let deadline = Date().addingTimeInterval(grace)
+        while running.contains(where: \.isRunning), Date() < deadline {
+            usleep(50_000)
+        }
+        for process in running where process.isRunning { deliver(SIGKILL, to: process) }
+        let killed = Date().addingTimeInterval(2)
+        while running.contains(where: \.isRunning), Date() < killed {
+            usleep(20_000)
+        }
+    }
+
+    private static func deliver(_ signal: Int32, to process: Process) {
+        let pid = process.processIdentifier
+        guard pid > 0 else { return }
+        if getpgid(pid) == pid {
+            killpg(pid, signal)
+        } else {
+            kill(pid, signal)
         }
     }
 
@@ -211,6 +268,44 @@ public enum ProcessRunner {
                 completion.resumeOnce { continuation.resume(throwing: error) }
             }
         }
+    }
+}
+
+/// The children that must not outlive SimTool (`stopsWithSimTool`).
+private final class RunningChildren: @unchecked Sendable {
+    static let shared = RunningChildren()
+
+    private let lock = NSLock()
+    private var processes: [ObjectIdentifier: Process] = [:]
+    private var stopping = false
+    private var parked: [Any] = []
+
+    func add(_ process: Process) {
+        lock.lock()
+        processes[ObjectIdentifier(process)] = process
+        lock.unlock()
+    }
+
+    /// Forgets an exited child; true when SimTool is stopping it.
+    func remove(_ process: Process) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        processes[ObjectIdentifier(process)] = nil
+        return stopping
+    }
+
+    /// Holds a run that will never return, as SimTool is exiting.
+    func park(_ continuation: Any) {
+        lock.lock()
+        parked.append(continuation)
+        lock.unlock()
+    }
+
+    func beginStopping() -> [Process] {
+        lock.lock()
+        defer { lock.unlock() }
+        stopping = true
+        return Array(processes.values)
     }
 }
 
