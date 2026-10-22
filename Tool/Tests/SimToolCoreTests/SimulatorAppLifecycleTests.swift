@@ -103,6 +103,32 @@ final class SimulatorAppLifecycleTests: XCTestCase {
         XCTAssertEqual(withSetting.identity.buildSettings, ["MACOSX_DEPLOYMENT_TARGET=15.0"])
     }
 
+    // The first build of a configured DerivedData creates it: before and
+    // after, the same path must key the same cache entry.
+    func testADerivedDataPathKeysOneEntryWhetherItExistsYetOrNot() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let project = root.appendingPathComponent("Example.xcodeproj", isDirectory: true)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        let cache = SimulatorAppBuildCache(simtoolDirectory: root.appendingPathComponent(".simtool"), derivedDataRoot: root.appendingPathComponent("managed"))
+        // Temporary directories live behind the /var → /private/var symlink.
+        let spelled = "/private" + root.standardizedFileURL.path + "/DerivedData"
+        func key() throws -> String {
+            try cache.identityKey(for: SimulatorAppBuildSelection.validated(
+                workspacePath: nil, projectPath: project.path, scheme: "Example", derivedDataPath: spelled
+            ).identity)
+        }
+        let before = try key()
+        try FileManager.default.createDirectory(atPath: spelled, withIntermediateDirectories: true)
+        XCTAssertEqual(try key(), before)
+        XCTAssertEqual(
+            SimulatorAppBuildSelection.canonicalPath(spelled + "/Nested/../Deeper/./More"),
+            SimulatorAppBuildSelection.canonicalPath(spelled)! + "/Deeper/More"
+        )
+        XCTAssertEqual(SimulatorAppBuildSelection.canonicalPath("/definitely/not/here"), "/definitely/not/here")
+        XCTAssertNil(SimulatorAppBuildSelection.canonicalPath("  "))
+    }
+
     func testBuildSettingEntriesAreKeyEqualsValue() throws {
         XCTAssertEqual(
             try SimulatorAppBuildSelection.parseBuildSettings(["A=1", "B=x=y", "C=", "A=2"]),

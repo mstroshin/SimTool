@@ -54,8 +54,9 @@ final class ProcessRunnerTests: XCTestCase {
         XCTAssertFalse(log.contains("previous build"), "each run replaces the log")
         XCTAssertTrue(log.hasPrefix("line 1 of the build output\n"))
         XCTAssertTrue(log.contains("line 3000 of the build output\n"))
-        XCTAssertTrue(log.contains("to stderr"))
-        XCTAssertTrue(log.hasSuffix("Привет"))
+        // The two streams interleave as their chunks arrive, in no fixed order.
+        XCTAssertTrue(log.contains("to stderr\n"))
+        XCTAssertTrue(log.replacingOccurrences(of: "to stderr\n", with: "").hasSuffix("line 3000 of the build output\nПривет"))
         // Memory holds the end, cut where it still decodes.
         XCTAssertLessThanOrEqual(output.stdout.count, 1_001)
         XCTAssertGreaterThan(output.stdout.count, 900)

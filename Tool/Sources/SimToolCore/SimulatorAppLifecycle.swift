@@ -193,10 +193,21 @@ public struct SimulatorAppBuildSelection: Codable, Equatable, Sendable {
         }
     }
 
-    private static func canonicalPath(_ value: String?) -> String? {
+    /// The one spelling of a path its identity keys on. Standardizing drops a
+    /// leading `/private` only from a path that exists, so a DerivedData path
+    /// not created yet would read otherwise than the same one after its first
+    /// build, and key a cache entry of its own: the deepest existing ancestor
+    /// is standardized, and the rest appended.
+    static func canonicalPath(_ value: String?) -> String? {
         guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         let expanded = NSString(string: value).expandingTildeInPath
-        return URL(fileURLWithPath: expanded).standardizedFileURL.path
+        var existing = URL(fileURLWithPath: expanded).absoluteURL.standardized
+        var missing: [String] = []
+        while existing.path != "/", !FileManager.default.fileExists(atPath: existing.path) {
+            missing.insert(existing.lastPathComponent, at: 0)
+            existing.deleteLastPathComponent()
+        }
+        return missing.reduce(existing.standardizedFileURL) { $0.appendingPathComponent($1) }.path
     }
 }
 
