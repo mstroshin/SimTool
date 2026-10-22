@@ -653,6 +653,17 @@ directory Xcode's build location settings chose — so locating it costs no
 second xcodebuild run; only when the log cannot tell is xcodebuild asked for
 its build settings.
 
+Two builds never write one DerivedData at once — two xcodebuild runs there fail
+with "database is locked". A build (and `app test`) takes a lock on its
+DerivedData and on the project's directory, where Xcode's build location
+settings can put products whatever `-derivedDataPath` says; a second build —
+`test run` in one terminal while `run` builds in another — waits for the first
+and says whom it waits for (on the progress line, or on stderr with `--json`).
+If the build it waited for was of the same sources, it reuses that one instead
+of building again. The locks live in `~/Library/Caches/SimTool/app-builds/locks`
+and vanish with the process that holds them, so a killed build leaves none
+behind.
+
 ```sh
 swift run simtool app launch --device <udid-or-name> --workspace MyApp.xcworkspace --scheme MyApp --json
 swift run simtool app launch --device <udid-or-name> --workspace MyApp.xcworkspace --scheme MyApp --json

@@ -474,10 +474,30 @@ public struct SimulatorAppBuildCache {
     /// Rebuildable xcodebuild products; kept out of the project tree because
     /// they can weigh gigabytes.
     public var derivedDataRoot: URL
+    /// The build locks every SimTool process shares (`SimulatorAppBuildLock`):
+    /// beside the managed DerivedData, `…/app-builds/locks`.
+    public var lockRoot: URL
 
-    public init(simtoolDirectory: URL, derivedDataRoot: URL = Self.defaultDerivedDataRoot()) {
+    public init(simtoolDirectory: URL, derivedDataRoot: URL = Self.defaultDerivedDataRoot(), lockRoot: URL? = nil) {
         self.metadataRoot = SimToolDirectory.buildMetadataDirectory(in: simtoolDirectory)
         self.derivedDataRoot = derivedDataRoot
+        self.lockRoot = lockRoot ?? derivedDataRoot.deletingLastPathComponent().appendingPathComponent("locks", isDirectory: true)
+    }
+
+    /// Waits for, then holds, the locks of every directory a build of
+    /// `selection` writes: its DerivedData, and the project's directory.
+    func lockBuild(
+        of selection: SimulatorAppBuildSelection,
+        derivedDataPath: String?,
+        onWait: (String) -> Void
+    ) async throws -> (lock: SimulatorAppBuildLock, waited: Bool) {
+        var waited = false
+        let paths = [selection.projectRoot.standardizedFileURL.path, derivedDataPath].compactMap { $0 }
+        let lock = try await SimulatorAppBuildLock.acquire(paths: paths, in: lockRoot) { message in
+            waited = true
+            onWait(message)
+        }
+        return (lock, waited)
     }
 
     public static func defaultDerivedDataRoot() -> URL {
@@ -840,17 +860,21 @@ public struct SimulatorAppBuildPlan: Sendable {
     public var fingerprint: SimulatorAppBuildFingerprint
     public var derivedDataPath: String
     public var cachedMetadata: SimulatorAppBuildCacheMetadata?
+    /// Planned with `force`: a build runs whatever the cache holds.
+    public var forced: Bool
 
     public init(
         selection: SimulatorAppBuildSelection,
         fingerprint: SimulatorAppBuildFingerprint,
         derivedDataPath: String,
-        cachedMetadata: SimulatorAppBuildCacheMetadata?
+        cachedMetadata: SimulatorAppBuildCacheMetadata?,
+        forced: Bool = false
     ) {
         self.selection = selection
         self.fingerprint = fingerprint
         self.derivedDataPath = derivedDataPath
         self.cachedMetadata = cachedMetadata
+        self.forced = forced
     }
 
     public var isCacheHit: Bool { cachedMetadata != nil }
@@ -878,7 +902,8 @@ public enum SimulatorAppLifecycleClient {
             selection: selection,
             fingerprint: fingerprint,
             derivedDataPath: derivedDataPath,
-            cachedMetadata: cachedMetadata
+            cachedMetadata: cachedMetadata,
+            forced: force
         )
     }
 
@@ -907,6 +932,27 @@ public enum SimulatorAppLifecycleClient {
         let selection = plan.selection
         let fingerprint = plan.fingerprint
         if let metadata = plan.cachedMetadata {
+            return SimulatorAppBuildPayload(
+                identity: selection.identity,
+                checksum: fingerprint.checksum,
+                inputFileCount: fingerprint.inputFileCount,
+                cacheHit: true,
+                xcodebuildRan: false,
+                appBundlePath: metadata.appBundlePath,
+                bundleIdentifier: metadata.bundleIdentifier,
+                product: metadata.product,
+                xcodebuild: SimulatorAppProcessStepSummary(name: "xcodebuild", ran: false)
+            )
+        }
+
+        // Xcode picks its own DerivedData: only the project's lock covers it.
+        let lockedDerivedData = selection.builder == .xcodebuild ? plan.derivedDataPath : nil
+        let (buildLock, waited) = try await cache.lockBuild(of: selection, derivedDataPath: lockedDerivedData) { message in
+            report(message, to: progress)
+        }
+        defer { buildLock.release() }
+        // The build waited for may have been of these very sources.
+        if waited, !plan.forced, let metadata = cache.validMetadata(for: selection.identity, checksum: fingerprint.checksum) {
             return SimulatorAppBuildPayload(
                 identity: selection.identity,
                 checksum: fingerprint.checksum,
@@ -1005,6 +1051,16 @@ public enum SimulatorAppLifecycleClient {
             logPath: logPath,
             xcodebuild: buildStep
         )
+    }
+
+    /// A status for whoever is watching: the progress line when there is one,
+    /// else stderr — a `--json` run's stdout carries only its payload.
+    static func report(_ message: String, to progress: (@Sendable (String) -> Void)?) {
+        if let progress {
+            progress(message)
+        } else {
+            FileHandle.standardError.write(Data("simtool: \(message)\n".utf8))
+        }
     }
 
     /// `90m`, `1h 30m`, `45s`: a time limit as the error naming it reads.
@@ -1346,6 +1402,10 @@ public enum SimulatorAppLifecycleClient {
     ) async throws -> SimulatorAppTestPayload {
         let logURL = try cache.logURL(for: selection.identity, action: "test")
         try SimToolDirectory.ensureEnclosing(cache.metadataRoot)
+        let (testLock, _) = try await cache.lockBuild(of: selection, derivedDataPath: selection.identity.derivedDataPath) { message in
+            report(message, to: nil)
+        }
+        defer { testLock.release() }
         let output: ProcessOutput
         do {
             output = try await ProcessRunner.run(
