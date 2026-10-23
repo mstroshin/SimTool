@@ -69,3 +69,19 @@ struct TestsTopicPayload: Encodable {
     var definitions: [TestSummary]?
     var run: TestRunStatusPayload?
 }
+
+/// `server`: the server is about to stop — `reason` is a machine word
+/// (`idle`, `shutdown`), `title` and `detail` what the viewer says about it.
+public struct ServerStopNotice: Encodable, Equatable, Sendable {
+    public var stopping: Bool
+    public var reason: String
+    public var title: String
+    public var detail: String
+
+    public init(reason: String, title: String, detail: String) {
+        stopping = true
+        self.reason = reason
+        self.title = title
+        self.detail = detail
+    }
+}

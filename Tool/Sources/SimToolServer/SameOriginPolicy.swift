@@ -154,6 +154,8 @@ struct SameOriginPolicy: Sendable {
 /// request never reaches its route, and every response leaves secured.
 final class SameOriginHttpServer: HttpServer {
     let policy: SameOriginPolicy
+    /// Hears of every request the policy lets through, before it is handled.
+    var onRequest: ((HttpRequest) -> Void)?
 
     init(policy: SameOriginPolicy) {
         self.policy = policy
@@ -166,6 +168,7 @@ final class SameOriginHttpServer: HttpServer {
             let refusal = policy.forbidden(reason)
             return ([:], { _ in refusal })
         }
+        onRequest?(request)
         let host = request.headers["host"]
         let (params, handler) = super.dispatch(request)
         return (params, { [policy] request in policy.secured(handler(request), host: host) })

@@ -13,6 +13,9 @@ import SimToolCore
 public final class InspectorEventHub: @unchecked Sendable {
     public enum Topic: String, CaseIterable, Sendable {
         case network, logs, state, tests, launches, activity, device, recording
+        /// The server itself: that it is about to stop, and why. Never part of
+        /// a snapshot — a server that answers one is not stopping.
+        case server
     }
 
     /// What one `publish` sends: the topics it changed and what changed in each.

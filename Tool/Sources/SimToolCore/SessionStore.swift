@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 public struct SessionInfo: Codable, Equatable, Identifiable, Sendable {
@@ -8,9 +9,10 @@ public struct SessionInfo: Codable, Equatable, Identifiable, Sendable {
     public var url: String
     public var api: String
     public var startedAt: Date
-    /// UDIDs this session's process booted itself and should shut down on exit.
-    /// Persisted so another SimTool can reap them if this process dies abruptly
-    /// (e.g. SIGKILL) without running its own shutdown.
+    /// UDIDs an older SimTool's server booted itself, for another to shut
+    /// down when it died. SimTool now holds them by lease (`SimulatorLease`)
+    /// and leaves this empty: a list that outlives its server would shut down
+    /// whatever boot of the simulator is running by then.
     public var bootedDevices: [String]
     /// The project this server serves, so a command in another checkout does not
     /// reuse it: its simulator is another project's, and the sessions it records
@@ -39,6 +41,35 @@ public struct SessionInfo: Codable, Equatable, Identifiable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case sessionId, pid, device, url, api, startedAt, bootedDevices, projectRoot
+    }
+
+    /// True while a process with this PID exists (EPERM means it exists but
+    /// belongs to someone else — still alive for our purposes).
+    public static func isRunning(pid: Int32) -> Bool {
+        if Darwin.kill(pid, 0) == 0 { return true }
+        return errno == EPERM
+    }
+
+    /// When the process with this PID started, as the kernel says; nil when
+    /// there is none.
+    public static func startTime(pid: Int32) -> Date? {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        guard sysctl(&mib, 4, &info, &size, nil, 0) == 0, size > 0 else { return nil }
+        let start = info.kp_proc.p_un.__p_starttime
+        guard start.tv_sec > 0 else { return nil }
+        return Date(timeIntervalSince1970: TimeInterval(start.tv_sec) + TimeInterval(start.tv_usec) / 1_000_000)
+    }
+
+    /// Whether this session's server is still running: its PID is alive and
+    /// is still the process that wrote the session. A session file outlives
+    /// its server, and the PID may since belong to some other process — one
+    /// that started after the session did, which the server never could.
+    public var isServing: Bool {
+        guard Self.isRunning(pid: pid) else { return false }
+        // `startedAt` is written to the second; the server started before it.
+        return Self.startTime(pid: pid).map { $0 <= startedAt.addingTimeInterval(2) } ?? true
     }
 
     public init(from decoder: Decoder) throws {
@@ -131,6 +162,25 @@ public final class SessionStore: @unchecked Sendable {
             guard let data = try? Data(contentsOf: url) else { return nil }
             return try? JSON.decoder.decode(SessionInfo.self, from: data)
         }.sorted { $0.startedAt > $1.startedAt }
+    }
+
+    /// Stops a session's server: SIGTERM first, so it runs its own shutdown —
+    /// which lets go of its simulator — and SIGKILL when it has not gone within
+    /// six seconds. A server already gone is not signalled: its PID may be
+    /// another process's by now. The session file goes either way. True when
+    /// the server cleaned up after itself; false when it had to be killed, or
+    /// was not running.
+    @discardableResult
+    public func terminate(_ session: SessionInfo) async -> Bool {
+        defer { remove(session.sessionId) }
+        guard session.isServing else { return false }
+        Darwin.kill(session.pid, SIGTERM)
+        for _ in 0..<60 where SessionInfo.isRunning(pid: session.pid) {
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        guard SessionInfo.isRunning(pid: session.pid) else { return true }
+        Darwin.kill(session.pid, SIGKILL)
+        return false
     }
 
     public func latest() throws -> SessionInfo? {

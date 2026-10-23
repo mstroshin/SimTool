@@ -83,6 +83,8 @@ public final class StreamServer: @unchecked Sendable {
     private let screenRecordings: ScreenRecordingController
     /// What was done to the device and by whom, for the viewer's activity feed.
     private let activity = DeviceActivityLog()
+    /// When anyone last used the server: what decides it has been left idle.
+    private let usage = ServerUsage()
     /// The device's screens and the lit one, once its device type is read.
     private let displays = DeviceDisplays()
     /// The device's settings and debug switches as it reports them.
@@ -128,7 +130,12 @@ public final class StreamServer: @unchecked Sendable {
 
     public init(config: StreamServerConfig) {
         self.config = config
-        self.server = SameOriginHttpServer(policy: SameOriginPolicy(serverHost: config.host))
+        let usage = usage
+        let server = SameOriginHttpServer(policy: SameOriginPolicy(serverHost: config.host))
+        server.onRequest = { request in
+            if ServerUsage.counts(method: request.method, path: request.path, headers: request.headers) { usage.note() }
+        }
+        self.server = server
         let device = config.device
         self.deviceSettings = DeviceSettingsReader {
             await SimulatorDeviceControl.read(deviceUDID: device.udid, deviceType: device.deviceTypeIdentifier)
@@ -319,6 +326,19 @@ public final class StreamServer: @unchecked Sendable {
         started = false
     }
 
+    /// When anyone last used the server, and whether it is busy with
+    /// something that sends no requests while it runs.
+    public func usageState() -> ServerUsageState {
+        let busy = testRuns.status().active || screenRecordings.topic.current?.state == .recording
+        return ServerUsageState(lastUse: usage.lastUse, busy: busy)
+    }
+
+    /// Tells the viewers the server is about to stop, and why, so the page can
+    /// say so instead of only that the connection is gone.
+    public func announceStop(_ notice: ServerStopNotice) {
+        inspectorEvents.publish(.server, notice)
+    }
+
     public var baseURL: String { "http://\(config.host):\(config.port)" }
     public var apiURL: String { "\(baseURL)/api/v1" }
 
@@ -398,6 +418,13 @@ public final class StreamServer: @unchecked Sendable {
         }
 
         server.POST["/api/v1/input"] = { request in self.handleInput(request) }
+
+        // The viewer's page, while someone works in it: what keeps the server
+        // and its simulator up for a person who reads more than they touch.
+        server.POST["/api/v1/presence"] = { _ in
+            self.usage.note()
+            return self.jsonResponse(["ok": true])
+        }
         // The viewer's live finger and keys: down/move/up and keydown/keyup
         // frames, never answered.
         server["/api/v1/input/stream"] = websocket(
@@ -973,6 +1000,8 @@ public final class StreamServer: @unchecked Sendable {
         // log never takes the hub's lock under its own. The viewer keeps the
         // newer revision of an entry whichever way round two changes arrive.
         activity.observe { [weak self] entry, revision in
+            // Whoever did it, something was done to the device.
+            self?.usage.note()
             self?.inspectorEvents.publish(.activity, ActivityTopicPayload(entries: [entry], revision: revision))
         }
         let watcher = TestDefinitionsWatcher(root: config.testsRoot) { [weak self] in self?.publishTestDefinitions() }
@@ -1069,8 +1098,12 @@ public final class StreamServer: @unchecked Sendable {
                 }
             }
         }
+        let usage = usage
         let channel = LiveInputChannel(
-            emit: { continuation.yield($0) },
+            emit: { event in
+                usage.note()
+                continuation.yield(event)
+            },
             onDown: { [weak self] in
                 testSessions.noteInput(at: Date())
                 self?.noteLiveInputDuringRun()

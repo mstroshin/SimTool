@@ -25,6 +25,16 @@ final class WebViewerPageTests: XCTestCase {
         XCTAssertTrue(page.contains(#"screenState.connection !== "live""#), "touches wait for a live screen")
     }
 
+    // SimTool stops a server nobody uses: the page's own polling is not use,
+    // a hand on it is — and when the server stops, the veil says why.
+    func testAPersonOnThePageKeepsTheServerUpAndAStoppedServerSaysWhy() {
+        XCTAssertTrue(page.contains(#"fetch("/api/v1/presence", { method: "POST" })"#), "a hand on the page is reported")
+        XCTAssertTrue(page.contains("if (document.hidden) return;\n  const now = performance.now();"), "a hidden tab reports nothing")
+        XCTAssertTrue(page.contains(#"for (const type of ["pointerdown", "pointermove", "keydown", "wheel"])"#))
+        XCTAssertTrue(page.contains(#"on("server", applyServerTopic)"#), "the server says it is stopping")
+        XCTAssertTrue(page.contains("screenState.stopped ? screenState.stopped.title"), "the veil names why")
+    }
+
     // A restarted server numbers log and state entries from zero again: whichever
     // of /config and the event stream's snapshot names the new instance first
     // resets the cursors.

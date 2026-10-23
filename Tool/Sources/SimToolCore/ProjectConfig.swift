@@ -210,12 +210,15 @@ public struct ProjectConfig: Codable, Equatable, Sendable {
     /// app (`SIMTOOL_STATE_LOGGER` + `SIMTOOL_SERVER_URL`). Defaults to true;
     /// inert for apps that do not link SimToolStateLogger.
     public var stateLogger: Bool
+    /// How long a simulator SimTool holds may go unused before it is shut down
+    /// (`idleTimeout:`, as in `15m`; `off` is 0, never). Nil for the default.
+    public var idleTimeout: TimeInterval?
     /// Absolute path of the loaded config file. Populated by the loader; not part
     /// of the YAML schema.
     public var sourcePath: String
 
     private enum CodingKeys: String, CodingKey {
-        case simulator, bundleId, build, server, deeplinks, profiles, networkLogger, stateLogger
+        case simulator, bundleId, build, server, deeplinks, profiles, networkLogger, stateLogger, idleTimeout
     }
 
     public init(
@@ -227,6 +230,7 @@ public struct ProjectConfig: Codable, Equatable, Sendable {
         profiles: [LaunchProfile] = [],
         networkLogger: Bool = true,
         stateLogger: Bool = true,
+        idleTimeout: TimeInterval? = nil,
         sourcePath: String = ""
     ) {
         self.simulator = simulator
@@ -237,6 +241,7 @@ public struct ProjectConfig: Codable, Equatable, Sendable {
         self.profiles = profiles
         self.networkLogger = networkLogger
         self.stateLogger = stateLogger
+        self.idleTimeout = idleTimeout
         self.sourcePath = sourcePath
     }
 
@@ -250,6 +255,7 @@ public struct ProjectConfig: Codable, Equatable, Sendable {
         profiles = try container.decodeIfPresent([LaunchProfile].self, forKey: .profiles) ?? []
         networkLogger = try container.decodeIfPresent(Bool.self, forKey: .networkLogger) ?? true
         stateLogger = try container.decodeIfPresent(Bool.self, forKey: .stateLogger) ?? true
+        idleTimeout = try container.decodeIfPresent(TimeInterval.self, forKey: .idleTimeout)
         sourcePath = ""
     }
 
@@ -586,6 +592,13 @@ public enum ProjectConfigLoader {
             profiles: profiles,
             networkLogger: raw.networkLogger ?? true,
             stateLogger: raw.stateLogger ?? true,
+            idleTimeout: try raw.idleTimeout.map { raw in
+                do {
+                    return try SimulatorIdleTimeout.parse(raw.text)
+                } catch {
+                    throw SimToolError("Invalid `idleTimeout` '\(raw.text)' in \(fileName): use seconds or a number with s, m or h, as in 900, 15m or 1h; off to never shut the simulator down.")
+                }
+            },
             sourcePath: sourceURL.path
         )
     }
@@ -609,6 +622,8 @@ struct RawProjectConfig: Decodable {
     var profiles: [String: RawLaunchProfile]?
     var networkLogger: Bool?
     var stateLogger: Bool?
+    /// `900`, `15m`, `off`: text, so a unit can follow the number.
+    var idleTimeout: YAMLScalarText?
 
     struct RawBuild: Decodable {
         var workspace: String?

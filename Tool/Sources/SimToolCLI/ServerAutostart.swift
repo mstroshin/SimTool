@@ -22,9 +22,15 @@ enum ServerAutostart {
     /// Said when the run leaves its server up. It stays because the viewer is
     /// served by it: stopping it the moment the run ends kills the page someone
     /// opened to watch that run, right when there is finally something to read.
-    static func keptNote(url: String, sessionId: String) -> String {
-        "The server it started is still running on \(url) — open it, "
-            + "or stop it with `simtool kill \(sessionId.prefix(8))`. `--stop-server` stops it automatically."
+    /// Not for good, though: once nothing uses it for `idleTimeout`, it stops
+    /// and shuts its simulator down.
+    static func keptNote(url: String, sessionId: String, idleTimeout: TimeInterval? = nil) -> String {
+        let timeout = idleTimeout ?? SimulatorIdleTimeout.defaultSeconds
+        let unused = timeout > 0
+            ? " Left unused for \(SimulatorIdleTimeout.describe(timeout)), it stops by itself and shuts the simulator down."
+            : ""
+        return "The server it started is still running on \(url) — open it, "
+            + "or stop it with `simtool kill \(sessionId.prefix(8))`.\(unused) `--stop-server` stops it automatically."
     }
 
     static func freePort(

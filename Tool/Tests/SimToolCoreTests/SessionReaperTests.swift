@@ -18,6 +18,23 @@ final class SessionReaperTests: XCTestCase {
         )
     }
 
+    // MARK: - Whether a session's server is still running
+
+    // A session file outlives its server, and the PID may belong to another
+    // process by now — one that started after the session did.
+    func testASessionIsServingOnlyWhileItsOwnProcessRuns() {
+        let mine = SessionInfo(sessionId: "s", pid: getpid(), device: device("A"), url: "", api: "", startedAt: Date())
+        XCTAssertTrue(mine.isServing)
+        var reused = mine
+        reused.startedAt = Date(timeIntervalSince1970: 0)
+        XCTAssertFalse(reused.isServing, "this process started long after that session")
+        var gone = mine
+        gone.pid = Int32.max
+        XCTAssertFalse(gone.isServing)
+        XCTAssertNotNil(SessionInfo.startTime(pid: getpid()))
+        XCTAssertNil(SessionInfo.startTime(pid: Int32.max))
+    }
+
     // MARK: - SessionInfo persistence
 
     func testSessionInfoRoundTripsBootedDevices() throws {

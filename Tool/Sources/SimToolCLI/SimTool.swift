@@ -24,6 +24,7 @@ struct SimTool: AsyncParsableCommand {
             Sessions.self,
             Status.self,
             Kill.self,
+            Reap.self,
             Doctor.self,
             Input.self,
             AX.self,
@@ -249,7 +250,7 @@ extension Input {
         @OptionGroup var common: CommonJSON
 
         func run() async throws {
-            let device = try await resolveConfiguredDevice(device)
+            let device = try await resolveDeviceToDrive(device)
             let output = try await ActivityReporter(device: device).touch(SimulatorInputPayload(action: "tap", x: x, y: y, id: id, label: label)) {
                 .tap(at: try await SimulatorInputClient.touchPoint(deviceUDID: device.udid, x: x, y: y, id: id, label: label, action: "Tap"))
             } play: { stroke in
@@ -274,7 +275,7 @@ extension Input {
         @OptionGroup var common: CommonJSON
 
         func run() async throws {
-            let device = try await resolveConfiguredDevice(device)
+            let device = try await resolveDeviceToDrive(device)
             let input = SimulatorInputPayload(action: "long-press", x: x, y: y, id: id, label: label, duration: duration)
             let output = try await ActivityReporter(device: device).touch(input) {
                 let point = try await SimulatorInputClient.touchPoint(deviceUDID: device.udid, x: x, y: y, id: id, label: label, action: "Long press")
@@ -298,7 +299,7 @@ extension Input {
         @OptionGroup var common: CommonJSON
 
         func run() async throws {
-            let device = try await resolveConfiguredDevice(device)
+            let device = try await resolveDeviceToDrive(device)
             let output = try await ActivityReporter(device: device).command(SimulatorInputPayload(action: "type", text: text)) {
                 try await SimulatorInputClient.typeText(text, deviceUDID: device.udid)
             }
@@ -334,7 +335,7 @@ extension Input {
         }
 
         func run() async throws {
-            let device = try await resolveConfiguredDevice(device)
+            let device = try await resolveDeviceToDrive(device)
             let reporter = ActivityReporter(device: device)
             if let image {
                 let file = URL(fileURLWithPath: (image as NSString).expandingTildeInPath)
@@ -386,7 +387,7 @@ extension Input {
         }
 
         func run() async throws {
-            let device = try await resolveConfiguredDevice(device)
+            let device = try await resolveDeviceToDrive(device)
             let input = SimulatorInputPayload(action: "swipe", startX: startX, startY: startY, endX: endX, endY: endY, duration: duration, velocity: velocity, hold: hold)
             let output = try await ActivityReporter(device: device).touch(input) {
                 SimulatorInputClient.swipeStroke(
@@ -424,7 +425,7 @@ extension Input {
         @OptionGroup var common: CommonJSON
 
         func run() async throws {
-            let device = try await resolveConfiguredDevice(device)
+            let device = try await resolveDeviceToDrive(device)
             let input = SimulatorInputPayload(action: "scroll", x: x, y: y, direction: direction.rawValue, distance: distance)
             let output = try await ActivityReporter(device: device).touch(input) {
                 try await SimulatorInputClient.scrollStroke(deviceUDID: device.udid, direction: direction, distance: distance, x: x, y: y)
@@ -454,7 +455,7 @@ extension Input {
         }
 
         func run() async throws {
-            let device = try await resolveConfiguredDevice(device)
+            let device = try await resolveDeviceToDrive(device)
             let velocity = FlingSpeed.parse(speed) ?? FlingSpeed.normal
             let input = SimulatorInputPayload(action: "fling", x: x, y: y, velocity: velocity, direction: direction.rawValue)
             let output = try await ActivityReporter(device: device).touch(input) {
@@ -488,7 +489,7 @@ extension Input {
         @OptionGroup var common: CommonJSON
 
         func run() async throws {
-            let device = try await resolveConfiguredDevice(device)
+            let device = try await resolveDeviceToDrive(device)
             let input = SimulatorInputPayload(action: "drag", startX: startX, startY: startY, endX: endX, endY: endY, velocity: velocity, hold: hold, press: press)
             let output = try await ActivityReporter(device: device).touch(input) {
                 .drag(
@@ -513,7 +514,7 @@ extension Input {
         @OptionGroup var common: CommonJSON
 
         func run() async throws {
-            let device = try await resolveConfiguredDevice(device)
+            let device = try await resolveDeviceToDrive(device)
             let output = try await ActivityReporter(device: device).command(SimulatorInputPayload(action: "button", name: name)) {
                 if name.lowercased() == "home" {
                     try await ProcessRunner.runXcrun(["simctl", "launch", device.udid, "com.apple.springboard"])
@@ -548,7 +549,7 @@ extension Input {
         @OptionGroup var common: CommonJSON
 
         func run() async throws {
-            let device = try await resolveConfiguredDevice(device)
+            let device = try await resolveDeviceToDrive(device)
             let visible: Bool? = switch action {
             case .show: true
             case .hide: false
@@ -585,7 +586,7 @@ extension Input {
         @OptionGroup var common: CommonJSON
 
         func run() async throws {
-            let device = try await resolveConfiguredDevice(device)
+            let device = try await resolveDeviceToDrive(device)
             guard let deviceType = device.deviceTypeIdentifier,
                   let layout = await SimulatorDisplayLayout.load(deviceType: deviceType), layout.isFoldable else {
                 throw SimToolError("\(device.name) does not fold: only a device with a cover and an inner screen (iPhone Duo) takes a pose")
@@ -650,7 +651,7 @@ extension AX {
         @OptionGroup var common: CommonJSON
 
         func run() async throws {
-            let device = try await resolveConfiguredDevice(device)
+            let device = try await resolveDeviceToDrive(device)
             if flat {
                 let tree = try await SimulatorAccessibilityClient.normalizedTree(deviceUDID: device.udid)
                 try printJSON(SimulatorAccessibilityClient.flatten(tree, labeledOnly: labeled))
@@ -673,7 +674,7 @@ extension AX {
         @OptionGroup var common: CommonJSON
 
         func run() async throws {
-            let device = try await resolveConfiguredDevice(device)
+            let device = try await resolveDeviceToDrive(device)
             let payload = try await SimulatorAccessibilityClient.findNodes(needle: needle, deviceUDID: device.udid, includeRaw: raw)
             if common.json {
                 try printJSON(payload)
@@ -709,7 +710,7 @@ extension Network {
         @OptionGroup var common: CommonJSON
 
         func run() async throws {
-            let device = try await resolveConfiguredDevice(device)
+            let device = try await resolveDeviceToDrive(device)
             let payload = try await SimulatorNetworkClient.snapshot(deviceUDID: device.udid, seconds: seconds, limit: limit)
             if common.json {
                 try printJSON(payload)
@@ -751,7 +752,7 @@ extension Network {
                 guard let app, !app.isEmpty else {
                     throw SimToolError("App-container mode requires --app <bundle-id>; pass --server, --host, or --port for live server mode.")
                 }
-                let device = try await resolveConfiguredDevice(device)
+                let device = try await resolveDeviceToDrive(device)
                 payload = try await SimulatorNetworkLoggerClient.events(
                     deviceUDID: device.udid,
                     appBundleID: app,
@@ -960,7 +961,10 @@ extension Logs {
         }
 
         func run() async throws {
-            let device = try await resolveConfiguredDevice(device)
+            let device = try await resolveDeviceToDrive(device)
+            // A capture runs until Ctrl-C: in use all along.
+            let heartbeat = SimulatorHold.keepAlive(device.udid)
+            defer { heartbeat.cancel() }
             if captureStdout {
                 try await runCapture(deviceUDID: device.udid)
             } else {
@@ -1196,7 +1200,7 @@ func resolveSimulatorWithProgress(_ nameOrUDID: String?) async throws -> Simulat
     }
 }
 
-func bootSimulatorWithProgress(_ device: SimulatorDevice) async throws -> SimulatorDevice {
+func bootSimulatorWithProgress(_ device: SimulatorDevice, idleTimeout: TimeInterval?) async throws -> SimulatorDevice {
     let (noora, _) = interactiveProgressTerminal()
     return try await noora.progressStep(
         message: "Booting \(device.name)",
@@ -1204,7 +1208,7 @@ func bootSimulatorWithProgress(_ device: SimulatorDevice) async throws -> Simula
         errorMessage: "Failed to boot \(device.name)",
         showSpinner: true
     ) { _ in
-        try await SimulatorDeviceClient.ensureBooted(device)
+        try await SimulatorHold.boot(device, idleTimeout: idleTimeout)
     }
 }
 
@@ -1351,7 +1355,9 @@ extension AppCommand {
             let selection = try buildOptions.selection()
             let buildCache = SimulatorAppBuildCache(simtoolDirectory: SimToolDirectory.resolve())
             if common.json {
-                let resolved = try await resolveConfiguredDevice(device)
+                let resolved = try await resolveDeviceToDrive(device)
+                let heartbeat = SimulatorHold.keepAlive(resolved.udid)
+                defer { heartbeat.cancel() }
                 let payload = try await SimulatorAppLifecycleClient.launch(
                     selection: selection,
                     device: resolved,
@@ -1364,7 +1370,13 @@ extension AppCommand {
                 try printJSON(payload)
                 return
             }
-            let resolved = try await resolveSimulatorWithProgress(device)
+            var resolved = try await resolveSimulatorWithProgress(device)
+            if resolved.state != "Booted" {
+                let idleTimeout = try SimulatorHold.idleTimeout(flag: nil, config: try? ProjectConfigLoader.loadIfPresent())
+                resolved = try await bootSimulatorWithProgress(resolved, idleTimeout: idleTimeout)
+            }
+            let heartbeat = SimulatorHold.keepAlive(resolved.udid)
+            defer { heartbeat.cancel() }
             let buildPayload = try await buildAppWithProgress(selection: selection.targeting(resolved), force: buildOptions.force, cache: buildCache)
             let payload = try await installAndLaunchAppWithProgress(
                 build: buildPayload,
@@ -1402,7 +1414,7 @@ extension AppCommand {
         func run() async throws {
             // A build it starts must not outlive it (`SignalTrap`).
             SignalTrap.shared.installOnce()
-            let resolved = try await resolveConfiguredDevice(device)
+            let resolved = try await resolveDeviceToDrive(device)
             let payload = try await SimulatorAppLifecycleClient.test(
                 selection: try testOptions.selection(),
                 device: resolved
@@ -1758,8 +1770,9 @@ struct TestCommand: AsyncParsableCommand {
                 } else {
                     // Left running on purpose: it serves the viewer, and the run
                     // just recorded is what someone opens the viewer to read.
+                    let idleTimeout = try? SimulatorHold.idleTimeout(flag: nil, config: projectConfig)
                     stopOwnedServer = {
-                        emitNote(ServerAutostart.keptNote(url: ownedServer.url, sessionId: ownedServer.sessionId), json: json)
+                        emitNote(ServerAutostart.keptNote(url: ownedServer.url, sessionId: ownedServer.sessionId, idleTimeout: idleTimeout), json: json)
                     }
                 }
             }
@@ -1866,6 +1879,9 @@ struct TestCommand: AsyncParsableCommand {
             guard let selection = try? build.selection() else { return nil }
             return {
                 let device = try await SimulatorDeviceClient.resolve((try? await client.config())?.udid)
+                // The server sees nothing of a build: it is the run's use.
+                let heartbeat = SimulatorHold.keepAlive(device.udid)
+                defer { heartbeat.cancel() }
                 let cache = SimulatorAppBuildCache(simtoolDirectory: SimToolDirectory.resolve())
                 let payload = try await SimulatorAppLifecycleClient.build(selection: selection.targeting(device), cache: cache)
                 let installed = try await SimulatorAppLifecycleClient.install(
@@ -2183,11 +2199,17 @@ struct Serve: AsyncParsableCommand {
     @Flag(name: .long, help: "With --app, do not arm the SimTool state logger in the app the server launches (armed by default, as `simtool run` does).")
     var noState = false
 
+    @Option(name: .customLong("idle-timeout"), help: idleTimeoutHelp)
+    var idleTimeout: String?
+
     @OptionGroup var common: CommonJSON
 
     func run() async throws {
         DebugLog.isEnabled = verbose
         let parameters = try resolveParameters()
+        // Read before anything starts, so a bad value fails here. A config
+        // that does not parse does not fail an explicit invocation.
+        let idleTimeoutValue = try SimulatorHold.idleTimeout(flag: idleTimeout, config: try? ProjectConfigLoader.loadIfPresent(explicitPath: config))
         if detach {
             try await runDetached(parameters)
             return
@@ -2197,10 +2219,10 @@ struct Serve: AsyncParsableCommand {
         let booted: SimulatorDevice
         if common.json || detachedChild {
             let resolved = try await SimulatorDeviceClient.resolve(parameters.device)
-            booted = try await SimulatorDeviceClient.ensureBooted(resolved)
+            booted = try await SimulatorHold.boot(resolved, idleTimeout: idleTimeoutValue)
         } else {
             let resolved = try await resolveSimulatorWithProgress(parameters.device)
-            booted = try await bootSimulatorWithProgress(resolved)
+            booted = try await bootSimulatorWithProgress(resolved, idleTimeout: idleTimeoutValue)
         }
         // Re-read rather than thread through ServeParameters: the viewer needs
         // the launch profiles, which are not part of the serve target.
@@ -2226,7 +2248,8 @@ struct Serve: AsyncParsableCommand {
             openBrowser: shouldOpenBrowser(webRequested: web, json: common.json, detachedChild: detachedChild),
             sessionId: sessionId,
             reclaimPort: !noReclaim,
-            projectConfig: projectConfig
+            projectConfig: projectConfig,
+            idleTimeout: idleTimeoutValue
         )
     }
 
@@ -2263,11 +2286,15 @@ struct Serve: AsyncParsableCommand {
             verbose: verbose,
             reclaimPort: !noReclaim,
             noNetwork: noNetwork,
-            noState: noState
+            noState: noState,
+            config: config,
+            idleTimeout: idleTimeout
         )
         try reportDetachedSession(session, json: common.json)
     }
 }
+
+let idleTimeoutHelp: ArgumentHelp = "How long the simulator may go unused before SimTool stops the server and shuts it down: seconds, or a number with s, m or h (15m); `off` to keep it up. Defaults to SIMTOOL_IDLE_TIMEOUT, then `idleTimeout:` from .simtool/config.yml, then 15m."
 
 /// The effective `serve` target: explicit flags win, then `.simtool/config.yml`
 /// (`simulator:`, `server.host`, `server.port`), then built-in defaults.
@@ -2301,7 +2328,8 @@ func detachedServerArguments(
     reclaimPort: Bool,
     noNetwork: Bool = false,
     noState: Bool = false,
-    config: String?
+    config: String?,
+    idleTimeout: String? = nil
 ) -> [String] {
     var args = ["serve", "--port", "\(parameters.port)", "--host", parameters.host, "--session-id", sessionId, "--detached-child"]
     if let device = parameters.device { args += ["--device", device] }
@@ -2311,6 +2339,7 @@ func detachedServerArguments(
     if noNetwork { args.append("--no-network") }
     if noState { args.append("--no-state") }
     if let config, !config.isEmpty { args += ["--config", config] }
+    if let idleTimeout, !idleTimeout.isEmpty { args += ["--idle-timeout", idleTimeout] }
     return args
 }
 
@@ -2328,7 +2357,8 @@ func launchDetachedServer(
     reclaimPort: Bool = true,
     noNetwork: Bool = false,
     noState: Bool = false,
-    config: String? = nil
+    config: String? = nil,
+    idleTimeout: String? = nil
 ) async throws -> SessionInfo {
     let id = UUID().uuidString
     try SessionStore.shared.ensureRoot()
@@ -2344,7 +2374,8 @@ func launchDetachedServer(
         reclaimPort: reclaimPort,
         noNetwork: noNetwork,
         noState: noState,
-        config: config
+        config: config,
+        idleTimeout: idleTimeout
     )
     let log = try FileHandle(forWritingTo: logPath.creatingFileIfNeeded())
     process.standardOutput = log
@@ -2415,9 +2446,14 @@ func runViewer(
     openBrowser: Bool,
     sessionId: String?,
     reclaimPort: Bool = true,
-    projectConfig: ProjectConfig? = nil
+    projectConfig: ProjectConfig? = nil,
+    idleTimeout: TimeInterval? = nil
 ) async throws {
     let id = sessionId ?? UUID().uuidString
+    // SimTool holds the simulator it serves from here on, whoever booted it:
+    // the server stops and shuts it down once nothing uses it. Taken before
+    // the sweep below, which leaves a held simulator to its lease.
+    let lease = await SimulatorHold.adopt(device, idleTimeout: idleTimeout)
     // Power down simulators left booted by earlier SimTool runs that were
     // SIGKILLed or crashed before they could clean up after themselves.
     await reapDeadSessions()
@@ -2443,7 +2479,7 @@ func runViewer(
         url: server.baseURL,
         api: server.apiURL,
         startedAt: Date(),
-        bootedDevices: BootedSimulatorRegistry.shared.all(),
+        bootedDevices: [],
         projectRoot: projectConfig?.projectRoot
     )
     try SessionStore.shared.write(session)
@@ -2464,9 +2500,10 @@ func runViewer(
     if openBrowser {
         _ = try? await ProcessRunner.run(executable: URL(fileURLWithPath: "/usr/bin/open"), arguments: [server.baseURL])
     }
-    while !Task.isCancelled {
-        try await Task.sleep(for: .seconds(3600))
-    }
+    let (stop, unusedSince) = await ServerIdleWatch(server: server, device: device, bootPID: lease.bootPID, idleTimeout: idleTimeout).run()
+    FileHandle.standardError.write(Data((stop.title + ". " + stop.detail + "\n").utf8))
+    await gracefulShutdown(sessionId: id, server: server, notice: stop, unusedSince: unusedSince)
+    exit(0)
 }
 
 func startStreamServer(config: StreamServerConfig, reclaimPort: Bool = true) async throws -> StreamServer {
@@ -2513,52 +2550,129 @@ func cleanupSessions(for pids: [Int32]) {
 
 func installSignalTrap(sessionId: String, server: StreamServer) {
     SignalTrap.shared.installCleanup {
-        await gracefulShutdown(sessionId: sessionId, server: server)
+        await gracefulShutdown(sessionId: sessionId, server: server, notice: ServerStopNotice(
+            reason: "stopped",
+            title: "The SimTool server stopped",
+            detail: "It was stopped and let go of the simulator. Start it again with simtool serve — this page reconnects by itself."
+        ))
     }
 }
 
-/// Tears the session down in dependency order: stop the server (which kills the
-/// log-stream/recorder children it spawned), then power down any simulators this
-/// process booted, then drop the session file. Safe to call more than once.
-func gracefulShutdown(sessionId: String, server: StreamServer) async {
+/// Tears the session down in dependency order: tell the viewers why, stop the
+/// server (which kills the log-stream/recorder children it spawned), let go of
+/// the simulator — shut down unless another SimTool server or an `xcodebuild`
+/// is still on it, or, for a server stopping because it sat unused since
+/// `unusedSince`, something used it after all — then drop the session file.
+/// Safe to call more than once.
+func gracefulShutdown(sessionId: String, server: StreamServer, notice: ServerStopNotice, unusedSince: Date? = nil) async {
+    server.announceStop(notice)
+    // A moment for the event to reach the pages before their streams close.
+    try? await Task.sleep(for: .milliseconds(300))
     server.stop()
-    await shutdownBootedSimulators()
-    SessionStore.shared.remove(sessionId)
-}
-
-/// Shuts down every simulator this process booted itself, then forgets them so a
-/// second pass (e.g. repeated signal cleanup) is a no-op.
-func shutdownBootedSimulators() async {
-    for udid in BootedSimulatorRegistry.shared.all() {
-        await SimulatorDeviceClient.shutdown(udid)
-        BootedSimulatorRegistry.shared.forget(udid)
+    if let outcome = await SimulatorLeaseSweep().release(udid: server.config.device.udid, leaving: getpid(), unusedSince: unusedSince) {
+        DebugLog.write("lease", LeaseReaper.describe(outcome))
     }
+    // A simulator left held — still in use — is the reaper's from here.
+    LeaseReaper.ensureRunning()
+    SessionStore.shared.remove(sessionId)
 }
 
 /// True if a process with this PID still exists (EPERM means it exists but is
 /// owned by someone else — still alive for our purposes).
 func isProcessAlive(_ pid: Int32) -> Bool {
-    if Darwin.kill(pid, 0) == 0 { return true }
-    return errno == EPERM
+    SessionInfo.isRunning(pid: pid)
 }
 
-/// SIGKILL and crashes skip the signal cleanup above, leaving the simulators a
-/// now-dead session booted. On the next `serve`/`run` we sweep those orphans:
-/// shut down devices booted only by dead sessions (never one a live session or
-/// this process still uses) and delete the stale session files.
+/// SIGKILL and crashes skip the signal cleanup above. A simulator a dead
+/// server held is left to its lease — the reaper shuts it down once it is
+/// idle; what remains here is the session files, and the devices a dead
+/// server of an older SimTool booted, which name no lease: those go now,
+/// unless a live session still uses them.
 func reapDeadSessions() async {
     guard let sessions = try? SessionStore.shared.list() else { return }
-    let dead = sessions.filter { !isProcessAlive($0.pid) }
+    let dead = sessions.filter { !$0.isServing }
     guard !dead.isEmpty else { return }
-    let live = sessions.filter { isProcessAlive($0.pid) }
-    let protectedByUs = Set(BootedSimulatorRegistry.shared.all())
+    let live = sessions.filter(\.isServing)
+    let held = Set(SimulatorLeaseStore.shared.list().map(\.udid))
     let toShutDown = SessionReaper.devicesToReap(dead: dead, live: live)
-        .filter { !protectedByUs.contains($0) }
-    for udid in toShutDown {
-        await SimulatorDeviceClient.shutdown(udid)
+        .filter { !held.contains($0) }
+    if !toShutDown.isEmpty {
+        let snapshot = await SimulatorProcessSnapshot.take()
+        for udid in toShutDown where isBootOf(udid, knownTo: dead.filter { $0.bootedDevices.contains(udid) }, in: snapshot) {
+            await SimulatorDeviceClient.shutdown(udid)
+        }
     }
     for session in dead {
         SessionStore.shared.remove(session.sessionId)
+    }
+}
+
+/// Whether the simulator's current boot is one `sessions` could have booted:
+/// it started before the newest of them did. A boot after that — a person's
+/// Xcode run on a simulator a dead server once booted — is not theirs.
+func isBootOf(_ udid: String, knownTo sessions: [SessionInfo], in snapshot: SimulatorProcessSnapshot) -> Bool {
+    guard let newest = sessions.map(\.startedAt).max(),
+          let bootPID = snapshot.bootPID(of: udid),
+          let bootedAt = SessionInfo.startTime(pid: bootPID) else { return false }
+    return bootedAt <= newest.addingTimeInterval(2)
+}
+
+/// What keeps a server up: someone using it. Every 15 seconds it renews the
+/// lease on its simulator with the server's last use — or now, while a run or
+/// a recording is going — and returns once the lease has gone unused for its
+/// timeout, or the simulator's boot it streams is over. The caller stops the
+/// server, which shuts the simulator down.
+struct ServerIdleWatch {
+    static let interval: Duration = .seconds(15)
+
+    let server: StreamServer
+    let device: SimulatorDevice
+    /// The `launchd_sim` of the boot the server streams.
+    let bootPID: Int32?
+    let idleTimeout: TimeInterval?
+    var store: SimulatorLeaseStore = .shared
+
+    /// Why the server should stop, and — when it is for want of use — the
+    /// last use the decision went by.
+    func run() async -> (ServerStopNotice, unusedSince: Date?) {
+        var renewed = Date.distantPast
+        while !Task.isCancelled {
+            try? await Task.sleep(for: Self.interval)
+            if let bootPID, !SessionInfo.isRunning(pid: bootPID) {
+                return (ServerStopNotice(
+                    reason: "shutdown",
+                    title: "\(device.name) was shut down",
+                    detail: "The simulator stopped, and the server with it. Start it again with simtool serve — this page reconnects by itself."
+                ), nil)
+            }
+            let usage = server.usageState()
+            let now = Date()
+            if usage.busy {
+                store.touch(udid: device.udid, at: now)
+            } else if usage.lastUse > renewed {
+                store.touch(udid: device.udid, at: usage.lastUse)
+                renewed = usage.lastUse
+            }
+            guard let lease = store.lease(udid: device.udid) else {
+                // Let go of by hand, or by a reaper that misread the simulator:
+                // this boot is still the server's, so it holds it again.
+                store.take(device, booted: false, bootPID: bootPID, idleTimeout: idleTimeout)
+                LeaseReaper.ensureRunning()
+                continue
+            }
+            guard lease.isIdle(at: now) else { continue }
+            if await SimulatorProcessSnapshot.take().externalUse(of: device) != nil {
+                store.touch(udid: device.udid, at: now)
+                continue
+            }
+            let timeout = SimulatorIdleTimeout.describe(lease.effectiveIdleTimeout)
+            return (ServerStopNotice(
+                reason: "idle",
+                title: "Stopped after \(timeout) unused",
+                detail: "SimTool shut \(device.name) down to save power. Start it again with simtool serve — this page reconnects by itself."
+            ), lease.lastUsedAt)
+        }
+        return (ServerStopNotice(reason: "stopped", title: "The SimTool server stopped", detail: "Start it again with simtool serve — this page reconnects by itself."), nil)
     }
 }
 
@@ -2597,6 +2711,9 @@ struct Run: AsyncParsableCommand {
     @Option(help: "Path to the project config. Defaults to .simtool/config.yml discovered from the working directory upward.")
     var config: String?
 
+    @Option(name: .customLong("idle-timeout"), help: idleTimeoutHelp)
+    var idleTimeout: String?
+
     @OptionGroup var common: CommonJSON
 
     func run() async throws {
@@ -2604,6 +2721,7 @@ struct Run: AsyncParsableCommand {
         SignalTrap.shared.installOnce()
         DebugLog.isEnabled = verbose
         let projectConfig = try ProjectConfigLoader.load(explicitPath: config)
+        let idleTimeoutValue = try SimulatorHold.idleTimeout(flag: idleTimeout, config: projectConfig)
         let buildCache = SimulatorAppBuildCache(simtoolDirectory: projectConfig.simtoolDirectory)
         let buildTimeout = try buildTimeout.map(SimulatorAppBuildSelection.parseTimeout)
 
@@ -2624,9 +2742,12 @@ struct Run: AsyncParsableCommand {
         let simulatorSelector = device ?? projectConfig.simulator
         let booted: SimulatorDevice
         let launch: SimulatorAppLaunchPayload
+        // The build and install hold the simulator up until the server does.
+        var heartbeat: Task<Void, Never>?
         if common.json {
             let resolved = try await SimulatorDeviceClient.resolve(simulatorSelector)
-            booted = try await SimulatorDeviceClient.ensureBooted(resolved)
+            booted = try await SimulatorHold.boot(resolved, idleTimeout: idleTimeoutValue)
+            heartbeat = SimulatorHold.keepAlive(booted.udid)
             launch = try await SimulatorAppLifecycleClient.launch(
                 selection: try projectConfig.buildSelection(for: booted, builder: builder, timeout: buildTimeout),
                 device: booted,
@@ -2635,7 +2756,8 @@ struct Run: AsyncParsableCommand {
             )
         } else {
             let resolved = try await resolveSimulatorWithProgress(simulatorSelector)
-            booted = try await bootSimulatorWithProgress(resolved)
+            booted = try await bootSimulatorWithProgress(resolved, idleTimeout: idleTimeoutValue)
+            heartbeat = SimulatorHold.keepAlive(booted.udid)
             let buildPayload = try await buildAppWithProgress(
                 selection: try projectConfig.buildSelection(for: booted, builder: builder, timeout: buildTimeout),
                 force: force,
@@ -2655,6 +2777,7 @@ struct Run: AsyncParsableCommand {
                 "State logger: \(stateLoggerEnabled ? "on → \(projectConfig.appFacingServerURL)" : "off")",
             ]))
         }
+        heartbeat?.cancel()
         if detach {
             // The device is already booted, so the child reports quickly. It
             // arms the same loggers for the stdout-capture relaunch, keeping
@@ -2664,7 +2787,9 @@ struct Run: AsyncParsableCommand {
                 app: projectConfig.bundleId,
                 verbose: verbose,
                 noNetwork: !networkLoggerEnabled,
-                noState: !stateLoggerEnabled
+                noState: !stateLoggerEnabled,
+                config: config,
+                idleTimeout: idleTimeout
             )
             try reportDetachedSession(session, json: common.json)
             return
@@ -2679,7 +2804,8 @@ struct Run: AsyncParsableCommand {
             printSessionJSON: common.json,
             openBrowser: shouldOpenBrowser(webRequested: web, json: common.json, detachedChild: false),
             sessionId: nil,
-            projectConfig: projectConfig
+            projectConfig: projectConfig,
+            idleTimeout: idleTimeoutValue
         )
     }
 }
@@ -2934,7 +3060,7 @@ struct Open: AsyncParsableCommand {
         }
         let deeplink = try selectDeeplink(in: projectConfig)
         let resolved = try await SimulatorDeviceClient.resolve(projectConfig.simulator)
-        let booted = try await SimulatorDeviceClient.ensureBooted(resolved)
+        let booted = try await SimulatorHold.boot(resolved, idleTimeout: try SimulatorHold.idleTimeout(flag: nil, config: projectConfig))
         let payload = try await SimulatorDeeplinkClient.open(
             name: deeplink.name,
             url: deeplink.url,
@@ -3003,7 +3129,9 @@ struct Interactive: AsyncParsableCommand {
                     if resolved.state != "Booted" {
                         makeNoora().info("Booting \(resolved.name)…")
                     }
-                    booted = try await SimulatorDeviceClient.ensureBooted(resolved)
+                    // Booted for a person to watch in Simulator.app, so not
+                    // SimTool's to shut down when it looks idle to SimTool.
+                    booted = try await SimulatorHold.boot(resolved, idleTimeout: nil, lease: false)
                     device = booted
                     // simctl boots are headless; surface the simulator window.
                     await SimulatorDeviceClient.revealSimulatorApp()

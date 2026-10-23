@@ -880,6 +880,22 @@ enum WebViewerAssets {
           return api("/api/v1/input", { method: "POST", body: JSON.stringify(payload), headers: { "X-SimTool-Source": "viewer" } });
         }
 
+        // SimTool stops a server nobody uses and shuts its simulator down, and what
+        // this page fetches by itself is not use: a tab left open is not a person. A
+        // hand on the page while it is shown is — said at most twice a minute.
+        const PRESENCE_INTERVAL = 30000;
+        let presenceSentAt = -Infinity;
+        function notePresence() {
+          if (document.hidden) return;
+          const now = performance.now();
+          if (now - presenceSentAt < PRESENCE_INTERVAL) return;
+          presenceSentAt = now;
+          fetch("/api/v1/presence", { method: "POST" }).catch(() => {});
+        }
+        for (const type of ["pointerdown", "pointermove", "keydown", "wheel"]) {
+          document.addEventListener(type, notePresence, { capture: true, passive: true });
+        }
+
         // ---- Status message, toasts, announcements ----
 
         let messageTimer = null;
@@ -2159,6 +2175,7 @@ enum WebViewerAssets {
           on("activity", (payload) => applyActivityTopic(payload, false));
           on("device", applyDeviceTopic);
           on("recording", applyRecordingTopic);
+          on("server", applyServerTopic);
         }
 
         // The device's screens changed: a foldable folded, or a screen turned.
@@ -6366,7 +6383,8 @@ enum WebViewerAssets {
           attempt: 0,
           retryAt: 0,
           changedAt: 0,     // performance.now() of the last frame that changed the picture
-          stillBytes: Infinity   // the smallest frame so far: what an unchanged screen costs
+          stillBytes: Infinity,  // the smallest frame so far: what an unchanged screen costs
+          stopped: null     // why the server said it stopped ({title, detail}), until one answers again
         };
         const connectionListeners = [];
         function onConnection(listener) { connectionListeners.push(listener); }
@@ -6541,6 +6559,7 @@ enum WebViewerAssets {
             });
             const reader = response.body.getReader();
             screenState.attempt = 0;
+            screenState.stopped = null;
             setConnection("live");
             if (wasReconnecting) for (const listener of reconnectListeners) listener();
             while (true) {
@@ -6575,7 +6594,8 @@ enum WebViewerAssets {
           const delay = Math.min(5000, 500 * Math.pow(2, screenState.attempt - 1));
           screenState.retryAt = performance.now() + delay;
           setConnection(screenState.attempt > 6 ? "offline" : "reconnecting");
-          $("veilTitle").textContent = screenState.attempt > 6 ? "simtool is not answering" : "Connection to simtool lost";
+          $("veilTitle").textContent = screenState.stopped ? screenState.stopped.title
+            : screenState.attempt > 6 ? "simtool is not answering" : "Connection to simtool lost";
           updateVeilCountdown();
           if (error && screenState.attempt === 1) setMessage("Video stream lost (" + error.message + ") — reconnecting", "err");
           retryTimer = setTimeout(runStream, delay);
@@ -6584,7 +6604,16 @@ enum WebViewerAssets {
         function updateVeilCountdown() {
           if (screenState.connection !== "reconnecting" && screenState.connection !== "offline") return;
           const seconds = Math.max(0, Math.ceil((screenState.retryAt - performance.now()) / 1000));
-          $("veilText").textContent = "Showing the last frame · retrying in " + seconds + " s (attempt " + screenState.attempt + ")";
+          const retrying = "retrying in " + seconds + " s (attempt " + screenState.attempt + ")";
+          $("veilText").textContent = screenState.stopped ? screenState.stopped.detail + " · " + retrying : "Showing the last frame · " + retrying;
+        }
+
+        // The server is about to stop and says why — unused for its idle timeout, its
+        // simulator shut down, stopped by hand — so the veil can say that instead of
+        // only that the connection went.
+        function applyServerTopic(payload) {
+          if (!payload || !payload.stopping) return;
+          screenState.stopped = { title: payload.title, detail: payload.detail };
         }
         setInterval(updateVeilCountdown, 500);
 

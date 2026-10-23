@@ -91,8 +91,9 @@ extension AgentSkill {
           `test run` build for the simulator they launch on — its architecture only.
           `app build` takes `--device` too, to do the same (faster); without it, it
           builds for any simulator. Either build is reused by the others: the target is
-          not part of the cache key. `simtool app build/launch` boots nothing itself —
-          boot first (`xcrun simctl boot <udid>` / open Simulator.app). List devices:
+          not part of the cache key. `app build` boots nothing; every command that
+          drives a simulator — `app launch`, `input`, `ax`, … — boots a shut-down one
+          first and says so (see *Simulator lifecycle* below). List devices:
           `simtool devices --json`.
         - **Build settings**: if the project only builds with extra xcodebuild
           settings (e.g. `MACOSX_DEPLOYMENT_TARGET=15.0` for a macro whose generated
@@ -451,7 +452,8 @@ extension AgentSkill {
         *before* the recorder starts — together with `reset:` and `setup:` — so the video
         holds the test rather than an Xcode build, while the staging still appears in the
         timeline. The server it started is **left running**, because it is what serves
-        the viewer showing that run.
+        the viewer showing that run — until nothing uses it for the idle timeout, when it
+        stops and shuts the simulator down.
 
         Every run is recorded as a reviewable test session — timestamped steps, a screen
         recording and the run's evidence — under `.simtool/test-sessions/<id>/`, where a
@@ -531,12 +533,24 @@ extension AgentSkill {
 
         ## Notes
 
-        - `simtool app build` / `app launch` boot nothing themselves — boot a simulator
-          first (`xcrun simctl boot <udid>` / open Simulator.app) or pass an
-          already-booted device. `simtool serve` and `simtool run` do boot the simulator
-          named under `simulator:` in `.simtool/config.yml` (which is also why a test run
-          that starts its own server can boot it); with nothing named they use whichever
-          simulator is already booted.
+        - **Simulator lifecycle.** A booted simulator burns a core doing nothing, so
+          SimTool shuts down what it holds: a simulator it booted, or one a SimTool
+          server ran on. It goes down when its server stops (`simtool kill`, Ctrl-C), or
+          once nothing used it for the idle timeout — 15 min by default; `idleTimeout:`
+          in `.simtool/config.yml`, `SIMTOOL_IDLE_TIMEOUT`, or `serve`/`run
+          --idle-timeout` (`off` keeps it up). Use is a command, a request, a test run, a
+          person in the viewer — not a viewer tab left open. An `xcodebuild` running on
+          it keeps it up until the run ends.
+          - Let SimTool boot it: don't `xcrun simctl boot` first. Every command that
+            drives a simulator (`app launch`, `input`, `ax`, `serve`, `run`, `test run`)
+            boots a shut-down one itself, with a note on stderr. A simulator you boot by
+            hand and only drive with commands is not SimTool's to shut down.
+          - After a pause the simulator — and its server and viewer — may be gone. That
+            is expected, not a failure: run the next command (or `simtool serve
+            --detach`) and it comes back in ~20–40 s. What the app keeps on disk
+            survives; the running app does not.
+          - `simtool reap --dry-run` lists what SimTool holds and how long it has been
+            unused; `simtool reap --all` shuts it all down now.
         - Scenarios that talk to a real backend (auto-login, remote config) need the
           device to have network access to it; failures are typically logged and leave
           the regular screen for manual entry.

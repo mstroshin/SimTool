@@ -41,8 +41,11 @@ struct Camera: AsyncParsableCommand {
     }
 
     func run() async throws {
-        let device = try await resolveConfiguredDevice(device)
+        let device = try await resolveDeviceToDrive(device)
         let udid = device.udid
+        // The webcam feeds the simulator until Ctrl-C: in use all along.
+        let heartbeat = SimulatorHold.keepAlive(udid)
+        defer { heartbeat.cancel() }
         // A server watching the device owns the camera: it runs the webcam and
         // tells its viewers.
         let server = ActivityReporter(device: device).servers.first.map { SimToolClient(baseURL: $0) }

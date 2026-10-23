@@ -165,6 +165,48 @@ swift run simtool status --json
 swift run simtool kill <session-id> --json
 ```
 
+### Simulators SimTool holds
+
+A booted simulator with its app burns a core or so doing nothing, so nothing
+SimTool brings up stays booted once the work is done. SimTool **holds** a
+simulator it boots — `serve`, `run`, a test run's server, `open`, or any command
+pointed at a simulator that is shut down, which boots it first — and one a SimTool
+server runs on, whoever booted it (a script's `xcrun simctl boot` ahead of
+`serve` included). What it holds, it shuts down:
+
+- **when its server stops** — Ctrl-C, `simtool kill`, a SIGTERM — unless another
+  SimTool server is still on it;
+- **when nothing has used it for the idle timeout** — 15 minutes by default. Use
+  is a command or an agent's request, a test run in progress, a screen recording,
+  or a person in the viewer: a touch, a key, the pointer moving over the page. A
+  viewer tab left open is not use — its own streams and polls do not count, nor
+  do the app's loggers posting events. The server then stops itself, and the
+  viewer says why instead of only that the connection went;
+- **when it was left behind** — booted by a command, or its server SIGKILLed — by
+  the reaper: `simtool reap --watch`, started in the background while SimTool
+  holds any simulator, which exits once it holds none. Stopping the reaper (a
+  SIGTERM, `pkill simtool`) shuts down what only it was watching, unless a
+  command used it in the last minute and a half.
+
+A simulator SimTool never booted or served — an Xcode run, a Device Hub window —
+is never shut down, nor one an `xcodebuild` is running on (by `id=` or `name=` in
+its destination), until that run ends. A hold covers one boot: a simulator shut
+down and booted again outside SimTool is no longer SimTool's.
+
+```sh
+swift run simtool serve --idle-timeout 1h        # this server; `off` keeps it up
+SIMTOOL_IDLE_TIMEOUT=30m swift run simtool run   # whatever this shell starts
+swift run simtool reap --dry-run                 # what SimTool holds, and for how long unused
+swift run simtool reap                           # shut down what is idle, now
+swift run simtool reap --all                     # shut down everything SimTool holds, now
+```
+
+The timeout comes from `--idle-timeout` (`serve`, `run`), then
+`SIMTOOL_IDLE_TIMEOUT`, then `idleTimeout:` in `.simtool/config.yml`. A command
+that boots a simulator says so on stderr, with when SimTool will shut it down
+again. Holds live in `$TMPDIR/simtool/simulators` (one JSON file per simulator,
+plus the reaper's `reaper.log`), so every SimTool process sees them.
+
 ## Automation
 
 ```sh
@@ -408,9 +450,10 @@ swift run simtool test list --json
 
 A running server is not a prerequisite: when none is running, `test run` starts
 one on a free port and leaves it running — it is what serves the viewer, and the
-run just recorded is what the viewer is opened to read. The run prints its address
-and how to stop it; `--stop-server` stops it automatically, which is what a CI job
-wants. One already running for this project is reused and left alone; one
+run just recorded is what the viewer is opened to read — until nothing uses it for
+the idle timeout, when it stops and shuts the simulator down (see *Simulators
+SimTool holds*). The run prints its address and how to stop it; `--stop-server`
+stops it automatically, which is what a CI job wants. One already running for this project is reused and left alone; one
 belonging to another checkout is not — the run says so and starts its own instead.
 `test list` applies the same rule without the autostart: it reads a server started
 for this project, or the one `--server` names, and never another checkout's
@@ -933,6 +976,7 @@ build:
 server:                             # optional viewer settings
   host: 127.0.0.1                   # the address it listens on; 0.0.0.0 opens it to the network
   port: 3200
+# idleTimeout: 30m                  # optional: shut the simulator down after this long unused (default 15m; off)
 deeplinks:
   - name: Details
     url: myapp://items/42

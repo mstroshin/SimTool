@@ -145,7 +145,9 @@ Three things, and no more:
 
 **No `serve` step is needed.** With no server running, `simtool test run` starts
 one on a free port and **leaves it running** — that server is what serves the
-viewer, and the run it just recorded is what you open the viewer to read. The run
+viewer, and the run it just recorded is what you open the viewer to read. Not
+forever: once nothing uses it for the idle timeout (15 min by default), it stops
+and shuts the simulator down, and the next run starts and boots them again. The run
 prints its address and how to stop it (`simtool kill <id>`); `--stop-server` stops
 it automatically instead, which is what a CI job wants. A server already running
 *for this project* is reused and left alone either way. One belonging to another

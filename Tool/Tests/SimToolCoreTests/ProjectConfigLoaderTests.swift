@@ -4,6 +4,22 @@ import Yams
 @testable import SimToolCore
 
 final class ProjectConfigLoaderTests: XCTestCase {
+    // How long a simulator SimTool holds may sit unused: unset is the
+    // default, `off` never, anything else is a duration.
+    func testIdleTimeoutReadsAsADuration() throws {
+        for (value, expected) in [("15m", 900.0), ("90", 90), ("off", 0), ("\"off\"", 0)] as [(String, TimeInterval)] {
+            let root = try makeTempDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            try writeConfig(minimalYAML + "\nidleTimeout: \(value)\n", in: root)
+            XCTAssertEqual(try ProjectConfigLoader.load(startDirectory: root).idleTimeout, expected, value)
+        }
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try writeConfig(minimalYAML, in: root)
+        XCTAssertNil(try ProjectConfigLoader.load(startDirectory: root).idleTimeout)
+        try assertLoadThrows(minimalYAML + "\nidleTimeout: soon\n", contains: "Invalid `idleTimeout`")
+    }
+
     func testLoadsConfigFromWorkingDirectory() throws {
         let root = try makeTempDirectory()
         defer { try? FileManager.default.removeItem(at: root) }

@@ -109,8 +109,39 @@ public enum SimulatorDeviceClient {
     /// complete) via `simctl bootstatus -b` when it is not. Returns the device
     /// with refreshed state. simctl operations such as install, launch, and
     /// openurl require a booted device.
-    public static func ensureBooted(_ device: SimulatorDevice, timeoutSeconds: TimeInterval? = 300) async throws -> SimulatorDevice {
-        if device.state == "Booted" { return device }
+    ///
+    /// A simulator SimTool boots is SimTool's to shut down again once nothing
+    /// uses it (`SimulatorLease`, under `idleTimeout`; nil for the default) —
+    /// unless `lease` is false, for one handed to a person to watch. One that
+    /// is already booted, or booting by someone else's hand, is left as it is,
+    /// and a lease SimTool holds on it is renewed: using a simulator does not
+    /// make it SimTool's.
+    public static func ensureBooted(
+        _ device: SimulatorDevice,
+        timeoutSeconds: TimeInterval? = 300,
+        lease: Bool = true,
+        idleTimeout: TimeInterval? = nil
+    ) async throws -> SimulatorDevice {
+        if device.state == "Booted" {
+            SimulatorLeaseStore.shared.touch(udid: device.udid)
+            return device
+        }
+        // Booted here only if this `simctl boot` takes it out of Shutdown: a
+        // listing goes stale, and Xcode may be booting it right now — waiting
+        // for that boot must not make the simulator SimTool's.
+        let boot = try await ProcessRunner.runXcrun(["simctl", "boot", device.udid])
+        let bootedHere = boot.status == 0
+        if !bootedHere, !boot.stderrString.contains("current state") {
+            let detail = boot.stderrString.isEmpty ? boot.stdoutString : boot.stderrString
+            throw SimToolError("Failed to boot simulator \(device.name) (\(device.udid)): \(detail.trimmingCharacters(in: .whitespacesAndNewlines))")
+        }
+        if bootedHere, lease {
+            let bootPID = await SimulatorProcessSnapshot.take().bootPID(of: device.udid)
+            SimulatorLeaseStore.shared.take(device, booted: true, bootPID: bootPID, idleTimeout: idleTimeout)
+        } else {
+            SimulatorLeaseStore.shared.touch(udid: device.udid)
+        }
+        // Until it has finished booting, whoever started it.
         let output = try await ProcessRunner.run(
             executable: URL(fileURLWithPath: "/usr/bin/xcrun"),
             arguments: ["simctl", "bootstatus", device.udid, "-b"],
@@ -120,21 +151,21 @@ public enum SimulatorDeviceClient {
             let detail = output.stderrString.isEmpty ? output.stdoutString : output.stderrString
             throw SimToolError("Failed to boot simulator \(device.name) (\(device.udid)): \(detail.trimmingCharacters(in: .whitespacesAndNewlines))")
         }
-        // We booted it, so we own shutting it down on exit (simulators that were
-        // already booted take the early return above and are never recorded).
-        BootedSimulatorRegistry.shared.record(device.udid)
         if let refreshed = try? await resolve(device.udid) { return refreshed }
         return device
     }
 
     /// Powers a simulator down. Best-effort: a failure (already shut down, gone)
-    /// must never block process teardown, so errors are swallowed.
-    public static func shutdown(_ udid: String) async {
-        _ = try? await ProcessRunner.run(
+    /// must never block process teardown, so errors are swallowed — and
+    /// reported as false, for a caller that keeps track of it.
+    @discardableResult
+    public static func shutdown(_ udid: String) async -> Bool {
+        let output = try? await ProcessRunner.run(
             executable: URL(fileURLWithPath: "/usr/bin/xcrun"),
             arguments: ["simctl", "shutdown", udid],
             timeoutSeconds: 30
         )
+        return output?.status == 0
     }
 
     /// Brings the Simulator.app UI on screen. `simctl` boots devices headless;

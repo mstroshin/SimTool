@@ -67,6 +67,22 @@ function postInput(payload) {
   return api("/api/v1/input", { method: "POST", body: JSON.stringify(payload), headers: { "X-SimTool-Source": "viewer" } });
 }
 
+// SimTool stops a server nobody uses and shuts its simulator down, and what
+// this page fetches by itself is not use: a tab left open is not a person. A
+// hand on the page while it is shown is — said at most twice a minute.
+const PRESENCE_INTERVAL = 30000;
+let presenceSentAt = -Infinity;
+function notePresence() {
+  if (document.hidden) return;
+  const now = performance.now();
+  if (now - presenceSentAt < PRESENCE_INTERVAL) return;
+  presenceSentAt = now;
+  fetch("/api/v1/presence", { method: "POST" }).catch(() => {});
+}
+for (const type of ["pointerdown", "pointermove", "keydown", "wheel"]) {
+  document.addEventListener(type, notePresence, { capture: true, passive: true });
+}
+
 // ---- Status message, toasts, announcements ----
 
 let messageTimer = null;

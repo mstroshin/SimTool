@@ -40,6 +40,7 @@ function startInspectorEvents() {
   on("activity", (payload) => applyActivityTopic(payload, false));
   on("device", applyDeviceTopic);
   on("recording", applyRecordingTopic);
+  on("server", applyServerTopic);
 }
 
 // The device's screens changed: a foldable folded, or a screen turned.

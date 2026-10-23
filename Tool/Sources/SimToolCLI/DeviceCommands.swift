@@ -83,7 +83,7 @@ struct UI: AsyncParsableCommand {
     @OptionGroup var common: CommonJSON
 
     func run() async throws {
-        let device = try await resolveConfiguredDevice(device)
+        let device = try await resolveDeviceToDrive(device)
         guard let setting else {
             let settings = await SimulatorDeviceControl.read(deviceUDID: device.udid, parts: [.appearance, .contentSize, .increaseContrast, .accessibility])
             try printDeviceSettings(settings, json: common.json, lines: [
@@ -144,7 +144,7 @@ struct Debug: AsyncParsableCommand {
     @OptionGroup var common: CommonJSON
 
     func run() async throws {
-        let device = try await resolveConfiguredDevice(device)
+        let device = try await resolveDeviceToDrive(device)
         if option?.lowercased() == "memory-warning" {
             guard state == nil else { throw ValidationError("memory-warning takes no value") }
             try await runDeviceControl(DeviceControlPayload(action: "memory-warning"), device: device, json: common.json)
@@ -184,7 +184,7 @@ struct Biometrics: AsyncParsableCommand {
     @OptionGroup var common: CommonJSON
 
     func run() async throws {
-        let device = try await resolveConfiguredDevice(device)
+        let device = try await resolveDeviceToDrive(device)
         guard let action else {
             let settings = await SimulatorDeviceControl.read(deviceUDID: device.udid, deviceType: device.deviceTypeIdentifier, parts: [.biometrics])
             let state = settings.biometrics
@@ -229,7 +229,7 @@ struct Push: AsyncParsableCommand {
     }
 
     func run() async throws {
-        let device = try await resolveConfiguredDevice(device)
+        let device = try await resolveDeviceToDrive(device)
         guard let bundleId = configuredApp(app) else { throw ValidationError("Pass --app <bundle-id>, or run inside a project whose config names bundleId") }
         let data: Data
         if let alert {
@@ -288,7 +288,7 @@ struct StatusBar: AsyncParsableCommand {
     }
 
     func run() async throws {
-        let device = try await resolveConfiguredDevice(device)
+        let device = try await resolveDeviceToDrive(device)
         let control: DeviceControlPayload
         switch preset?.lowercased() {
         case "clear": control = DeviceControlPayload(action: "status-bar", value: "clear")
@@ -330,7 +330,7 @@ struct Location: AsyncParsableCommand {
     @OptionGroup var common: CommonJSON
 
     func run() async throws {
-        let device = try await resolveConfiguredDevice(device)
+        let device = try await resolveDeviceToDrive(device)
         guard let action else {
             let settings = await SimulatorDeviceControl.read(deviceUDID: device.udid, parts: [.location])
             try printDeviceSettings(settings, json: common.json, lines: [("location", settings.location?.summary ?? "none set by SimTool")])
@@ -368,7 +368,7 @@ struct Settings: AsyncParsableCommand {
     @OptionGroup var common: CommonJSON
 
     func run() async throws {
-        let device = try await resolveConfiguredDevice(device)
+        let device = try await resolveDeviceToDrive(device)
         let settings = await SimulatorDeviceControl.read(deviceUDID: device.udid, deviceType: device.deviceTypeIdentifier)
         var lines: [(String, String?)] = [
             ("appearance", settings.appearance),
@@ -416,7 +416,7 @@ struct Permissions: AsyncParsableCommand {
     @OptionGroup var common: CommonJSON
 
     func run() async throws {
-        let device = try await resolveConfiguredDevice(device)
+        let device = try await resolveDeviceToDrive(device)
         guard let bundleId = configuredApp(app) else { throw ValidationError("Pass --app <bundle-id>, or run inside a project whose config names bundleId") }
         guard let decision else {
             let states = try await SimulatorPermissionClient.read(bundleId: bundleId, deviceUDID: device.udid)
@@ -466,7 +466,7 @@ struct Keychain: AsyncParsableCommand {
     }
 
     func run() async throws {
-        let device = try await resolveConfiguredDevice(device)
+        let device = try await resolveDeviceToDrive(device)
         let certificate = try file.map { try Data(contentsOf: URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath)).base64EncodedString() }
         try await runDeviceControl(DeviceControlPayload(action: "keychain", value: action.lowercased(), certificate: certificate), device: device, json: common.json)
     }
@@ -486,7 +486,7 @@ extension AppCommand {
         @OptionGroup var common: CommonJSON
 
         func run() async throws {
-            let device = try await resolveConfiguredDevice(device)
+            let device = try await resolveDeviceToDrive(device)
             guard let bundleId = configuredApp(app) else { throw ValidationError("Pass --app <bundle-id>, or run inside a project whose config names bundleId") }
             if let reveal {
                 let path = try await SimulatorAppInfoClient.reveal(reveal, bundleId: bundleId, deviceUDID: device.udid)
@@ -522,7 +522,7 @@ extension AppCommand {
         @OptionGroup var common: CommonJSON
 
         func run() async throws {
-            let device = try await resolveConfiguredDevice(device)
+            let device = try await resolveDeviceToDrive(device)
             let installed = try await SimulatorAppInstaller.install(URL(fileURLWithPath: (path as NSString).expandingTildeInPath), deviceUDID: device.udid)
             await ActivityReporter(device: device).done(kind: "install", title: "Install " + installed.name, detail: installed.bundleId)
             if common.json { try printJSON(installed) } else { print("Installed \(installed.name) (\(installed.bundleId))") }
@@ -548,7 +548,7 @@ extension Input {
         @OptionGroup var common: CommonJSON
 
         func run() async throws {
-            let device = try await resolveConfiguredDevice(device)
+            let device = try await resolveDeviceToDrive(device)
             guard let orientation else {
                 let now = try await SimulatorOrientation.read(deviceUDID: device.udid)
                 if common.json { try printJSON(["orientation": now.rawValue]) } else { print(now.rawValue) }
